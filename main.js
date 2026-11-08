@@ -7,7 +7,7 @@ const extract = require('extract-zip');
 
 // ====== এখানে আপনার লিংক বসান ======
 // GitHub Release-এ আপলোড করা Apache zip-এর সরাসরি লিংক
-const DOWNLOAD_URL = 'https://example.com/apache24.zip';
+const DOWNLOAD_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
 
 // Microsoft-এর স্থির লিংক: সবসময় সর্বশেষ সাপোর্টেড VC++ Redistributable (x64) দেয়
 const VCREDIST_URL = 'https://aka.ms/vc14/vc_redist.x64.exe';
