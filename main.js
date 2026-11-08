@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const { spawn, exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -20,8 +20,24 @@ const VCREDIST_URL = 'https://aka.ms/vc14/vc_redist.x64.exe';
 const TOOLS_DIR = path.join(app.getPath('userData'), 'tools');
 const VCREDIST_PATH = path.join(TOOLS_DIR, 'vc_redist.x64.exe');
 
-// ওয়েবসাইটের ফাইল রাখার ফোল্ডার: Documents\my-laragon\www
-const WWW_DIR = path.join(app.getPath('documents'), 'my-laragon', 'www');
+// ---------- সেটিংস (www ফোল্ডার ইউজার বদলাতে পারবে) ----------
+const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
+const DEFAULT_WWW = path.join(app.getPath('documents'), 'my-laragon', 'www');
+
+function loadSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+function saveSettings(obj) {
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(obj, null, 2));
+}
+
+const settings = loadSettings();
+let WWW_DIR = settings.wwwDir || DEFAULT_WWW; // ওয়েবসাইটের ফাইল রাখার ফোল্ডার
 
 // খালি পোর্ট খুঁজে বের করা (৯০০০ অন্য কেউ নিয়ে রাখলে সমস্যা এড়াতে)
 function getFreePort() {
@@ -141,7 +157,7 @@ let busy = false;
 function createWindow() {
   win = new BrowserWindow({
     width: 500,
-    height: 420,
+    height: 520,
     webPreferences: { preload: path.join(__dirname, 'preload.js') },
   });
   win.loadFile('index.html');
@@ -266,9 +282,9 @@ async function ensureService(svc) {
 // www ফোল্ডার ও টেস্ট ফাইল
 function ensureWww() {
   fs.mkdirSync(WWW_DIR, { recursive: true });
-  const indexPhp = path.join(WWW_DIR, 'index.php');
-  if (!fs.existsSync(indexPhp) && !fs.existsSync(path.join(WWW_DIR, 'index.html'))) {
-    fs.writeFileSync(indexPhp, '<?php phpinfo();\n');
+  // ফোল্ডার একদম খালি হলেই টেস্ট ফাইল বানানো (ইউজারের নিজের ফোল্ডারে বাড়তি ফাইল ফেলব না)
+  if (fs.readdirSync(WWW_DIR).length === 0) {
+    fs.writeFileSync(path.join(WWW_DIR, 'index.php'), '<?php phpinfo();\n');
   }
 }
 
@@ -353,7 +369,61 @@ ipcMain.handle('service:stop', () => {
   return `${SERVICES[id].label} বন্ধ হয়েছে`;
 });
 
-app.whenReady().then(createWindow);
+// ---------- www ফোল্ডার ----------
+ipcMain.handle('www:get', () => WWW_DIR);
+
+ipcMain.handle('www:choose', async () => {
+  if (running) {
+    return { ok: false, path: WWW_DIR, message: 'আগে সার্ভার বন্ধ করুন, তারপর ফোল্ডার বদলান' };
+  }
+  const r = await dialog.showOpenDialog(win, {
+    title: 'ওয়েবসাইটের ফোল্ডার বেছে নিন',
+    defaultPath: WWW_DIR,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (r.canceled || !r.filePaths[0]) return { ok: false, path: WWW_DIR };
+  WWW_DIR = r.filePaths[0];
+  settings.wwwDir = WWW_DIR;
+  saveSettings(settings);
+  return { ok: true, path: WWW_DIR };
+});
+
+ipcMain.handle('www:open', () => {
+  fs.mkdirSync(WWW_DIR, { recursive: true });
+  return shell.openPath(WWW_DIR);
+});
+
+// প্রথমবার চালালে www ফোল্ডার কোথায় হবে জিজ্ঞেস করা
+// (async: window পুরো লোড হওয়ার পর দেখানো হয়, নাহলে window ফাঁকা থাকে)
+async function askWwwFolderFirstRun() {
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    title: 'ওয়েবসাইটের ফোল্ডার',
+    message: 'আপনার ওয়েবসাইটের ফাইল কোন ফোল্ডারে রাখবেন?',
+    detail: `ডিফল্ট: ${DEFAULT_WWW}\n\nপরে যেকোনো সময় বদলানো যাবে।`,
+    buttons: ['ডিফল্ট রাখুন', 'অন্য ফোল্ডার বেছে নিন'],
+    defaultId: 0,
+    cancelId: 0,
+  });
+  if (response === 1) {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'ওয়েবসাইটের ফোল্ডার বেছে নিন',
+      defaultPath: DEFAULT_WWW,
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (!r.canceled && r.filePaths[0]) WWW_DIR = r.filePaths[0];
+  }
+  settings.wwwDir = WWW_DIR;
+  saveSettings(settings);
+  win.webContents.send('www:changed', WWW_DIR);
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  if (!settings.wwwDir) {
+    win.webContents.once('did-finish-load', () => askWwwFolderFirstRun());
+  }
+});
 
 app.on('before-quit', () => {
   if (running) running.procs.forEach((p) => killTree(p.pid));

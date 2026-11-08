@@ -9,6 +9,9 @@
     .choice label { margin-right: 20px; cursor: pointer; font-size: 16px; }
     button { padding: 10px 20px; margin-right: 8px; cursor: pointer; }
     #status { margin-top: 20px; font-weight: bold; word-break: break-word; }
+    .www { margin-top: 24px; padding-top: 16px; border-top: 1px solid #ccc; }
+    #wwwPath { font-family: monospace; word-break: break-all; margin: 8px 0 12px; }
+    .www button { padding: 6px 14px; }
   </style>
 </head>
 <body>
@@ -23,6 +26,13 @@
   <button id="start">Start</button>
   <button id="stop">Stop</button>
   <p id="status">অপেক্ষা করছে...</p>
+
+  <div class="www">
+    <strong>ওয়েবসাইট ফোল্ডার (www):</strong>
+    <div id="wwwPath">...</div>
+    <button id="changeWww">ফোল্ডার বদলান</button>
+    <button id="openWww">ফোল্ডার খুলুন</button>
+  </div>
 
   <script src="renderer.js"></script>
 </body>
