@@ -6,27 +6,65 @@ const https = require('https');
 const extract = require('extract-zip');
 
 // ====== এখানে আপনার লিংক বসান ======
-// GitHub Release-এ আপলোড করা Apache zip-এর সরাসরি লিংক
-const DOWNLOAD_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
+const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
+// Nginx zip আপলোড করার পর তার আসল নাম বসান (nginx.org থেকে নামানো Windows zip)
+const NGINX_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/nginx-1.30.6.zip';
 
-// Microsoft-এর স্থির লিংক: সবসময় সর্বশেষ সাপোর্টেড VC++ Redistributable (x64) দেয়
+// Microsoft-এর স্থির লিংক: সর্বশেষ সাপোর্টেড VC++ Redistributable (x64)
 const VCREDIST_URL = 'https://aka.ms/vc14/vc_redist.x64.exe';
 // ====================================
 
 // অ্যাপের নিজস্ব ডাটা ফোল্ডার: C:\Users\<name>\AppData\Roaming\my-laragon
 const TOOLS_DIR = path.join(app.getPath('userData'), 'tools');
-const APACHE_DIR = path.join(TOOLS_DIR, 'Apache24');
-const APACHE_EXE = path.join(APACHE_DIR, 'bin', 'httpd.exe');
-const ZIP_PATH = path.join(TOOLS_DIR, 'apache.zip');
 const VCREDIST_PATH = path.join(TOOLS_DIR, 'vc_redist.x64.exe');
 
+// ---------- সার্ভিসের তালিকা ----------
+// নতুন সার্ভিস (PHP, MySQL...) যোগ করতে এখানে একটা এন্ট্রি বাড়ালেই হবে
+function makeService(id, label, url, folder, exeRelPath, opts = {}) {
+  const dir = path.join(TOOLS_DIR, folder);
+  return {
+    id,
+    label,
+    url,
+    dir,
+    exe: path.join(dir, exeRelPath),
+    needsVC: !!opts.needsVC,
+    afterExtract: opts.afterExtract || null,
+    args: opts.args || (() => []),
+  };
+}
+
+const SERVICES = {
+  apache: makeService('apache', 'Apache', APACHE_URL, 'Apache24', path.join('bin', 'httpd.exe'), {
+    needsVC: true,
+    afterExtract: (dir) => {
+      // httpd.conf-এ SRVROOT ঠিক করা
+      const confPath = path.join(dir, 'conf', 'httpd.conf');
+      let conf = fs.readFileSync(confPath, 'utf8');
+      const root = dir.replace(/\\/g, '/');
+      conf = conf.replace(/Define SRVROOT ".*"/, `Define SRVROOT "${root}"`);
+      fs.writeFileSync(confPath, conf);
+    },
+  }),
+  nginx: makeService('nginx', 'Nginx', NGINX_URL, 'nginx', 'nginx.exe', {
+    afterExtract: (dir) => {
+      // Nginx-এর logs ও temp ফোল্ডার থাকতে হয়
+      fs.mkdirSync(path.join(dir, 'logs'), { recursive: true });
+      fs.mkdirSync(path.join(dir, 'temp'), { recursive: true });
+    },
+    // -p দিয়ে Nginx-কে তার নিজের ফোল্ডার চিনিয়ে দেওয়া
+    args: (dir) => ['-p', dir.replace(/\\/g, '/') + '/'],
+  }),
+};
+
 let win = null;
-let apacheProcess = null;
+let running = null; // { id, proc } — একসময়ে একটাই সার্ভার চলবে (পোর্ট ৮০)
+let busy = false;
 
 function createWindow() {
   win = new BrowserWindow({
     width: 500,
-    height: 400,
+    height: 420,
     webPreferences: { preload: path.join(__dirname, 'preload.js') },
   });
   win.loadFile('index.html');
@@ -36,12 +74,15 @@ function sendStatus(msg) {
   if (win) win.webContents.send('status', msg);
 }
 
+function killTree(pid) {
+  exec(`taskkill /pid ${pid} /t /f`);
+}
+
 // ফাইল ডাউনলোড (রিডাইরেক্ট সহ)
 function download(url, dest, label = 'ডাউনলোড হচ্ছে') {
   return new Promise((resolve, reject) => {
     https
       .get(url, (res) => {
-        // রিডাইরেক্ট হলে নতুন লিংকে যাও (relative লিংকও সামলায়)
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
           const next = new URL(res.headers.location, url).toString();
@@ -102,51 +143,93 @@ async function ensureVCRedist() {
   fs.unlinkSync(VCREDIST_PATH);
 }
 
-// ---------- Apache ----------
-async function ensureApache() {
-  if (fs.existsSync(APACHE_EXE)) return;
+// ---------- সার্ভিস ইনস্টল (সব সার্ভিসের জন্য একই কোড) ----------
+function findTopDir(parent) {
+  const entry = fs.readdirSync(parent, { withFileTypes: true }).find((e) => e.isDirectory());
+  if (!entry) throw new Error('zip-এর ভেতরে কোনো ফোল্ডার পাওয়া যায়নি');
+  return path.join(parent, entry.name);
+}
+
+async function ensureService(svc) {
+  if (fs.existsSync(svc.exe)) return;
 
   fs.mkdirSync(TOOLS_DIR, { recursive: true });
-  sendStatus('Apache পাওয়া যায়নি, ডাউনলোড শুরু হচ্ছে...');
-  await download(DOWNLOAD_URL, ZIP_PATH, 'Apache ডাউনলোড হচ্ছে');
+  const zipPath = path.join(TOOLS_DIR, svc.id + '.zip');
+  const tmpDir = path.join(TOOLS_DIR, '_tmp_' + svc.id);
+
+  sendStatus(`${svc.label} পাওয়া যায়নি, ডাউনলোড শুরু হচ্ছে...`);
+  await download(svc.url, zipPath, `${svc.label} ডাউনলোড হচ্ছে`);
 
   sendStatus('ফাইল খোলা হচ্ছে...');
-  await extract(ZIP_PATH, { dir: TOOLS_DIR });
-  fs.unlinkSync(ZIP_PATH);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  await extract(zipPath, { dir: tmpDir });
 
-  // httpd.conf-এ SRVROOT ঠিক করা
-  const confPath = path.join(APACHE_DIR, 'conf', 'httpd.conf');
-  let conf = fs.readFileSync(confPath, 'utf8');
-  const root = APACHE_DIR.replace(/\\/g, '/');
-  conf = conf.replace(/Define SRVROOT ".*"/, `Define SRVROOT "${root}"`);
-  fs.writeFileSync(confPath, conf);
+  // zip-এর ভেতরের প্রথম ফোল্ডারটা (যেমন nginx-1.xx.x) আমাদের নির্দিষ্ট নামে সরানো
+  const top = findTopDir(tmpDir);
+  fs.rmSync(svc.dir, { recursive: true, force: true });
+  fs.renameSync(top, svc.dir);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  fs.unlinkSync(zipPath);
 
-  sendStatus('Apache ইনস্টল সম্পন্ন');
+  if (svc.afterExtract) svc.afterExtract(svc.dir);
+  sendStatus(`${svc.label} ইনস্টল সম্পন্ন`);
 }
 
 // ---------- IPC ----------
-ipcMain.handle('apache:start', async () => {
-  if (apacheProcess) return 'Apache আগে থেকেই চলছে';
+ipcMain.handle('service:start', async (_event, id) => {
+  const svc = SERVICES[id];
+  if (!svc) return 'সমস্যা: অজানা সার্ভার';
+  if (busy) return 'একটা কাজ চলছে, একটু অপেক্ষা করুন...';
+  if (running) {
+    return running.id === id
+      ? `${svc.label} আগে থেকেই চলছে`
+      : `আগে ${SERVICES[running.id].label} বন্ধ করুন (দুটো একসাথে পোর্ট ৮০ নিতে পারে না)`;
+  }
+
+  busy = true;
   try {
-    await ensureVCRedist();
-    await ensureApache();
+    if (svc.needsVC) await ensureVCRedist();
+    await ensureService(svc);
+
+    const proc = spawn(svc.exe, svc.args(svc.dir), { cwd: svc.dir, windowsHide: true });
+    let output = '';
+    proc.stdout.on('data', (d) => (output += d));
+    proc.stderr.on('data', (d) => (output += d));
+
+    // ১.৫ সেকেন্ডের মধ্যে বন্ধ হয়ে গেলে বুঝব চালু হয়নি
+    const failed = await new Promise((resolve) => {
+      proc.once('error', (e) => resolve(e.message));
+      proc.once('exit', (code) => resolve(`বন্ধ হয়ে গেছে (কোড ${code})`));
+      setTimeout(() => resolve(null), 1500);
+    });
+
+    if (failed) {
+      const logPath = path.join(svc.dir, 'logs', 'error.log');
+      return `সমস্যা: ${svc.label} চালু হয়নি, ${failed}. ${output.trim().slice(0, 200)} লগ: ${logPath}`;
+    }
+
+    running = { id, proc };
+    proc.on('exit', () => {
+      if (running && running.proc === proc) running = null;
+    });
+    return `${svc.label} চালু হয়েছে`;
   } catch (err) {
     return 'সমস্যা: ' + err.message;
+  } finally {
+    busy = false;
   }
-  apacheProcess = spawn(APACHE_EXE, [], { windowsHide: true });
-  apacheProcess.on('exit', () => { apacheProcess = null; });
-  return 'Apache চালু হয়েছে';
 });
 
-ipcMain.handle('apache:stop', () => {
-  if (!apacheProcess) return 'Apache চলছে না';
-  exec(`taskkill /pid ${apacheProcess.pid} /t /f`);
-  apacheProcess = null;
-  return 'Apache বন্ধ হয়েছে';
+ipcMain.handle('service:stop', () => {
+  if (!running) return 'কোনো সার্ভার চলছে না';
+  const { id, proc } = running;
+  killTree(proc.pid);
+  running = null;
+  return `${SERVICES[id].label} বন্ধ হয়েছে`;
 });
 
 app.whenReady().then(createWindow);
 
 app.on('before-quit', () => {
-  if (apacheProcess) exec(`taskkill /pid ${apacheProcess.pid} /t /f`);
+  if (running) killTree(running.proc.pid);
 });

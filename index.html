@@ -5,15 +5,25 @@
   <title>My Laragon</title>
   <style>
     body { font-family: sans-serif; padding: 24px; }
+    .choice { margin: 16px 0; }
+    .choice label { margin-right: 20px; cursor: pointer; font-size: 16px; }
     button { padding: 10px 20px; margin-right: 8px; cursor: pointer; }
-    #status { margin-top: 20px; font-weight: bold; }
+    #status { margin-top: 20px; font-weight: bold; word-break: break-word; }
   </style>
 </head>
 <body>
   <h2>My Laragon</h2>
-  <button id="start">Start Apache</button>
-  <button id="stop">Stop Apache</button>
+
+  <div class="choice">
+    <strong>ওয়েব সার্ভার:</strong><br><br>
+    <label><input type="radio" name="server" value="apache" checked> Apache</label>
+    <label><input type="radio" name="server" value="nginx"> Nginx</label>
+  </div>
+
+  <button id="start">Start</button>
+  <button id="stop">Stop</button>
   <p id="status">অপেক্ষা করছে...</p>
+
   <script src="renderer.js"></script>
 </body>
 </html>
