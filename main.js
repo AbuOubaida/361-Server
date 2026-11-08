@@ -3,12 +3,14 @@ const { spawn, exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
+const net = require('net');
 const extract = require('extract-zip');
 
 // ====== এখানে আপনার লিংক বসান ======
 const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
-// Nginx zip আপলোড করার পর তার আসল নাম বসান (nginx.org থেকে নামানো Windows zip)
 const NGINX_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/nginx-1.30.6.zip';
+// PHP zip-এর আসল নাম দিন (Release-এ আপলোড করা ফাইলের নাম)
+const PHP_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/php-8.5.12-nts-Win32-vs17-x64.zip';
 
 // Microsoft-এর স্থির লিংক: সর্বশেষ সাপোর্টেড VC++ Redistributable (x64)
 const VCREDIST_URL = 'https://aka.ms/vc14/vc_redist.x64.exe';
@@ -18,8 +20,22 @@ const VCREDIST_URL = 'https://aka.ms/vc14/vc_redist.x64.exe';
 const TOOLS_DIR = path.join(app.getPath('userData'), 'tools');
 const VCREDIST_PATH = path.join(TOOLS_DIR, 'vc_redist.x64.exe');
 
+// ওয়েবসাইটের ফাইল রাখার ফোল্ডার: Documents\my-laragon\www
+const WWW_DIR = path.join(app.getPath('documents'), 'my-laragon', 'www');
+
+// খালি পোর্ট খুঁজে বের করা (৯০০০ অন্য কেউ নিয়ে রাখলে সমস্যা এড়াতে)
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
 // ---------- সার্ভিসের তালিকা ----------
-// নতুন সার্ভিস (PHP, MySQL...) যোগ করতে এখানে একটা এন্ট্রি বাড়ালেই হবে
 function makeService(id, label, url, folder, exeRelPath, opts = {}) {
   const dir = path.join(TOOLS_DIR, folder);
   return {
@@ -27,18 +43,79 @@ function makeService(id, label, url, folder, exeRelPath, opts = {}) {
     label,
     url,
     dir,
+    exeRel: exeRelPath,
     exe: path.join(dir, exeRelPath),
     needsVC: !!opts.needsVC,
+    usesPHP: !!opts.usesPHP,
     afterExtract: opts.afterExtract || null,
+    beforeStart: opts.beforeStart || null,
     args: opts.args || (() => []),
   };
 }
 
+// php.ini তৈরি ও দরকারি extension চালু করা
+function setupPhpIni(dir) {
+  const dev = path.join(dir, 'php.ini-development');
+  const ini = path.join(dir, 'php.ini');
+  let txt = fs.readFileSync(dev, 'utf8');
+  txt = txt.replace(/^;\s*extension_dir\s*=\s*"ext"/m, 'extension_dir = "ext"');
+  txt = txt.replace(
+    /^;\s*(extension=(mbstring|openssl|curl|mysqli|pdo_mysql|fileinfo|gd|zip|intl))\s*$/gm,
+    '$1'
+  );
+  txt = txt.replace(/^;date\.timezone =.*$/m, 'date.timezone = Asia/Dhaka');
+  // একই extension দুইবার লোড হওয়া এড়াতে ডুপ্লিকেট লাইন বাদ
+  const seen = new Set();
+  txt = txt
+    .split('\n')
+    .filter((line) => {
+      const m = line.match(/^extension=(\w+)/);
+      if (!m) return true;
+      if (seen.has(m[1])) return false;
+      seen.add(m[1]);
+      return true;
+    })
+    .join('\n');
+  fs.writeFileSync(ini, txt);
+}
+
+// Nginx-এর কনফিগ প্রতিবার চালুর সময় লেখা হয় (www পথ ও PHP জোড়া সহ)
+function writeNginxConf(svc, phpPort) {
+  const www = WWW_DIR.replace(/\\/g, '/');
+  const conf = [
+    'worker_processes 1;',
+    'events { worker_connections 1024; }',
+    'http {',
+    '  include mime.types;',
+    '  default_type application/octet-stream;',
+    '  sendfile on;',
+    '  server {',
+    '    listen 80;',
+    '    server_name localhost;',
+    `    root "${www}";`,
+    '    index index.php index.html;',
+    '    location / { try_files $uri $uri/ =404; }',
+    '    location ~ \\.php$ {',
+    `      fastcgi_pass 127.0.0.1:${phpPort};`,
+    '      fastcgi_index index.php;',
+    '      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;',
+    '      include fastcgi_params;',
+    '    }',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  fs.writeFileSync(path.join(svc.dir, 'conf', 'nginx.conf'), conf);
+}
+
 const SERVICES = {
+  php: makeService('php', 'PHP', PHP_URL, 'php', 'php-cgi.exe', {
+    needsVC: true,
+    afterExtract: setupPhpIni,
+  }),
   apache: makeService('apache', 'Apache', APACHE_URL, 'Apache24', path.join('bin', 'httpd.exe'), {
     needsVC: true,
     afterExtract: (dir) => {
-      // httpd.conf-এ SRVROOT ঠিক করা
       const confPath = path.join(dir, 'conf', 'httpd.conf');
       let conf = fs.readFileSync(confPath, 'utf8');
       const root = dir.replace(/\\/g, '/');
@@ -47,18 +124,18 @@ const SERVICES = {
     },
   }),
   nginx: makeService('nginx', 'Nginx', NGINX_URL, 'nginx', 'nginx.exe', {
+    usesPHP: true,
     afterExtract: (dir) => {
-      // Nginx-এর logs ও temp ফোল্ডার থাকতে হয়
       fs.mkdirSync(path.join(dir, 'logs'), { recursive: true });
       fs.mkdirSync(path.join(dir, 'temp'), { recursive: true });
     },
-    // -p দিয়ে Nginx-কে তার নিজের ফোল্ডার চিনিয়ে দেওয়া
+    beforeStart: writeNginxConf,
     args: (dir) => ['-p', dir.replace(/\\/g, '/') + '/'],
   }),
 };
 
 let win = null;
-let running = null; // { id, proc } — একসময়ে একটাই সার্ভার চলবে (পোর্ট ৮০)
+let running = null; // { id, procs: [...] } — একসময়ে একটাই সার্ভার চলবে (পোর্ট ৮০)
 let busy = false;
 
 function createWindow() {
@@ -76,6 +153,17 @@ function sendStatus(msg) {
 
 function killTree(pid) {
   exec(`taskkill /pid ${pid} /t /f`);
+}
+
+// আগের বার বন্ধ না হওয়া (লুকিয়ে চলা) nginx / php-cgi প্রসেস মেরে ফেলা।
+// শুধু আমাদের tools ফোল্ডারের প্রসেসই মারা হয়, অন্য প্রোগ্রামের নয়।
+// (Windows-এ দুটো nginx একই পোর্ট ৮০ নিতে পারে, তখন পুরনোটাই সাড়া দেয়)
+function killStale() {
+  const base = TOOLS_DIR.replace(/'/g, "''");
+  const cmd =
+    'powershell -NoProfile -Command "Get-Process nginx,php-cgi -ErrorAction SilentlyContinue | ' +
+    `Where-Object { $_.Path -like '${base}*' } | Stop-Process -Force"`;
+  return new Promise((resolve) => exec(cmd, () => setTimeout(resolve, 500)));
 }
 
 // ফাইল ডাউনলোড (রিডাইরেক্ট সহ)
@@ -124,7 +212,6 @@ function runInstaller(exePath, args) {
     const p = spawn(exePath, args);
     p.on('error', reject);
     p.on('exit', (code) => {
-      // 0 = সফল, 3010 = সফল কিন্তু রিস্টার্ট দরকার
       if (code === 0 || code === 3010) resolve();
       else reject(new Error('VC++ ইনস্টল ব্যর্থ, কোড: ' + code));
     });
@@ -143,7 +230,7 @@ async function ensureVCRedist() {
   fs.unlinkSync(VCREDIST_PATH);
 }
 
-// ---------- সার্ভিস ইনস্টল (সব সার্ভিসের জন্য একই কোড) ----------
+// ---------- সার্ভিস ইনস্টল ----------
 function findTopDir(parent) {
   const entry = fs.readdirSync(parent, { withFileTypes: true }).find((e) => e.isDirectory());
   if (!entry) throw new Error('zip-এর ভেতরে কোনো ফোল্ডার পাওয়া যায়নি');
@@ -164,10 +251,11 @@ async function ensureService(svc) {
   fs.rmSync(tmpDir, { recursive: true, force: true });
   await extract(zipPath, { dir: tmpDir });
 
-  // zip-এর ভেতরের প্রথম ফোল্ডারটা (যেমন nginx-1.xx.x) আমাদের নির্দিষ্ট নামে সরানো
-  const top = findTopDir(tmpDir);
+  // exe সরাসরি উপরে থাকলে (যেমন PHP) ওটাই আসল ফোল্ডার,
+  // নাহলে ভেতরের প্রথম ফোল্ডারটা (যেমন nginx-1.30.6, Apache24)
+  const source = fs.existsSync(path.join(tmpDir, svc.exeRel)) ? tmpDir : findTopDir(tmpDir);
   fs.rmSync(svc.dir, { recursive: true, force: true });
-  fs.renameSync(top, svc.dir);
+  fs.renameSync(source, svc.dir);
   fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.unlinkSync(zipPath);
 
@@ -175,10 +263,32 @@ async function ensureService(svc) {
   sendStatus(`${svc.label} ইনস্টল সম্পন্ন`);
 }
 
+// www ফোল্ডার ও টেস্ট ফাইল
+function ensureWww() {
+  fs.mkdirSync(WWW_DIR, { recursive: true });
+  const indexPhp = path.join(WWW_DIR, 'index.php');
+  if (!fs.existsSync(indexPhp) && !fs.existsSync(path.join(WWW_DIR, 'index.html'))) {
+    fs.writeFileSync(indexPhp, '<?php phpinfo();\n');
+  }
+}
+
+// প্রসেস চালিয়ে ১.৫ সেকেন্ড দেখা: এর মধ্যে বন্ধ হয়ে গেলে ব্যর্থ
+function spawnChecked(exe, args, options) {
+  return new Promise((resolve) => {
+    const proc = spawn(exe, args, { windowsHide: true, ...options });
+    let output = '';
+    proc.stdout.on('data', (d) => (output += d));
+    proc.stderr.on('data', (d) => (output += d));
+    proc.once('error', (e) => resolve({ proc, failed: e.message, output }));
+    proc.once('exit', (code) => resolve({ proc, failed: `বন্ধ হয়ে গেছে (কোড ${code})`, output }));
+    setTimeout(() => resolve({ proc, failed: null, output }), 1500);
+  });
+}
+
 // ---------- IPC ----------
 ipcMain.handle('service:start', async (_event, id) => {
   const svc = SERVICES[id];
-  if (!svc) return 'সমস্যা: অজানা সার্ভার';
+  if (!svc || id === 'php') return 'সমস্যা: অজানা সার্ভার';
   if (busy) return 'একটা কাজ চলছে, একটু অপেক্ষা করুন...';
   if (running) {
     return running.id === id
@@ -187,33 +297,48 @@ ipcMain.handle('service:start', async (_event, id) => {
   }
 
   busy = true;
+  const procs = [];
+  const abort = () => procs.forEach((p) => killTree(p.pid));
   try {
-    if (svc.needsVC) await ensureVCRedist();
+    if (svc.needsVC || svc.usesPHP) await ensureVCRedist();
+    if (svc.usesPHP) await ensureService(SERVICES.php);
     await ensureService(svc);
+    ensureWww();
+    if (svc.usesPHP) await killStale();
+    const phpPort = svc.usesPHP ? await getFreePort() : 0;
+    if (svc.beforeStart) svc.beforeStart(svc, phpPort);
 
-    const proc = spawn(svc.exe, svc.args(svc.dir), { cwd: svc.dir, windowsHide: true });
-    let output = '';
-    proc.stdout.on('data', (d) => (output += d));
-    proc.stderr.on('data', (d) => (output += d));
-
-    // ১.৫ সেকেন্ডের মধ্যে বন্ধ হয়ে গেলে বুঝব চালু হয়নি
-    const failed = await new Promise((resolve) => {
-      proc.once('error', (e) => resolve(e.message));
-      proc.once('exit', (code) => resolve(`বন্ধ হয়ে গেছে (কোড ${code})`));
-      setTimeout(() => resolve(null), 1500);
-    });
-
-    if (failed) {
-      const logPath = path.join(svc.dir, 'logs', 'error.log');
-      return `সমস্যা: ${svc.label} চালু হয়নি, ${failed}. ${output.trim().slice(0, 200)} লগ: ${logPath}`;
+    // Nginx-এর জন্য আগে php-cgi চালু করা
+    if (svc.usesPHP) {
+      const php = SERVICES.php;
+      const r = await spawnChecked(php.exe, ['-b', `127.0.0.1:${phpPort}`], {
+        cwd: php.dir,
+        env: { ...process.env, PHP_FCGI_MAX_REQUESTS: '0', PHPRC: php.dir },
+      });
+      if (r.failed) {
+        return `সমস্যা: PHP চালু হয়নি, ${r.failed}. ${r.output.trim().slice(0, 200)}`;
+      }
+      procs.push(r.proc);
     }
 
-    running = { id, proc };
-    proc.on('exit', () => {
-      if (running && running.proc === proc) running = null;
+    const r = await spawnChecked(svc.exe, svc.args(svc.dir), { cwd: svc.dir });
+    if (r.failed) {
+      abort();
+      const logPath = path.join(svc.dir, 'logs', 'error.log');
+      return `সমস্যা: ${svc.label} চালু হয়নি, ${r.failed}. ${r.output.trim().slice(0, 200)} লগ: ${logPath}`;
+    }
+    procs.push(r.proc);
+
+    running = { id, procs };
+    r.proc.on('exit', () => {
+      if (running && running.procs.includes(r.proc)) {
+        abort();
+        running = null;
+      }
     });
-    return `${svc.label} চালু হয়েছে`;
+    return `${svc.label} চালু হয়েছে${svc.usesPHP ? ' (PHP সহ)' : ''}। সাইট ফোল্ডার: ${WWW_DIR}`;
   } catch (err) {
+    abort();
     return 'সমস্যা: ' + err.message;
   } finally {
     busy = false;
@@ -222,14 +347,14 @@ ipcMain.handle('service:start', async (_event, id) => {
 
 ipcMain.handle('service:stop', () => {
   if (!running) return 'কোনো সার্ভার চলছে না';
-  const { id, proc } = running;
-  killTree(proc.pid);
+  const { id, procs } = running;
   running = null;
+  procs.forEach((p) => killTree(p.pid));
   return `${SERVICES[id].label} বন্ধ হয়েছে`;
 });
 
 app.whenReady().then(createWindow);
 
 app.on('before-quit', () => {
-  if (running) killTree(running.proc.pid);
+  if (running) running.procs.forEach((p) => killTree(p.pid));
 });
