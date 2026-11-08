@@ -9,9 +9,12 @@
     .choice label { margin-right: 20px; cursor: pointer; font-size: 16px; }
     button { padding: 10px 20px; margin-right: 8px; cursor: pointer; }
     #status { margin-top: 20px; font-weight: bold; word-break: break-word; }
-    .www { margin-top: 24px; padding-top: 16px; border-top: 1px solid #ccc; }
+    .box { margin-top: 24px; padding-top: 16px; border-top: 1px solid #ccc; }
     #wwwPath { font-family: monospace; word-break: break-all; margin: 8px 0 12px; }
-    .www button { padding: 6px 14px; }
+    .box button { padding: 6px 14px; }
+    #sites { margin: 10px 0; line-height: 1.8; }
+    #sites a { color: #0645ad; cursor: pointer; text-decoration: underline; }
+    .hint { color: #666; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -27,11 +30,18 @@
   <button id="stop">Stop</button>
   <p id="status">অপেক্ষা করছে...</p>
 
-  <div class="www">
+  <div class="box">
     <strong>ওয়েবসাইট ফোল্ডার (www):</strong>
     <div id="wwwPath">...</div>
     <button id="changeWww">ফোল্ডার বদলান</button>
     <button id="openWww">ফোল্ডার খুলুন</button>
+  </div>
+
+  <div class="box">
+    <strong>সাইটসমূহ:</strong>
+    <div id="sites">...</div>
+    <button id="refreshSites">সাইট রিফ্রেশ</button>
+    <p class="hint">www-তে নতুন ফোল্ডার বানালে রিফ্রেশ চাপুন। (এখন শুধু Nginx-এ কাজ করে)</p>
   </div>
 
   <script src="renderer.js"></script>

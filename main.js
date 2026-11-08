@@ -1,5 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
-const { spawn, exec } = require('child_process');
+const { spawn, exec, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -63,6 +63,7 @@ function makeService(id, label, url, folder, exeRelPath, opts = {}) {
     exe: path.join(dir, exeRelPath),
     needsVC: !!opts.needsVC,
     usesPHP: !!opts.usesPHP,
+    vhosts: !!opts.vhosts,
     afterExtract: opts.afterExtract || null,
     beforeStart: opts.beforeStart || null,
     args: opts.args || (() => []),
@@ -95,33 +96,46 @@ function setupPhpIni(dir) {
   fs.writeFileSync(ini, txt);
 }
 
-// Nginx-এর কনফিগ প্রতিবার চালুর সময় লেখা হয় (www পথ ও PHP জোড়া সহ)
-function writeNginxConf(svc, phpPort) {
-  const www = WWW_DIR.replace(/\\/g, '/');
-  const conf = [
+// Nginx-এর একটা server ব্লক (সাইটের জন্য)
+function nginxServer(serverName, root, phpPort, isDefault) {
+  const r = root.replace(/\\/g, '/');
+  return [
+    '  server {',
+    `    listen 80${isDefault ? ' default_server' : ''};`,
+    `    server_name ${serverName};`,
+    `    root "${r}";`,
+    '    index index.php index.html;',
+    isDefault
+      ? '    location / { try_files $uri $uri/ =404; }'
+      : '    location / { try_files $uri $uri/ /index.php?$query_string; }',
+    '    location ~ \\.php$ {',
+    `      fastcgi_pass 127.0.0.1:${phpPort};`,
+    '      fastcgi_index index.php;',
+    '      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;',
+    '      include fastcgi_params;',
+    '      fastcgi_read_timeout 300;',
+    '    }',
+    '  }',
+  ].join('\n');
+}
+
+// Nginx-এর কনফিগ প্রতিবার চালুর সময় (ও সাইট রিফ্রেশে) লেখা হয়
+function writeNginxConf(svc, phpPort, sites = []) {
+  const parts = [
     'worker_processes 1;',
     'events { worker_connections 1024; }',
     'http {',
     '  include mime.types;',
     '  default_type application/octet-stream;',
     '  sendfile on;',
-    '  server {',
-    '    listen 80;',
-    '    server_name localhost;',
-    `    root "${www}";`,
-    '    index index.php index.html;',
-    '    location / { try_files $uri $uri/ =404; }',
-    '    location ~ \\.php$ {',
-    `      fastcgi_pass 127.0.0.1:${phpPort};`,
-    '      fastcgi_index index.php;',
-    '      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;',
-    '      include fastcgi_params;',
-    '    }',
-    '  }',
+    '  client_max_body_size 128m;',
+    '  server_names_hash_bucket_size 64;',
+    nginxServer('localhost', WWW_DIR, phpPort, true),
+    ...sites.map((s) => nginxServer(s.domain, s.root, phpPort, false)),
     '}',
     '',
-  ].join('\n');
-  fs.writeFileSync(path.join(svc.dir, 'conf', 'nginx.conf'), conf);
+  ];
+  fs.writeFileSync(path.join(svc.dir, 'conf', 'nginx.conf'), parts.join('\n'));
 }
 
 const SERVICES = {
@@ -141,6 +155,7 @@ const SERVICES = {
   }),
   nginx: makeService('nginx', 'Nginx', NGINX_URL, 'nginx', 'nginx.exe', {
     usesPHP: true,
+    vhosts: true,
     afterExtract: (dir) => {
       fs.mkdirSync(path.join(dir, 'logs'), { recursive: true });
       fs.mkdirSync(path.join(dir, 'temp'), { recursive: true });
@@ -150,6 +165,85 @@ const SERVICES = {
   }),
 };
 
+// ---------- Virtual host (blog.test) ----------
+const TLD = 'test';
+const HOSTS_PATH = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
+const HOSTS_BEGIN = '# my-laragon begin';
+const HOSTS_END = '# my-laragon end';
+
+// www ফোল্ডারের প্রতিটা সাবফোল্ডার একটা সাইট। ভেতরে public ফোল্ডার থাকলে (Laravel) সেটাই root।
+function scanSites() {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(WWW_DIR, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const sites = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue;
+    const name = e.name.toLowerCase().replace(/\s+/g, '-');
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) continue; // ডোমেইনে চলে না এমন নাম বাদ
+    const dir = path.join(WWW_DIR, e.name);
+    const pub = path.join(dir, 'public');
+    const hasPublic = fs.existsSync(pub) && fs.statSync(pub).isDirectory();
+    sites.push({ name, domain: `${name}.${TLD}`, root: hasPublic ? pub : dir });
+  }
+  return sites;
+}
+
+function readHosts() {
+  try {
+    return fs.readFileSync(HOSTS_PATH, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function buildHostsContent(sites) {
+  const stripped = readHosts()
+    .replace(/\r?\n?# my-laragon begin[\s\S]*?# my-laragon end\r?\n?/g, '\r\n')
+    .trimEnd();
+  if (!sites.length) return stripped + '\r\n';
+  const lines = [HOSTS_BEGIN, ...sites.map((s) => `127.0.0.1 ${s.domain}`), HOSTS_END];
+  return stripped + '\r\n\r\n' + lines.join('\r\n') + '\r\n';
+}
+
+const normText = (t) => t.replace(/\r\n/g, '\n').trim();
+
+// hosts ফাইলে শুধু আমাদের ব্লকটা বদলানো। পড়তে অনুমতি লাগে না, লিখতে Administrator (UAC) লাগে।
+// বদল না থাকলে UAC পপআপ আসে না।
+async function syncHosts(sites) {
+  const next = buildHostsContent(sites);
+  if (normText(readHosts()) === normText(next)) return { ok: true, changed: false };
+
+  fs.mkdirSync(TOOLS_DIR, { recursive: true });
+  const src = path.join(TOOLS_DIR, 'hosts.new');
+  const ps1 = path.join(TOOLS_DIR, 'apply-hosts.ps1');
+  const q = (t) => t.replace(/'/g, "''");
+  fs.writeFileSync(src, next, 'utf8');
+  fs.writeFileSync(
+    ps1,
+    '\ufeff' + `Copy-Item -Force -LiteralPath '${q(src)}' -Destination '${q(HOSTS_PATH)}'\r\n`,
+    'utf8'
+  );
+
+  sendStatus('hosts ফাইল আপডেটের জন্য Administrator অনুমতি লাগবে (Yes চাপুন)...');
+  await new Promise((resolve) =>
+    execFile(
+      'powershell',
+      [
+        '-NoProfile',
+        '-Command',
+        `Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','"${q(ps1)}"'`,
+      ],
+      () => resolve()
+    )
+  );
+
+  return { ok: normText(readHosts()) === normText(next), changed: true };
+}
+
 let win = null;
 let running = null; // { id, procs: [...] } — একসময়ে একটাই সার্ভার চলবে (পোর্ট ৮০)
 let busy = false;
@@ -157,7 +251,7 @@ let busy = false;
 function createWindow() {
   win = new BrowserWindow({
     width: 500,
-    height: 520,
+    height: 700,
     webPreferences: { preload: path.join(__dirname, 'preload.js') },
   });
   win.loadFile('index.html');
@@ -322,7 +416,14 @@ ipcMain.handle('service:start', async (_event, id) => {
     ensureWww();
     if (svc.usesPHP) await killStale();
     const phpPort = svc.usesPHP ? await getFreePort() : 0;
-    if (svc.beforeStart) svc.beforeStart(svc, phpPort);
+    let sites = [];
+    let hostsNote = '';
+    if (svc.vhosts) {
+      sites = scanSites();
+      const h = await syncHosts(sites);
+      if (!h.ok) hostsNote = ' ⚠ hosts ফাইল আপডেট হয়নি (Administrator অনুমতি দিন), তাই শুধু localhost কাজ করবে।';
+    }
+    if (svc.beforeStart) svc.beforeStart(svc, phpPort, sites);
 
     // Nginx-এর জন্য আগে php-cgi চালু করা
     if (svc.usesPHP) {
@@ -345,14 +446,14 @@ ipcMain.handle('service:start', async (_event, id) => {
     }
     procs.push(r.proc);
 
-    running = { id, procs };
+    running = { id, procs, phpPort };
     r.proc.on('exit', () => {
       if (running && running.procs.includes(r.proc)) {
         abort();
         running = null;
       }
     });
-    return `${svc.label} চালু হয়েছে${svc.usesPHP ? ' (PHP সহ)' : ''}। সাইট ফোল্ডার: ${WWW_DIR}`;
+    return `${svc.label} চালু হয়েছে${svc.usesPHP ? ' (PHP সহ)' : ''}${svc.vhosts ? `, ${sites.length}টা সাইট` : ''}।${hostsNote}`;
   } catch (err) {
     abort();
     return 'সমস্যা: ' + err.message;
@@ -367,6 +468,42 @@ ipcMain.handle('service:stop', () => {
   running = null;
   procs.forEach((p) => killTree(p.pid));
   return `${SERVICES[id].label} বন্ধ হয়েছে`;
+});
+
+// ---------- সাইট ----------
+const publicSites = (sites) => sites.map(({ name, domain, root }) => ({ name, domain, root }));
+
+ipcMain.handle('sites:list', () => publicSites(scanSites()));
+
+ipcMain.handle('sites:refresh', async () => {
+  if (busy) return { sites: publicSites(scanSites()), message: 'একটা কাজ চলছে, একটু অপেক্ষা করুন...' };
+  busy = true;
+  try {
+    const sites = scanSites();
+    const h = await syncHosts(sites);
+    let message;
+    const svc = running && SERVICES[running.id];
+    if (svc && svc.vhosts) {
+      svc.beforeStart(svc, running.phpPort, sites);
+      await new Promise((resolve) =>
+        execFile(svc.exe, [...svc.args(svc.dir), '-s', 'reload'], { cwd: svc.dir }, () => resolve())
+      );
+      message = `${sites.length}টা সাইট লোড হয়েছে`;
+    } else {
+      message = `${sites.length}টা সাইট পাওয়া গেছে (Nginx চালু করলে কাজ করবে)`;
+    }
+    if (!h.ok) message += ' ⚠ hosts আপডেট হয়নি (Administrator অনুমতি দিন)';
+    return { sites: publicSites(sites), message };
+  } catch (err) {
+    return { sites: [], message: 'সমস্যা: ' + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
+// শুধু localhost ও *.test লিংক খোলা যাবে
+ipcMain.handle('open:url', (_event, url) => {
+  if (/^http:\/\/(localhost|[a-z0-9-]+\.test)\/?$/.test(url)) return shell.openExternal(url);
 });
 
 // ---------- www ফোল্ডার ----------
