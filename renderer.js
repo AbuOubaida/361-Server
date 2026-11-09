@@ -145,6 +145,7 @@ function applyWeb(w) {
   radios().forEach((r) => (r.disabled = running));
   setDisabled($('start'), running);
   setDisabled($('stop'), !running);
+  setDisabled($('restart'), !running);
   portInput.disabled = running;
   setDisabled($('savePort'), running);
 }
@@ -153,6 +154,13 @@ $('start').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
     setStatus(t('starting'));
     setStatus(await window.api.startServer(selectedServer()));
+    loadSites();
+  })
+);
+$('restart').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    setStatus(t('starting'));
+    setStatus(await window.api.restartServer());
     loadSites();
   })
 );
@@ -176,6 +184,13 @@ $('startAll').addEventListener('click', (e) =>
     loadSites();
   })
 );
+$('restartAll').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    setStatus(t('restartingAll'));
+    setStatus(await window.api.restartAll());
+    loadSites();
+  })
+);
 $('stopAll').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
     setStatus(t('stoppingAll'));
@@ -193,6 +208,7 @@ function buildDb(db) {
   const portIn = el('input', { type: 'number', min: 1, max: 65535, value: db.port });
   const saveBtn = el('button', { className: 'btn sm', textContent: t('save') });
   const startBtn = el('button', { className: 'btn sm primary', textContent: '▶ Start' });
+  const restartBtn = el('button', { className: 'btn sm', textContent: '↻ Restart' });
   const stopBtn = el('button', { className: 'btn sm danger', textContent: '■ Stop' });
   const auto = el('input', { type: 'checkbox', checked: db.auto });
   const adminerBtn = el('button', { className: 'btn sm', textContent: t('db.adminer') });
@@ -209,6 +225,12 @@ function buildDb(db) {
     work(startBtn, async () => {
       setStatus(t('db.starting', db.label));
       setStatus(await window.api.startDb(db.id));
+    })
+  );
+  restartBtn.addEventListener('click', () =>
+    work(restartBtn, async () => {
+      setStatus(t('db.starting', db.label));
+      setStatus(await window.api.restartDb(db.id));
     })
   );
   stopBtn.addEventListener('click', () => work(stopBtn, async () => setStatus(await window.api.stopDb(db.id))));
@@ -234,13 +256,14 @@ function buildDb(db) {
       el('label', { className: 'switch' }, auto, el('i'), t('db.auto')),
       el('span', { className: 'spacer' }),
       startBtn,
+      restartBtn,
       stopBtn
     ),
     el('div', { className: 'row' }, el('span', { className: 'badge tool', textContent: t('db.view') }), adminerBtn, ...(pmaBtn ? [pmaBtn] : [])),
     infoEl
   );
   dbsEl.appendChild(card);
-  dbUi[db.id] = { sub: subEl, badge, portIn, saveBtn, startBtn, stopBtn, auto, infoEl };
+  dbUi[db.id] = { sub: subEl, badge, portIn, saveBtn, startBtn, restartBtn, stopBtn, auto, infoEl };
 }
 
 function updateDb(db) {
@@ -251,6 +274,7 @@ function updateDb(db) {
   ui.badge.textContent = db.running ? t('badge.db', db.port) : t('badge.stopped');
   setDisabled(ui.startBtn, db.running);
   setDisabled(ui.stopBtn, !db.running);
+  setDisabled(ui.restartBtn, !db.running);
   ui.portIn.disabled = db.running;
   setDisabled(ui.saveBtn, db.running);
   if (document.activeElement !== ui.portIn) ui.portIn.value = db.port;
@@ -282,6 +306,21 @@ function phpCell(s, php) {
   return el('td', {}, sel);
 }
 
+function sessionCell(s) {
+  if (s.system || s.name === 'localhost') return el('td', { className: 'php-text', textContent: '—' });
+  const inp = el('input', { type: 'number', min: 1, max: 525600, placeholder: t('sites.sessionPh') });
+  inp.style.width = '90px';
+  if (s.sessionMin) inp.value = s.sessionMin;
+  inp.addEventListener('change', () =>
+    work(inp, async () => {
+      const r = await window.api.setSiteSession(s.domain, inp.value);
+      setStatus(r.message);
+      await loadSites();
+    })
+  );
+  return el('td', {}, inp);
+}
+
 async function renderSites(sites, php) {
   const body = $('sitesBody');
   body.textContent = '';
@@ -295,12 +334,13 @@ async function renderSites(sites, php) {
         {},
         el('td', {}, a, ...(s.system ? [' ', el('span', { className: 'badge tool', textContent: t('sites.tool') })] : [])),
         el('td', { className: 'path', textContent: s.root }),
-        phpCell(s, php)
+        phpCell(s, php),
+        sessionCell(s)
       )
     );
   }
   if (sites.filter((s) => !s.system).length <= 1) {
-    body.appendChild(el('tr', {}, el('td', { className: 'empty', colSpan: 3, textContent: t('sites.empty') })));
+    body.appendChild(el('tr', {}, el('td', { className: 'empty', colSpan: 4, textContent: t('sites.empty') })));
   }
 }
 async function loadSites() {
@@ -357,7 +397,36 @@ $('changeRoot').addEventListener('click', (e) =>
 $('openRoot').addEventListener('click', () => window.api.openRoot());
 
 // ---------- টুলস ও ভার্সন ----------
+let extVer = '';
+async function loadExt() {
+  const r = await window.api.listExt(extVer);
+  extVer = r.version;
+  const sel = $('extVer');
+  sel.textContent = '';
+  for (const v of r.versions) sel.appendChild(el('option', { value: v, textContent: 'PHP ' + v + (v === r.def ? ' (default)' : '') }));
+  sel.value = r.version;
+  const grid = $('extGrid');
+  grid.textContent = '';
+  if (!r.items.length) grid.appendChild(el('div', { className: 'hint', textContent: t('ext.empty') }));
+  for (const it of r.items) {
+    const cb = el('input', { type: 'checkbox', checked: it.enabled });
+    cb.addEventListener('change', () =>
+      work(cb, async () => {
+        const res = await window.api.setExt(extVer, it.name, cb.checked);
+        setStatus(res.message);
+        if (!res.ok) await loadExt();
+      })
+    );
+    grid.appendChild(el('label', { style: 'display:flex;align-items:center;gap:6px;font-size:13px;' }, cb, el('span', { textContent: it.name })));
+  }
+}
+$('extVer').addEventListener('change', () => {
+  extVer = $('extVer').value;
+  loadExt();
+});
+
 function renderTools(tools) {
+  loadExt();
   const box = $('toolsList');
   box.textContent = '';
   for (const tl of tools) {

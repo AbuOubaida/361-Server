@@ -188,6 +188,7 @@ function enableExtensions(txt) {
   setIni('session.save_path', tmpBase + '/sessions');
   setIni('upload_tmp_dir', tmpBase + '/upload');
   setIni('sys_temp_dir', tmpBase);
+  setIni('auto_prepend_file', ensureSitePrepend(tmpBase));
   // একই extension দুইবার লোড হওয়া এড়াতে ডুপ্লিকেট লাইন বাদ
   const seen = new Set();
   return txt
@@ -207,12 +208,13 @@ function setupPhpIni(dir) {
   fs.writeFileSync(path.join(dir, 'php.ini'), enableExtensions(txt));
 }
 
+// (নিচের phpSlug/phpVersionList ফাংশন কল হওয়ার সময় তৈরি থাকবে)
 // আগে থেকে তৈরি php.ini-তেও নতুন extension (যেমন pgsql) চালু করা
 function refreshPhpIni(dir) {
   const ini = path.join(dir || SERVICES.php.dir, 'php.ini');
   if (!fs.existsSync(ini)) return;
   const txt = fs.readFileSync(ini, 'utf8');
-  const next = enableExtensions(txt);
+  const next = applyExtOverrides(enableExtensions(txt), path.dirname(ini));
   if (next !== txt) fs.writeFileSync(ini, next);
 }
 
@@ -227,6 +229,73 @@ const phpWorkerCount = () => {
 };
 // Nginx upstream-এর নাম (ভার্সন ধরে)
 const phpUpstream = (v) => `php_${phpSlug(v).replace(/-/g, '_')}`;
+
+// ---------- PHP extension (ভার্সন ধরে) ও সাইট ধরে সেশন সময় ----------
+// settings.phpExt = { '<ভার্সন>': { '<extension>': true|false } } : ব্যবহারকারীর বাছাই, প্রতিবার php.ini-তে বসে।
+// settings.siteSession = { '<domain>': <মিনিট> } : সেই সাইটের সেশনের মেয়াদ (নেই মানে PHP-র ডিফল্ট)।
+const extKey = (name) => (name === 'opcache' ? 'zend_extension' : 'extension');
+const extLineRe = (name, flags = 'm') => new RegExp(`^;?[ \\t]*${extKey(name)}[ \\t]*=[ \\t]*"?(php_)?${name}(\\.dll)?"?[ \\t]*$`, flags);
+function applyExtOverrides(txt, dir) {
+  const v = phpVersionList().find((x) => path.resolve(x.dir) === path.resolve(dir));
+  const ov = (v && settings.phpExt && settings.phpExt[v.version]) || {};
+  for (const [name, on] of Object.entries(ov)) {
+    if (!/^[a-z0-9_]+$/.test(name)) continue;
+    // ওই extension-এর সব লাইন (কমেন্ট করা সহ) সরিয়ে, চালু হলে একটা পরিষ্কার লাইন শেষে বসাই
+    txt = txt.split('\n').filter((l) => !extLineRe(name).test(l.replace(/\r$/, ''))).join('\n');
+    if (on) txt = txt.replace(/\s*$/, '\n') + `${extKey(name)}=${name}\n`;
+  }
+  return txt;
+}
+function phpExtList(version) {
+  const v = phpVersionList().find((x) => x.version === version && x.installed);
+  if (!v) return null;
+  let names = [];
+  try {
+    names = fs.readdirSync(path.join(v.dir, 'ext')).filter((f) => /^php_[a-z0-9_]+\.dll$/i.test(f)).map((f) => f.slice(4, -4).toLowerCase());
+  } catch {}
+  names = names.filter((n) => !/^(oci8|pdo_oci|pdo_firebird)/.test(n)).sort();
+  let ini = '';
+  try {
+    ini = fs.readFileSync(path.join(v.dir, 'php.ini'), 'utf8');
+  } catch {}
+  const live = (n) => ini.split('\n').some((l) => /^[ \t]*[a-z_]/.test(l) && extLineRe(n).test(l.replace(/\r$/, '')));
+  return { dir: v.dir, items: names.map((n) => ({ name: n, enabled: live(n) })) };
+}
+const siteSessionMin = (domain) => {
+  const n = parseInt(settings.siteSession && settings.siteSession[domain], 10);
+  return Number.isInteger(n) && n >= 1 ? n : 0;
+};
+// সাইট ধরে সেশন সময়: php-cgi PHP_VALUE মানে না (ওটা শুধু php-fpm-এর), তাই প্রতিটা রিকোয়েস্টের শুরুতে একটা ছোট
+// auto_prepend_file স্ক্রিপ্ট চলে। সার্ভার (Nginx fastcgi_param / Apache SetEnv) S360_SESSION (সেকেন্ড) পাঠায়, স্ক্রিপ্ট ini_set করে।
+// সাইটের নিজের sessions সাবফোল্ডার ব্যবহার হয়, নইলে অন্য সাইটের GC বেশি মেয়াদি সেশন মুছে ফেলত।
+function ensureSitePrepend(tmpBase) {
+  const dir = path.join(ROOT_DIR, 'data', 'php-prepend');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'server360.php');
+  const base = (tmpBase + '/sessions').replace(/['\\]/g, '\\$&');
+  const code = [
+    '<?php',
+    '// Server 360: per-site session lifetime (written by the app, do not edit)',
+    "if (!empty($_SERVER['S360_SESSION']) && ctype_digit((string)$_SERVER['S360_SESSION'])) {",
+    "    $s = (int)$_SERVER['S360_SESSION'];",
+    '    if ($s > 0) {',
+    `        $d = '${base}/' . preg_replace('/[^A-Za-z0-9.-]/', '_', (string)($_SERVER['SERVER_NAME'] ?? 'site'));`,
+    '        if (!is_dir($d)) { @mkdir($d, 0777, true); }',
+    "        if (is_dir($d)) { ini_set('session.save_path', $d); }",
+    "        ini_set('session.gc_maxlifetime', (string)$s);",
+    "        ini_set('session.cookie_lifetime', (string)$s);",
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+  let cur = '';
+  try {
+    cur = fs.readFileSync(file, 'utf8');
+  } catch {}
+  if (cur !== code) fs.writeFileSync(file, code);
+  return file.replace(/\\/g, '/');
+}
+
 const defaultPhpVersion = () => activeVersion('php').version;
 
 function phpVersionList() {
@@ -250,7 +319,7 @@ const phpOfSite = (s) => (s.system ? defaultPhpVersion() : sitePhpVersion(s.doma
 const neededPhpVersions = (sites) => [...new Set([defaultPhpVersion(), ...sites.map(phpOfSite)])];
 
 // Nginx-এর একটা server ব্লক (সাইটের জন্য)
-function nginxServer(serverName, root, phpUp, isDefault, webPort, localOnly = false, extra = []) {
+function nginxServer(serverName, root, phpUp, isDefault, webPort, localOnly = false, extra = [], sessionMin = 0) {
   const r = root.replace(/\\/g, '/');
   return [
     '  server {',
@@ -270,6 +339,7 @@ function nginxServer(serverName, root, phpUp, isDefault, webPort, localOnly = fa
     '      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;',
     '      include fastcgi_params;',
     '      fastcgi_read_timeout 300;',
+    ...(sessionMin ? [`      fastcgi_param S360_SESSION ${sessionMin * 60};`] : []),
     '    }',
     '  }',
   ].join('\n');
@@ -312,7 +382,7 @@ function toolLocations(phpUp) {
 }
 
 // Apache-এর একটা VirtualHost ব্লক (PHP চলে mod_proxy_fcgi দিয়ে, php-cgi-র সাথে)
-function apacheServer(serverName, root, phpVer, webPort, localOnly = false, extra = []) {
+function apacheServer(serverName, root, phpVer, webPort, localOnly = false, extra = [], sessionMin = 0) {
   const r = root.replace(/\\/g, '/');
   return [
     `<VirtualHost *:${webPort}>`,
@@ -321,6 +391,7 @@ function apacheServer(serverName, root, phpVer, webPort, localOnly = false, extr
     '  DirectoryIndex index.php index.html',
     // এই সাইটের নিজের PHP ভার্সন (php-cgi ও php.ini আলাদা)
     `  SetEnv PHPRC "${phpDirOf(phpVer).replace(/\\/g, '/')}"`,
+    ...(sessionMin ? [`  SetEnv S360_SESSION ${sessionMin * 60}`] : []),
     `  Action application/x-httpd-php "/server360-php-${phpSlug(phpVer)}/php-cgi.exe"`,
     `  <Directory "${r}">`,
     '    Options Indexes FollowSymLinks',
@@ -408,7 +479,7 @@ function writeApacheConf(svc, _phpPorts, sites, webPort) {
     `Action application/x-httpd-php "/server360-php-${phpSlug(defVer)}/php-cgi.exe"`,
     '',
     apacheServer('localhost', WWW_DIR, defVer, webPort, false, aliasLines),
-    ...sites.map((x) => apacheServer(x.domain, x.root, phpOfSite(x), webPort, !!x.system)),
+    ...sites.map((x) => apacheServer(x.domain, x.root, phpOfSite(x), webPort, !!x.system, [], x.system ? 0 : siteSessionMin(x.domain))),
   ];
   fs.writeFileSync(path.join(svc.dir, 'conf', 'server360.conf'), parts.join('\n'));
 
@@ -440,7 +511,7 @@ function writeNginxConf(svc, phpPorts, sites = [], webPort = 80) {
     '  server_names_hash_bucket_size 64;',
     ...upstreams,
     nginxServer('localhost', WWW_DIR, defUp, true, webPort, false, toolLocations(defUp)),
-    ...sites.map((s) => nginxServer(s.domain, s.root, upOf(s), false, webPort, !!s.system)),
+    ...sites.map((s) => nginxServer(s.domain, s.root, upOf(s), false, webPort, !!s.system, [], s.system ? 0 : siteSessionMin(s.domain))),
     '}',
     '',
   ];
@@ -1126,17 +1197,35 @@ async function startPhpCgis(versions, ports, procs) {
 async function reloadRunning(sites) {
   const svc = running && SERVICES[running.id];
   if (!svc || !svc.vhosts) return false;
+  // Windows-এ Apache-র `-k restart` কনসোল মোডে কাজ করে না, তাই Apache-তে নিজেরাই বন্ধ করে আবার চালু করি (Nginx রিলোডই যথেষ্ট)
+  if (running.id === 'apache') {
+    const msg = await restartWebCore();
+    if (!running) throw new Error(msg);
+    return true;
+  }
   if (svc.usesPHP && !svc.phpViaCgi) await startPhpCgis(neededPhpVersions(sites), running.phpPorts, running.procs);
   svc.beforeStart(svc, running.phpPorts, sites, running.webPort);
   await new Promise((resolve) => execFile(svc.exe, [...svc.args(svc.dir), ...svc.reloadArgs], { cwd: svc.dir }, () => resolve()));
   return true;
 }
 
+// চলমান ওয়েব সার্ভার বন্ধ করে (পোর্ট খালি হওয়া পর্যন্ত অপেক্ষা করে) আবার চালু করা। busy আগে থেকেই true থাকতে হবে।
+async function restartWebCore() {
+  const id = running.id;
+  const port = running.webPort;
+  stopWebServer();
+  for (let i = 0; i < 40; i++) {
+    if (await isPortFree(port)) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return startWebServer(id, true);
+}
+
 // ---------- IPC ----------
-async function startWebServer(id) {
+async function startWebServer(id, keepBusy = false) {
   const svc = SERVICES[id];
   if (!svc || !['apache', 'nginx'].includes(id)) return tr('সমস্যা: অজানা সার্ভার', 'Error: unknown server');
-  if (busy) return tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...');
+  if (busy && !keepBusy) return tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...');
   if (running) {
     return running.id === id
       ? tr(`${svc.label} আগে থেকেই চলছে`, `${svc.label} is already running`)
@@ -1206,9 +1295,23 @@ async function startWebServer(id) {
     abort();
     return tr('সমস্যা: ', 'Error: ') + err.message;
   } finally {
+    if (!keepBusy) busy = false;
+  }
+}
+
+async function restartWebServer() {
+  if (!running) return tr('কোনো ওয়েব সার্ভার চলছে না', 'No web server is running');
+  if (busy) return tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...');
+  busy = true;
+  try {
+    return await restartWebCore();
+  } catch (err) {
+    return tr('সমস্যা: ', 'Error: ') + err.message;
+  } finally {
     busy = false;
   }
 }
+ipcMain.handle('service:restart', () => restartWebServer());
 
 ipcMain.handle('service:start', (_event, id) => startWebServer(id));
 function stopWebServer() {
@@ -1313,7 +1416,7 @@ ipcMain.handle('root:choose', async () => {
 // ---------- সাইট ----------
 const siteUrl = (domain) => `http://${domain}${getWebPort() === 80 ? '' : ':' + getWebPort()}`;
 const publicSites = (sites) => [
-  { name: 'localhost', domain: 'localhost', root: WWW_DIR, system: false, url: siteUrl('localhost'), php: defaultPhpVersion(), phpPinned: '' },
+  { name: 'localhost', domain: 'localhost', root: WWW_DIR, system: false, url: siteUrl('localhost'), php: defaultPhpVersion(), phpPinned: '', sessionMin: 0 },
   ...sites.map(({ name, domain, root, system }) => ({
     name,
     domain,
@@ -1322,6 +1425,7 @@ const publicSites = (sites) => [
     url: siteUrl(domain),
     php: system ? defaultPhpVersion() : sitePhpVersion(domain),
     phpPinned: system ? '' : pinnedPhp(domain),
+    sessionMin: system ? 0 : siteSessionMin(domain),
   })),
 ];
 
@@ -1470,6 +1574,68 @@ ipcMain.handle('site:setPhp', async (_event, domain, version) => {
   }
 });
 
+
+// সাইট ধরে সেশনের মেয়াদ (মিনিট; ফাঁকা/০ মানে ডিফল্ট)
+ipcMain.handle('site:setSession', async (_event, domain, minutes) => {
+  if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+  const sites = withToolSites(scanSites());
+  if (!sites.some((s) => s.domain === domain && !s.system)) {
+    return { ok: false, message: tr('সমস্যা: সাইটটা পাওয়া যায়নি', 'Error: site not found') };
+  }
+  const raw = String(minutes === undefined || minutes === null ? '' : minutes).trim();
+  const n = raw === '' ? 0 : parseInt(raw, 10);
+  if (raw !== '' && (!/^\d+$/.test(raw) || n > 525600)) {
+    return { ok: false, message: tr('সমস্যা: মিনিট ১ থেকে ৫২৫৬০০-এর মধ্যে একটা সংখ্যা দিন (ফাঁকা = ডিফল্ট)', 'Error: enter minutes between 1 and 525600 (empty = default)') };
+  }
+  busy = true;
+  try {
+    settings.siteSession = { ...(settings.siteSession || {}) };
+    if (n >= 1) settings.siteSession[domain] = n;
+    else delete settings.siteSession[domain];
+    saveSettings(settings);
+    const label = n >= 1 ? tr(`${n} মিনিট`, `${n} minute(s)`) : tr('ডিফল্ট', 'default');
+    const live = await reloadRunning(sites);
+    return {
+      ok: true,
+      message: live
+        ? tr(`${domain}-এর সেশন মেয়াদ এখন ${label}`, `${domain} session lifetime is now ${label}`)
+        : tr(`${domain}-এর সেশন মেয়াদ (${label}) সেভ হয়েছে। সার্ভার চালু করলে কাজ করবে`, `Session lifetime (${label}) saved for ${domain}. It will apply when the server starts`),
+    };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
+// PHP extension তালিকা ও চালু/বন্ধ (ভার্সন ধরে)
+ipcMain.handle('ext:list', (_event, version) => {
+  const versions = phpVersionList().filter((v) => v.installed).map((v) => v.version);
+  const ver = versions.includes(version) ? version : defaultPhpVersion();
+  const l = phpExtList(ver);
+  return { versions, version: ver, def: defaultPhpVersion(), items: l ? l.items : [], running: !!running };
+});
+ipcMain.handle('ext:set', (_event, version, name, on) => {
+  name = String(name || '');
+  const l = phpExtList(version);
+  if (!l || !l.items.some((i) => i.name === name)) return { ok: false, message: tr('সমস্যা: extension পাওয়া যায়নি', 'Error: extension not found') };
+  settings.phpExt = { ...(settings.phpExt || {}) };
+  settings.phpExt[version] = { ...(settings.phpExt[version] || {}), [name]: !!on };
+  saveSettings(settings);
+  try {
+    refreshPhpIni(l.dir);
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  }
+  const state = on ? tr('চালু', 'enabled') : tr('বন্ধ', 'disabled');
+  return {
+    ok: true,
+    message: running
+      ? tr(`PHP ${version}-এ ${name} ${state}। কার্যকর করতে ওয়েব সার্ভার বন্ধ করে আবার চালু করুন`, `${name} ${state} for PHP ${version}. Stop and start the web server to apply`)
+      : tr(`PHP ${version}-এ ${name} ${state}। সার্ভার চালু করলে কাজ করবে`, `${name} ${state} for PHP ${version}. It will apply when the server starts`),
+  };
+});
+
 // ---------- ভাষা ----------
 ipcMain.handle('lang:get', () => (settings.lang === 'en' ? 'en' : 'bn'));
 ipcMain.handle('lang:set', (_event, lang) => {
@@ -1518,6 +1684,16 @@ ipcMain.handle('db:list', () =>
 );
 ipcMain.handle('db:start', (_event, id) => startDatabase(id));
 ipcMain.handle('db:stop', (_event, id) => stopDatabase(id));
+// ডাটাবেস রিস্টার্ট: নিরাপদে বন্ধ করে আবার চালু (চলমান না থাকলে কিছু করে না)
+async function restartDatabase(id) {
+  const db = DATABASES[id];
+  if (!db) return tr('সমস্যা: অজানা ডাটাবেস', 'Error: unknown database');
+  if (!dbRun[id]) return tr(`${db.label} চলছে না`, `${db.label} is not running`);
+  if (busy) return tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...');
+  await stopDatabase(id);
+  return startDatabase(id);
+}
+ipcMain.handle('db:restart', (_event, id) => restartDatabase(id));
 ipcMain.handle('db:setAuto', (_event, id, on) => {
   if (!DATABASES[id]) return false;
   settings.autoStart = { ...(settings.autoStart || {}), [id]: !!on };
@@ -1533,6 +1709,16 @@ ipcMain.handle('all:start', async (_event, webId) => {
     if (autoStartOf(id)) lines.push(await startDatabase(id));
   }
   return lines.join('\n');
+});
+
+// যা যা চলছে (ওয়েব সার্ভার ও ডাটাবেস) সবগুলো রিস্টার্ট
+ipcMain.handle('all:restart', async () => {
+  const lines = [];
+  if (running) lines.push(await restartWebServer());
+  for (const id of Object.keys(DATABASES)) {
+    if (dbRun[id]) lines.push(await restartDatabase(id));
+  }
+  return lines.length ? lines.join('\n') : tr('কিছুই চলছে না', 'Nothing is running');
 });
 
 ipcMain.handle('all:stop', async () => {

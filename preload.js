@@ -4,16 +4,19 @@ contextBridge.exposeInMainWorld('api', {
   // ওয়েব সার্ভার
   startServer: (id) => ipcRenderer.invoke('service:start', id),
   stopServer: () => ipcRenderer.invoke('service:stop'),
+  restartServer: () => ipcRenderer.invoke('service:restart'),
   onStatus: (callback) => ipcRenderer.on('status', (_event, msg) => callback(msg)),
 
   // সব একসাথে
   startAll: (webId) => ipcRenderer.invoke('all:start', webId),
   stopAll: () => ipcRenderer.invoke('all:stop'),
+  restartAll: () => ipcRenderer.invoke('all:restart'),
 
   // ডাটাবেস (MySQL, PostgreSQL...)
   listDbs: () => ipcRenderer.invoke('db:list'),
   startDb: (id) => ipcRenderer.invoke('db:start', id),
   stopDb: (id) => ipcRenderer.invoke('db:stop', id),
+  restartDb: (id) => ipcRenderer.invoke('db:restart', id),
   setDbAuto: (id, on) => ipcRenderer.invoke('db:setAuto', id, on),
 
   // Adminer (ব্রাউজারে ডাটাবেস)
@@ -48,6 +51,11 @@ contextBridge.exposeInMainWorld('api', {
   listSites: () => ipcRenderer.invoke('sites:list'),
   refreshSites: () => ipcRenderer.invoke('sites:refresh'),
   createSite: (kind, name) => ipcRenderer.invoke('site:create', kind, name),
+  setSiteSession: (domain, minutes) => ipcRenderer.invoke('site:setSession', domain, minutes),
+
+  // PHP extension (ভার্সন ধরে)
+  listExt: (version) => ipcRenderer.invoke('ext:list', version),
+  setExt: (version, name, on) => ipcRenderer.invoke('ext:set', version, name, on),
   openUrl: (url) => ipcRenderer.invoke('open:url', url),
 
   // সাইট ধরে PHP ভার্সন

@@ -292,6 +292,7 @@
         </div>
         <div class="actions">
           <button id="startAll" class="btn primary">▶ Start All</button>
+          <button id="restartAll" class="btn">↻ Restart All</button>
           <button id="stopAll" class="btn danger">■ Stop All</button>
         </div>
       </header>
@@ -321,6 +322,7 @@
               </div>
               <span class="spacer"></span>
               <button id="start" class="btn sm primary">▶ Start</button>
+              <button id="restart" class="btn sm">↻ Restart</button>
               <button id="stop" class="btn sm danger">■ Stop</button>
             </div>
             <div class="hint" data-i18n="web.hint">ডিফল্ট পোর্ট ৮০। ৮০ ব্যস্ত থাকলে ৮০৮০ দিন। পোর্ট বা সার্ভার বদলাতে আগে সার্ভার বন্ধ করুন।</div>
@@ -350,7 +352,7 @@
           </div>
           <div class="card" style="padding: 8px 8px 6px;">
             <table>
-              <thead><tr><th style="width:34%" data-i18n="sites.colAddr">ঠিকানা</th><th data-i18n="sites.colFolder">ফোল্ডার</th><th style="width:150px" data-i18n="sites.colPhp">PHP</th></tr></thead>
+              <thead><tr><th style="width:34%" data-i18n="sites.colAddr">ঠিকানা</th><th data-i18n="sites.colFolder">ফোল্ডার</th><th style="width:150px" data-i18n="sites.colPhp">PHP</th><th style="width:120px" data-i18n="sites.colSession">সেশন (মিনিট)</th></tr></thead>
               <tbody id="sitesBody"></tbody>
             </table>
           </div>
@@ -362,6 +364,14 @@
             <div class="hint" style="margin-top:0" data-i18n="tools.hint">PHP, Nginx, Apache, MySQL, PostgreSQL বা phpMyAdmin-এর নতুন ভার্সন চাইলে এখান থেকে যোগ করুন। ZIP-এর লিংক দিন, অথবা নিজের পিসিতে নামানো ZIP বেছে নিন। যোগ করার পর "ব্যবহার করুন" চাপলেই ওই ভার্সনে চলবে। পুরনো ভার্সনও থাকবে, যেকোনো সময় ফেরা যাবে। ভার্সন বদলাতে সংশ্লিষ্ট সার্ভার বন্ধ থাকতে হবে।</div>
           </div>
           <div id="toolsList"></div>
+          <div class="card" id="extCard">
+            <div class="row first">
+              <b data-i18n="ext.title">PHP Extension</b>
+              <select id="extVer"></select>
+            </div>
+            <div class="hint" data-i18n="ext.hint">একটা PHP ভার্সন বেছে তার extension চালু/বন্ধ করুন। এটা ওই ভার্সনের সব সাইটে একই থাকে। বদলের পর ওয়েব সার্ভার বন্ধ করে আবার চালু করতে হবে। mbstring, openssl, curl, mysqli, pdo_mysql, fileinfo বন্ধ করলে WordPress/Laravel চলবে না।</div>
+            <div id="extGrid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:6px 12px; margin-top:12px;"></div>
+          </div>
         </section>
 
         <!-- ======== সেটিংস ======== -->
