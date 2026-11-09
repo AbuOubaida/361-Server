@@ -52,6 +52,10 @@ contextBridge.exposeInMainWorld('api', {
   refreshSites: () => ipcRenderer.invoke('sites:refresh'),
   createSite: (kind, name) => ipcRenderer.invoke('site:create', kind, name),
   setSiteSession: (domain, minutes) => ipcRenderer.invoke('site:setSession', domain, minutes),
+  setSiteEnabled: (domain, on) => ipcRenderer.invoke('site:setEnabled', domain, on),
+  openSiteConf: (domain, webId) => ipcRenderer.invoke('site:openConf', domain, webId),
+  openSitesDir: (webId) => ipcRenderer.invoke('sites:openDir', webId),
+  openSiteFolder: (domain) => ipcRenderer.invoke('site:openFolder', domain),
 
   // PHP extension (ভার্সন ধরে)
   listExt: (version) => ipcRenderer.invoke('ext:list', version),
@@ -65,4 +69,5 @@ contextBridge.exposeInMainWorld('api', {
   // ভাষা
   getLang: () => ipcRenderer.invoke('lang:get'),
   setLang: (lang) => ipcRenderer.invoke('lang:set', lang),
+  onLangChanged: (callback) => ipcRenderer.on('lang:changed', (_event, l) => callback(l)),
 });

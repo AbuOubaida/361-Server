@@ -321,6 +321,39 @@ function sessionCell(s) {
   return el('td', {}, inp);
 }
 
+function folderCell(s) {
+  const a = el('a', { className: 'link', textContent: s.root, title: t('sites.openFolder') });
+  a.addEventListener('click', async () => {
+    const r = await window.api.openSiteFolder(s.domain);
+    if (!r.ok) setStatus(r.message);
+  });
+  return el('td', { className: 'path' }, a);
+}
+
+function enabledCell(s) {
+  if (s.system || s.name === 'localhost') return el('td', { className: 'php-text', textContent: '—' });
+  const cb = el('input', { type: 'checkbox', checked: !!s.enabled });
+  cb.addEventListener('change', () =>
+    work(cb, async () => {
+      const r = await window.api.setSiteEnabled(s.domain, cb.checked);
+      setStatus(r.message);
+      await loadSites();
+    })
+  );
+  return el('td', {}, cb);
+}
+
+function confCell(s) {
+  const b = el('button', { className: 'btn sm', textContent: t('sites.conf'), disabled: !s.enabled });
+  b.addEventListener('click', () =>
+    work(b, async () => {
+      const r = await window.api.openSiteConf(s.domain, selectedServer());
+      setStatus(r.message);
+    })
+  );
+  return el('td', {}, b);
+}
+
 async function renderSites(sites, php) {
   const body = $('sitesBody');
   body.textContent = '';
@@ -328,19 +361,21 @@ async function renderSites(sites, php) {
   for (const s of sites) {
     const a = el('a', { className: 'link', textContent: s.url });
     a.addEventListener('click', () => window.api.openUrl(s.url));
-    body.appendChild(
-      el(
-        'tr',
-        {},
-        el('td', {}, a, ...(s.system ? [' ', el('span', { className: 'badge tool', textContent: t('sites.tool') })] : [])),
-        el('td', { className: 'path', textContent: s.root }),
-        phpCell(s, php),
-        sessionCell(s)
-      )
+    const row = el(
+      'tr',
+      {},
+      enabledCell(s),
+      el('td', {}, a, ...(s.system ? [' ', el('span', { className: 'badge tool', textContent: t('sites.tool') })] : [])),
+      folderCell(s),
+      phpCell(s, php),
+      sessionCell(s),
+      confCell(s)
     );
+    if (!s.enabled) row.style.opacity = '0.55';
+    body.appendChild(row);
   }
   if (sites.filter((s) => !s.system).length <= 1) {
-    body.appendChild(el('tr', {}, el('td', { className: 'empty', colSpan: 4, textContent: t('sites.empty') })));
+    body.appendChild(el('tr', {}, el('td', { className: 'empty', colSpan: 6, textContent: t('sites.empty') })));
   }
 }
 async function loadSites() {
@@ -373,6 +408,7 @@ function createSite(kind) {
 }
 $('newBlank').addEventListener('click', createSite('blank'));
 $('newWp').addEventListener('click', createSite('wordpress'));
+$('newLaravel').addEventListener('click', createSite('laravel'));
 
 // ---------- সেটিংস: ফোল্ডার ----------
 $('changeWww').addEventListener('click', (e) =>
@@ -386,6 +422,12 @@ $('changeWww').addEventListener('click', (e) =>
 );
 $('openWww').addEventListener('click', () => window.api.openWww());
 $('openWww2').addEventListener('click', () => window.api.openWww());
+$('openSitesDir').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    const r = await window.api.openSitesDir(selectedServer());
+    if (!r.ok) setStatus(r.message);
+  })
+);
 
 $('changeRoot').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
@@ -516,6 +558,10 @@ window.api.onWwwChanged((p) => {
   loadSites();
 });
 window.api.onRootChanged((p) => ($('rootPath').textContent = p));
+// প্রথমবারের ভাষা-ডায়ালগে বাছা ভাষা (main.js পাঠায়)
+window.api.onLangChanged((l) => {
+  if (l !== LANG) setLang(l);
+});
 
 async function refreshAll() {
   try {
