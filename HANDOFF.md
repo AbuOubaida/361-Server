@@ -91,12 +91,9 @@ Confirmed working **by the user on Windows** (screenshots / messages): app launc
 
 Also confirmed by the user (2026-11-09): **per-site session lifetime works on both Nginx and Apache** (auto_prepend_file version), and Apache now applies changes via the internal full restart / Restart button; **WordPress one-click creator works on Windows** (site `test.test`, DB `test` created, WordPress install finished, `wp-admin` dashboard opened, WordPress 7.1.4; the status bar showed "test.test created. Database: test (root, empty password)"; the new English card looks fine); per-site PHP with two real PHP versions works, and the multi-worker php-cgi + Nginx `upstream` change works (8 `php-cgi.exe` seen, `phpinfo()` per site correct, switching a site's PHP version + Refresh sites without stopping the server works).
 
-**Not explicitly confirmed on the user's PC (tested only with fake binaries on Linux):**
-- **PHP extension switches (Tools page)**: not yet explicitly confirmed — toggle e.g. `exif`, restart the web server, check `phpinfo()`; also the Restart buttons for MySQL/PostgreSQL and Restart All (no data problems after repeated restarts), and the Bangla/English layout of the Session column and extension card.
-- **New site creator, remaining checks:** the **blank site** button; WordPress with MySQL **stopped** (expect a clear error and no leftover folder); duplicate name refused; the new card in the Bangla UI.
-- Adding/using/removing a second version of MySQL/PostgreSQL/Nginx/Apache from the Tools page.
-- Changing ROOT folder with real data; English UI layout (long English texts) on real screens.
-- First-run dialogs are shown in Bangla because the language is not chosen yet.
+Also confirmed by the user (2026-11-09, said "these are all OK"; exif screenshot shows `EXIF Support: enabled` in `phpinfo()` after toggling it on the Tools page and restarting): PHP extension switches; Restart buttons for MySQL/PostgreSQL and Restart All; new-site creator extras (blank site, WordPress with MySQL stopped, duplicate name, Bangla UI card); Session column and extension card layout in both languages; adding/using/removing a second version of MySQL/PostgreSQL/Nginx/Apache; changing the install folder with real data.
+
+**Still open (not a test, a small improvement):** the first-run dialogs (install folder, www folder) are always shown in Bangla because the language is not chosen yet; ask the language first or follow the system language.
 
 ## 7. Lessons / gotchas already hit (don't repeat)
 - Two nginx instances can bind the same port silently on Windows -> always clean stale processes (done, inside our tools dir only).
@@ -117,7 +114,7 @@ Also confirmed by the user (2026-11-09): **per-site session lifetime works on bo
 ## 8. TODO / next steps — recommended order and why
 1. **(quick) Ask the user to run the remaining checks in section 6** (especially the new multi-worker Nginx check) and fix whatever shows up. Done so far: per-site PHP with two real versions. Multi-worker php-cgi (formerly item 2) is implemented, awaiting the user's test.
 2. **Quick app installer, remaining part: Laravel.** Blank site and WordPress are implemented; WordPress is confirmed working by the user. **Before Laravel (user's request, now done):** per-site session time and per-version extension switches exist; the Laravel installer should write `SESSION_LIFETIME` from the site's session minutes and make sure required extensions (mbstring, openssl, pdo_mysql, fileinfo, curl, zip, gd/intl recommended) are on. Laravel needs Composer (`composer.phar` run with the site's PHP, `composer create-project laravel/laravel`) and network access; also create its DB and write `.env`. Possible extras: choose PHP version at creation, optional WordPress admin auto-install.
-3. **Small user-visible features** (pick by user request): MySQL root password setting, HTTPS for `*.test` (local certificate, needs elevation), tray icon, auto-start with Windows, log viewer / Apache-Nginx config editor, Adminer version management.
+3. **Small user-visible features** (also: first-run dialogs language, see section 6) (pick by user request): MySQL root password setting, HTTPS for `*.test` (local certificate, needs elevation), tray icon, auto-start with Windows, log viewer / Apache-Nginx config editor, Adminer version management.
 4. **More databases** — ask which: MariaDB, MongoDB, Redis. Add via the `DATABASES` table (+ Release zip + a Tools page entry).
 5. **Windows installer** (`electron-builder`, NSIS, app icon, version number). Do it after features settle; installer-time questions (folders, language) can replace the first-run dialogs.
 6. **Multiple DB versions running at the same time on different ports** (per-site DB choice is just the site's `.env`). Largest change; only if the user really needs it.
