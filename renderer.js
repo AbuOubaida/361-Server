@@ -12,6 +12,7 @@ function applyStatic() {
   document.documentElement.lang = LANG;
   document.querySelectorAll('[data-i18n]').forEach((n) => (n.textContent = t(n.dataset.i18n)));
   document.querySelectorAll('[data-i18n-html]').forEach((n) => (n.innerHTML = t(n.dataset.i18nHtml)));
+  document.querySelectorAll('[data-i18n-ph]').forEach((n) => (n.placeholder = t(n.dataset.i18nPh)));
   $('langBtnText').textContent = t('lang.other');
   $('langSel').value = LANG;
   if (statusIsDefault) $('status').textContent = t('status.wait');
@@ -314,6 +315,24 @@ $('refreshSites').addEventListener('click', (e) =>
     setStatus(r.message);
   })
 );
+
+// ---------- নতুন সাইট (খালি / WordPress) ----------
+function createSite(kind) {
+  return (e) =>
+    work(e.currentTarget, async () => {
+      const name = $('newSiteName').value;
+      setStatus(t('starting'));
+      const r = await window.api.createSite(kind, name);
+      setStatus(r.message);
+      if (r.ok) {
+        $('newSiteName').value = '';
+        renderSites(r.sites, await window.api.listPhp());
+        if (r.url) window.api.openUrl(r.url);
+      }
+    });
+}
+$('newBlank').addEventListener('click', createSite('blank'));
+$('newWp').addEventListener('click', createSite('wordpress'));
 
 // ---------- সেটিংস: ফোল্ডার ----------
 $('changeWww').addEventListener('click', (e) =>

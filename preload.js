@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('api', {
   onWwwChanged: (callback) => ipcRenderer.on('www:changed', (_event, p) => callback(p)),
   listSites: () => ipcRenderer.invoke('sites:list'),
   refreshSites: () => ipcRenderer.invoke('sites:refresh'),
+  createSite: (kind, name) => ipcRenderer.invoke('site:create', kind, name),
   openUrl: (url) => ipcRenderer.invoke('open:url', url),
 
   // সাইট ধরে PHP ভার্সন

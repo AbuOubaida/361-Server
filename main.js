@@ -219,6 +219,14 @@ function refreshPhpIni(dir) {
 // ---------- সাইট ধরে PHP ভার্সন ----------
 // settings.sitePhp = { 'blog.test': '8.4.10', ... }। যে সাইটের নাম এখানে নেই সেটা ডিফল্ট (চালু) PHP ব্যবহার করে।
 const phpSlug = (v) => String(v).replace(/[^0-9A-Za-z]+/g, '-');
+// প্রতিটা PHP ভার্সনের জন্য কয়টা php-cgi worker চলবে (একটা php-cgi একসাথে একটাই রিকোয়েস্ট সামলায়)
+const PHP_WORKERS_DEFAULT = 4;
+const phpWorkerCount = () => {
+  const n = parseInt(settings.phpWorkers, 10);
+  return Number.isInteger(n) && n >= 1 && n <= 16 ? n : PHP_WORKERS_DEFAULT;
+};
+// Nginx upstream-এর নাম (ভার্সন ধরে)
+const phpUpstream = (v) => `php_${phpSlug(v).replace(/-/g, '_')}`;
 const defaultPhpVersion = () => activeVersion('php').version;
 
 function phpVersionList() {
@@ -242,7 +250,7 @@ const phpOfSite = (s) => (s.system ? defaultPhpVersion() : sitePhpVersion(s.doma
 const neededPhpVersions = (sites) => [...new Set([defaultPhpVersion(), ...sites.map(phpOfSite)])];
 
 // Nginx-এর একটা server ব্লক (সাইটের জন্য)
-function nginxServer(serverName, root, phpPort, isDefault, webPort, localOnly = false, extra = []) {
+function nginxServer(serverName, root, phpUp, isDefault, webPort, localOnly = false, extra = []) {
   const r = root.replace(/\\/g, '/');
   return [
     '  server {',
@@ -257,7 +265,7 @@ function nginxServer(serverName, root, phpPort, isDefault, webPort, localOnly = 
       : '    location / { try_files $uri $uri/ /index.php?$query_string; }',
     ...extra,
     '    location ~ \\.php$ {',
-    `      fastcgi_pass 127.0.0.1:${phpPort};`,
+    `      fastcgi_pass ${phpUp};`,
     '      fastcgi_index index.php;',
     '      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;',
     '      include fastcgi_params;',
@@ -269,7 +277,7 @@ function nginxServer(serverName, root, phpPort, isDefault, webPort, localOnly = 
 
 // http://localhost/phpmyadmin ও http://localhost/adminer (শুধু এই কম্পিউটার থেকে)
 // www ফোল্ডারে একই নামের ফোল্ডার থাকলে সেটাই অগ্রাধিকার পায়, তাই তখন যোগ করা হয় না
-function toolLocations(phpPort) {
+function toolLocations(phpUp) {
   const out = [];
   const taken = (n) => {
     try {
@@ -290,7 +298,7 @@ function toolLocations(phpPort) {
       '      allow ::1;',
       '      deny all;',
       '      location ~ \\.php$ {',
-      `        fastcgi_pass 127.0.0.1:${phpPort};`,
+      `        fastcgi_pass ${phpUp};`,
       '        fastcgi_param SCRIPT_FILENAME $request_filename;',
       '        include fastcgi_params;',
       '        fastcgi_read_timeout 300;',
@@ -414,8 +422,13 @@ function writeApacheConf(svc, _phpPorts, sites, webPort) {
 
 // Nginx-এর কনফিগ প্রতিবার চালুর সময় (ও সাইট রিফ্রেশে) লেখা হয়
 function writeNginxConf(svc, phpPorts, sites = [], webPort = 80) {
-  const defPort = phpPorts[defaultPhpVersion()];
-  const portOf = (s) => phpPorts[phpOfSite(s)] || defPort;
+  const defVer = defaultPhpVersion();
+  // প্রতিটা চলমান PHP ভার্সনের জন্য একটা upstream (একাধিক php-cgi worker, round-robin)
+  const upstreams = Object.keys(phpPorts)
+    .filter((v) => (phpPorts[v] || []).length)
+    .map((v) => [`  upstream ${phpUpstream(v)} {`, ...phpPorts[v].map((p) => `    server 127.0.0.1:${p} max_fails=0;`), '  }'].join('\n'));
+  const defUp = phpUpstream(defVer);
+  const upOf = (s) => (phpPorts[phpOfSite(s)] && phpPorts[phpOfSite(s)].length ? phpUpstream(phpOfSite(s)) : defUp);
   const parts = [
     'worker_processes 1;',
     'events { worker_connections 1024; }',
@@ -425,8 +438,9 @@ function writeNginxConf(svc, phpPorts, sites = [], webPort = 80) {
     '  sendfile on;',
     '  client_max_body_size 128m;',
     '  server_names_hash_bucket_size 64;',
-    nginxServer('localhost', WWW_DIR, defPort, true, webPort, false, toolLocations(defPort)),
-    ...sites.map((s) => nginxServer(s.domain, s.root, portOf(s), false, webPort, !!s.system)),
+    ...upstreams,
+    nginxServer('localhost', WWW_DIR, defUp, true, webPort, false, toolLocations(defUp)),
+    ...sites.map((s) => nginxServer(s.domain, s.root, upOf(s), false, webPort, !!s.system)),
     '}',
     '',
   ];
@@ -1074,21 +1088,37 @@ async function stopDatabase(id) {
   return tr(`${db.label} বন্ধ হয়েছে`, `${db.label} stopped`);
 }
 
-// যে ভার্সনের php-cgi এখনো চলছে না, সেগুলো চালু করা (ports: ভার্সন -> পোর্ট, procs: চলমান প্রসেসের তালিকা)
+// যে ভার্সনের php-cgi এখনো চলছে না, সেগুলো চালু করা। প্রতিটা ভার্সনে কয়েকটা worker চলে (phpWorkerCount)।
+// ports: ভার্সন -> [পোর্ট, ...], procs: চলমান প্রসেসের তালিকা
 async function startPhpCgis(versions, ports, procs) {
   for (const v of versions) {
-    if (ports[v]) continue;
+    if (ports[v] && ports[v].length) continue;
     const dir = phpDirOf(v);
     refreshPhpIni(dir);
-    let port = await getFreePort();
-    while (Object.values(ports).includes(port)) port = await getFreePort();
-    const r = await spawnChecked(path.join(dir, 'php-cgi.exe'), ['-b', `127.0.0.1:${port}`], {
-      cwd: dir,
-      env: { ...process.env, PHP_FCGI_MAX_REQUESTS: '0', PHPRC: dir },
+    const used = new Set(Object.values(ports).flat());
+    const mine = [];
+    for (let i = 0; i < phpWorkerCount(); i++) {
+      let port = await getFreePort();
+      while (used.has(port)) port = await getFreePort();
+      used.add(port);
+      mine.push(port);
+    }
+    // worker-গুলো একসাথে চালু (প্রতিটা ১.৫ সেকেন্ড টিকতে হয়, তাই পরপর চালালে দেরি হতো)
+    const results = await Promise.all(
+      mine.map((port) =>
+        spawnChecked(path.join(dir, 'php-cgi.exe'), ['-b', `127.0.0.1:${port}`], {
+          cwd: dir,
+          env: { ...process.env, PHP_FCGI_MAX_REQUESTS: '0', PHPRC: dir },
+        })
+      )
+    );
+    // যেগুলো চালু হয়েছে সেগুলো আগে procs-এ রাখি, যাতে ব্যর্থ হলে abort() সবগুলো মেরে দেয়
+    results.forEach((r) => {
+      if (!r.failed) procs.push(r.proc);
     });
-    if (r.failed) throw new Error(tr(`PHP ${v} চালু হয়নি, ${r.failed}. `, `PHP ${v} failed to start, ${r.failed}. `) + r.output.trim().slice(0, 200));
-    procs.push(r.proc);
-    ports[v] = port;
+    const bad = results.find((r) => r.failed);
+    if (bad) throw new Error(tr(`PHP ${v} চালু হয়নি, ${bad.failed}. `, `PHP ${v} failed to start, ${bad.failed}. `) + bad.output.trim().slice(0, 200));
+    ports[v] = mine;
   }
 }
 
@@ -1130,7 +1160,7 @@ async function startWebServer(id) {
     if (!(await isPortFree(webPort))) {
       return tr(`সমস্যা: পোর্ট ${webPort} অন্য কেউ ব্যবহার করছে (IIS, Skype বা আসল Laragon হতে পারে)। নিচের "পোর্ট" ঘরে অন্য সংখ্যা দিন, যেমন 8080।`, `Error: port ${webPort} is used by something else (IIS, Skype or a real Laragon, maybe). Enter a different number in the "Port" field, e.g. 8080.`);
     }
-    const phpPorts = {}; // PHP ভার্সন -> php-cgi পোর্ট (শুধু Nginx-এ)
+    const phpPorts = {}; // PHP ভার্সন -> php-cgi পোর্টের তালিকা (শুধু Nginx-এ)
     let sites = [];
     let hostsNote = '';
     if (svc.vhosts) {
@@ -1320,6 +1350,89 @@ ipcMain.handle('sites:refresh', async () => {
     return { sites: publicSites(sites), message };
   } catch (err) {
     return { sites: publicSites(withToolSites(scanSites())), message: tr('সমস্যা: ', 'Error: ') + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
+
+// ---------- নতুন সাইট: খালি / WordPress ----------
+const WP_URL = 'https://wordpress.org/latest.zip';
+const siteSlug = (n) => String(n || '').trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/^-+|-+$/g, '');
+
+async function installWordPress(dest, dbName) {
+  if (!dbRun.mysql) throw new Error(tr('আগে MySQL চালু করুন (সার্ভিস পেজ)', 'Start MySQL first (Services page)'));
+  const mysqlExe = path.join(SERVICES.mysql.dir, 'bin', 'mysql.exe');
+  if (!fs.existsSync(mysqlExe)) throw new Error(tr('mysql.exe পাওয়া যায়নি', 'mysql.exe not found'));
+  const port = getDbPort('mysql');
+  // WordPress zip একবার নামিয়ে ক্যাশে রাখা (পরের বার আর নামাতে হবে না)
+  const cacheDir = path.join(ROOT_DIR, 'data', 'cache');
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const zip = path.join(cacheDir, 'wordpress-latest.zip');
+  if (!fs.existsSync(zip)) await download(WP_URL, zip, tr('WordPress নামছে', 'Downloading WordPress'));
+  const tmp = path.join(cacheDir, '_wp_tmp');
+  fs.rmSync(tmp, { recursive: true, force: true });
+  sendStatus(tr('WordPress খোলা হচ্ছে...', 'Extracting WordPress...'));
+  try {
+    await extractZipSafe(zip, tmp);
+  } catch (e) {
+    fs.rmSync(zip, { force: true }); // নষ্ট ক্যাশ ফেলে দিই, পরের বার আবার নামবে
+    throw e;
+  }
+  const src = path.join(tmp, 'wordpress');
+  if (!fs.existsSync(path.join(src, 'wp-config-sample.php'))) throw new Error(tr('WordPress zip ঠিক নেই', 'The WordPress zip looks wrong'));
+  fs.cpSync(src, dest, { recursive: true });
+  fs.rmSync(tmp, { recursive: true, force: true });
+  // ডাটাবেস বানানো (root, খালি পাসওয়ার্ড)
+  sendStatus(tr('ডাটাবেস বানানো হচ্ছে...', 'Creating database...'));
+  await new Promise((resolve, reject) =>
+    execFile(mysqlExe, ['-u', 'root', '-h', '127.0.0.1', '-P', String(port), '-e', `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`], { timeout: 30000, windowsHide: true }, (err, _o, stderr) =>
+      err ? reject(new Error(tr('ডাটাবেস বানানো যায়নি: ', 'Could not create the database: ') + String(stderr || err.message).trim().slice(0, 200))) : resolve()
+    )
+  );
+  // wp-config.php
+  let cfg = fs.readFileSync(path.join(dest, 'wp-config-sample.php'), 'utf8');
+  cfg = cfg
+    .replace('database_name_here', dbName)
+    .replace('username_here', 'root')
+    .replace("'password_here'", "''")
+    .replace("'localhost'", `'127.0.0.1:${port}'`)
+    .replace(/define\(\s*'(AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|SECURE_AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT)',\s*'put your unique phrase here'\s*\);/g, (_m, k) => `define( '${k}', '${crypto.randomBytes(32).toString('hex')}' );`);
+  fs.writeFileSync(path.join(dest, 'wp-config.php'), cfg);
+}
+
+ipcMain.handle('site:create', async (_event, kind, rawName) => {
+  const fail = (m) => ({ ok: false, message: m });
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  const name = siteSlug(rawName);
+  if (!name) return fail(tr('সমস্যা: সাইটের নাম দিন (a-z, 0-9, -)', 'Error: enter a site name (a-z, 0-9, -)'));
+  if (!['blank', 'wordpress'].includes(kind)) return fail(tr('সমস্যা: অজানা ধরন', 'Error: unknown type'));
+  const dest = path.join(WWW_DIR, name);
+  if (fs.existsSync(dest)) return fail(tr(`সমস্যা: ${name} নামে ফোল্ডার আগে থেকেই আছে`, `Error: a folder named ${name} already exists`));
+  busy = true;
+  try {
+    fs.mkdirSync(WWW_DIR, { recursive: true });
+    if (kind === 'blank') {
+      fs.mkdirSync(dest, { recursive: true });
+      fs.writeFileSync(path.join(dest, 'index.php'), `<?php\necho '<h1>${name}.test</h1><p>PHP ' . PHP_VERSION . '</p>';\n`);
+    } else {
+      try {
+        await installWordPress(dest, name.replace(/-/g, '_'));
+      } catch (e) {
+        fs.rmSync(dest, { recursive: true, force: true }); // আধা-তৈরি ফোল্ডার রেখে যাব না
+        throw e;
+      }
+    }
+    const sites = withToolSites(scanSites());
+    const h = await syncHosts(sites);
+    const live = await reloadRunning(sites);
+    let message = tr(`${name}.test তৈরি হয়েছে`, `${name}.test created`);
+    if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে কাজ করবে)', ' (it will work once a web server is started)');
+    if (!h.ok) message += tr(' ⚠ hosts আপডেট হয়নি (Administrator অনুমতি দিন)', ' ⚠ hosts file was not updated (allow Administrator access)');
+    if (kind === 'wordpress') message += tr('। ডাটাবেস: ' + name.replace(/-/g, '_') + ' (root, খালি পাসওয়ার্ড)', '. Database: ' + name.replace(/-/g, '_') + ' (root, empty password)');
+    return { ok: true, message, url: live ? siteUrl(`${name}.test`) : '', sites: publicSites(sites) };
+  } catch (err) {
+    return fail(tr('সমস্যা: ', 'Error: ') + err.message);
   } finally {
     busy = false;
   }

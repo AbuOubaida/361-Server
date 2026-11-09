@@ -340,6 +340,14 @@
             </div>
             <div class="hint" data-i18n-html="sites.hint">www ফোল্ডারে নতুন সাবফোল্ডার (যেমন <b>blog</b>) বানিয়ে রিফ্রেশ চাপলে <b>blog.test</b> নামে সাইট পাবেন। ফোল্ডারের ভেতরে <b>public</b> থাকলে (Laravel) সেটাই root হবে।</div>
           </div>
+          <div class="card">
+            <div class="row first">
+              <input id="newSiteName" type="text" maxlength="40" data-i18n-ph="sites.new.ph" placeholder="blog" style="width:auto; flex:1; min-width:140px;">
+              <button id="newBlank" class="btn sm" data-i18n="sites.new.blank">+ খালি সাইট</button>
+              <button id="newWp" class="btn sm primary" data-i18n="sites.new.wp">+ WordPress</button>
+            </div>
+            <div class="hint" data-i18n="sites.new.hint">নাম দিন (যেমন blog), তারপর বাটন চাপুন। WordPress-এর জন্য MySQL চালু থাকতে হবে। ডাটাবেস নিজে বানাবে।</div>
+          </div>
           <div class="card" style="padding: 8px 8px 6px;">
             <table>
               <thead><tr><th style="width:34%" data-i18n="sites.colAddr">ঠিকানা</th><th data-i18n="sites.colFolder">ফোল্ডার</th><th style="width:150px" data-i18n="sites.colPhp">PHP</th></tr></thead>
