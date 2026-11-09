@@ -1,0 +1,1555 @@
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell } = require('electron');
+const { spawn, exec, execFile, execFileSync } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+const https = require('https');
+const net = require('net');
+const extract = require('extract-zip');
+const crypto = require('crypto');
+
+// ====== এখানে আপনার লিংক বসান ======
+const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
+const NGINX_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/nginx-1.30.6.zip';
+// PHP zip-এর আসল নাম দিন (Release-এ আপলোড করা ফাইলের নাম)
+const PHP_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/php-8.5.12-1-nts-Win32-vs17-x64.zip';
+
+// MySQL zip-এর আসল নাম দিন (Release-এ আপলোড করা ফাইলের নাম)
+const MYSQL_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/mysql-8.4.13-winx64.zip';
+// PostgreSQL zip-এর আসল নাম দিন (EDB-র "binaries" zip, Release-এ আপলোড করা ফাইলের নাম)
+const POSTGRES_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/postgresql-18.6-5-windows-x64-binaries.zip';
+
+// Adminer (একটা মাত্র PHP ফাইল): adminer.org থেকে adminer-5.5.1.php নামিয়ে Release-এ আপলোড করুন
+const ADMINER_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/adminer-5.5.1.php';
+
+// phpMyAdmin: phpmyadmin.net থেকে phpMyAdmin-5.2.3-all-languages.zip নামিয়ে Release-এ আপলোড করুন
+const PMA_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/phpMyAdmin-5.2.3-all-languages.zip';
+
+// Microsoft-এর স্থির লিংক: সর্বশেষ সাপোর্টেড VC++ Redistributable (x64)
+const VCREDIST_URL = 'https://aka.ms/vc14/vc_redist.x64.exe';
+// ====================================
+
+// অ্যাপের নিজস্ব ডাটা ফোল্ডার: C:\Users\<name>\AppData\Roaming\my-laragon
+// ইনস্টল ফোল্ডার (ROOT): এর ভেতরে tools\ (প্রোগ্রাম) ও data\ (ডাটাবেসের ডাটা) থাকে।
+// ডিফল্ট: C:\Users\<n>\AppData\Roaming\my-laragon — ইউজার সেটিংস থেকে যেকোনো ফোল্ডারে সরাতে পারে।
+// settings.json সবসময় ডিফল্ট জায়গাতেই থাকে (নাহলে ROOT কোথায় তা জানা যাবে না)।
+const DEFAULT_ROOT = app.getPath('userData');
+let ROOT_DIR, TOOLS_DIR, VCREDIST_PATH, ADMINER_DIR;
+
+function applyRoot(root) {
+  ROOT_DIR = root;
+  TOOLS_DIR = path.join(root, 'tools');
+  VCREDIST_PATH = path.join(TOOLS_DIR, 'vc_redist.x64.exe');
+  // ডাটা tools-এর বাইরে থাকে (data\\ ফোল্ডারে), যাতে প্রোগ্রাম আবার নামালেও ডাটাবেস না হারায
+  ADMINER_DIR = path.join(TOOLS_DIR, 'adminer');
+}
+
+// ---------- সেটিংস (www ফোল্ডার ইউজার বদলাতে পারবে) ----------
+const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
+const DEFAULT_WWW = path.join(app.getPath('documents'), 'my-laragon', 'www');
+
+function loadSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+function saveSettings(obj) {
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(obj, null, 2));
+}
+
+const settings = loadSettings();
+applyRoot(settings.rootDir || DEFAULT_ROOT);
+let WWW_DIR = settings.wwwDir || DEFAULT_WWW; // ওয়েবসাইটের ফাইল রাখার ফোল্ডার
+
+// ওয়েব সার্ভারের পোর্ট (ডিফল্ট ৮০)
+function validPort(v) {
+  const p = Number(v);
+  return Number.isInteger(p) && p >= 1 && p <= 65535 ? p : null;
+}
+function getWebPort() {
+  return validPort(settings.webPort) || 80;
+}
+function getDbPort(id) {
+  const db = DATABASES[id];
+  return validPort(settings[db.portKey]) || db.defaultPort;
+}
+
+// পোর্টটা খালি আছে কিনা দেখা
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', () => resolve(false));
+    srv.once('listening', () => srv.close(() => resolve(true)));
+    srv.listen(port, '0.0.0.0');
+  });
+}
+
+// খালি পোর্ট খুঁজে বের করা (৯০০০ অন্য কেউ নিয়ে রাখলে সমস্যা এড়াতে)
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+// ---------- সার্ভিসের তালিকা ----------
+// ---------- টুলের ভার্সন ----------
+// প্রতিটা টুলের ডিফল্ট ভার্সন কোডে বসানো (TOOL_DEFAULTS)। ব্যবহারকারী "টুলস ও ভার্সন" পেজ থেকে নতুন ভার্সন যোগ করলে
+// settings.toolVersions[id] = { active, items: { '<ভার্সন>': { folder, url } } } এ জমা হয়।
+const TOOL_DEFAULTS = {}; // id -> { version, folder, url }
+
+function toolState(id) {
+  settings.toolVersions = settings.toolVersions || {};
+  settings.toolVersions[id] = settings.toolVersions[id] || { active: null, items: {} };
+  settings.toolVersions[id].items = settings.toolVersions[id].items || {};
+  return settings.toolVersions[id];
+}
+
+function activeVersion(id) {
+  const def = TOOL_DEFAULTS[id];
+  const st = settings.toolVersions && settings.toolVersions[id];
+  if (st && st.active && st.active !== def.version && st.items && st.items[st.active]) {
+    const it = st.items[st.active];
+    return { version: st.active, folder: it.folder, url: it.url || null, isDefault: false };
+  }
+  return { version: def.version, folder: def.folder, url: def.url, isDefault: true };
+}
+
+// ডাটাবেসের ডাটা ফোল্ডার: ডিফল্ট ভার্সনের জন্য আগের মতোই data\mysql; অন্য ভার্সনের জন্য আলাদা (data\mysql-8.0.40)
+// কারণ ভার্সন বদলালে একই ডাটা ফোল্ডার খুললে ডাটাবেস নষ্ট হতে পারে।
+function dataDirFor(id, legacyName) {
+  const v = activeVersion(id);
+  return path.join(ROOT_DIR, 'data', v.isDefault ? legacyName : `${legacyName}-${v.version}`);
+}
+const mysqlDataDir = () => dataDirFor('mysql', 'mysql');
+const pgDataDir = () => dataDirFor('postgres', 'postgres');
+const mysqlIni = () => {
+  const v = activeVersion('mysql');
+  return path.join(ROOT_DIR, 'data', v.isDefault ? 'my.ini' : `my-${v.version}.ini`);
+};
+
+function makeService(id, label, url, folder, exeRelPath, opts = {}) {
+  TOOL_DEFAULTS[id] = { version: opts.version || '', folder, url };
+  // dir/exe/url getter: ইনস্টল ফোল্ডার বা ভার্সন বদলালে নিজে থেকেই নতুন পথ পাওয়া যায়
+  return {
+    id,
+    label,
+    get url() {
+      return activeVersion(id).url;
+    },
+    get dir() {
+      return path.join(TOOLS_DIR, activeVersion(id).folder);
+    },
+    exeRel: exeRelPath,
+    get exe() {
+      return path.join(TOOLS_DIR, activeVersion(id).folder, exeRelPath);
+    },
+    needsVC: !!opts.needsVC,
+    usesPHP: !!opts.usesPHP,
+    vhosts: !!opts.vhosts,
+    afterExtract: opts.afterExtract || null,
+    beforeStart: opts.beforeStart || null,
+    args: opts.args || (() => []),
+    reloadArgs: opts.reloadArgs || ['-s', 'reload'],
+  };
+}
+
+// php.ini-তে দরকারি extension চালু করা (বারবার চালালেও একই ফল)
+const PHP_EXTS = 'mbstring|openssl|curl|mysqli|pdo_mysql|pgsql|pdo_pgsql|fileinfo|gd|zip|intl';
+function enableExtensions(txt) {
+  txt = txt.replace(/^;\s*extension_dir\s*=\s*"ext"/m, 'extension_dir = "ext"');
+  txt = txt.replace(new RegExp(`^;\\s*(extension=(${PHP_EXTS}))\\s*$`, 'gm'), '$1');
+  txt = txt.replace(/^;date\.timezone =.*$/m, 'date.timezone = Asia/Dhaka');
+  // বড় SQL ফাইল ইমপোর্টের জন্য (phpMyAdmin / Adminer)
+  txt = txt.replace(/^upload_max_filesize\s*=.*$/m, 'upload_max_filesize = 128M');
+  txt = txt.replace(/^post_max_size\s*=.*$/m, 'post_max_size = 128M');
+  // একই extension দুইবার লোড হওয়া এড়াতে ডুপ্লিকেট লাইন বাদ
+  const seen = new Set();
+  return txt
+    .split('\n')
+    .filter((line) => {
+      const m = line.match(/^extension=(\w+)/);
+      if (!m) return true;
+      if (seen.has(m[1])) return false;
+      seen.add(m[1]);
+      return true;
+    })
+    .join('\n');
+}
+
+function setupPhpIni(dir) {
+  const txt = fs.readFileSync(path.join(dir, 'php.ini-development'), 'utf8');
+  fs.writeFileSync(path.join(dir, 'php.ini'), enableExtensions(txt));
+}
+
+// আগে থেকে তৈরি php.ini-তেও নতুন extension (যেমন pgsql) চালু করা
+function refreshPhpIni() {
+  const ini = path.join(SERVICES.php.dir, 'php.ini');
+  if (!fs.existsSync(ini)) return;
+  const txt = fs.readFileSync(ini, 'utf8');
+  const next = enableExtensions(txt);
+  if (next !== txt) fs.writeFileSync(ini, next);
+}
+
+// Nginx-এর একটা server ব্লক (সাইটের জন্য)
+function nginxServer(serverName, root, phpPort, isDefault, webPort, localOnly = false, extra = []) {
+  const r = root.replace(/\\/g, '/');
+  return [
+    '  server {',
+    `    listen ${webPort}${isDefault ? ' default_server' : ''};`,
+    `    server_name ${serverName};`,
+    // Adminer-এর মতো সিস্টেম সাইট শুধু এই কম্পিউটার থেকে খোলা যাবে (LAN থেকে নয়)
+    ...(localOnly ? ['    allow 127.0.0.1;', '    allow ::1;', '    deny all;'] : []),
+    `    root "${r}";`,
+    '    index index.php index.html;',
+    isDefault
+      ? '    location / { try_files $uri $uri/ =404; }'
+      : '    location / { try_files $uri $uri/ /index.php?$query_string; }',
+    ...extra,
+    '    location ~ \\.php$ {',
+    `      fastcgi_pass 127.0.0.1:${phpPort};`,
+    '      fastcgi_index index.php;',
+    '      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;',
+    '      include fastcgi_params;',
+    '      fastcgi_read_timeout 300;',
+    '    }',
+    '  }',
+  ].join('\n');
+}
+
+// http://localhost/phpmyadmin ও http://localhost/adminer (শুধু এই কম্পিউটার থেকে)
+// www ফোল্ডারে একই নামের ফোল্ডার থাকলে সেটাই অগ্রাধিকার পায়, তাই তখন যোগ করা হয় না
+function toolLocations(phpPort) {
+  const out = [];
+  const taken = (n) => {
+    try {
+      return fs.readdirSync(WWW_DIR).some((e) => e.toLowerCase() === n);
+    } catch {
+      return false;
+    }
+  };
+  const add = (name, dir) => {
+    if (taken(name)) return;
+    const d = dir.replace(/\\/g, '/').replace(/\/?$/, '/');
+    out.push(
+      `    location = /${name} { return 301 $scheme://$http_host/${name}/; }`,
+      `    location ^~ /${name}/ {`,
+      `      alias "${d}";`,
+      '      index index.php;',
+      '      allow 127.0.0.1;',
+      '      allow ::1;',
+      '      deny all;',
+      '      location ~ \\.php$ {',
+      `        fastcgi_pass 127.0.0.1:${phpPort};`,
+      '        fastcgi_param SCRIPT_FILENAME $request_filename;',
+      '        include fastcgi_params;',
+      '        fastcgi_read_timeout 300;',
+      '      }',
+      '    }'
+    );
+  };
+  if (pmaInstalled()) add('phpmyadmin', SERVICES.phpmyadmin.dir);
+  if (adminerInstalled()) add('adminer', ADMINER_DIR);
+  return out;
+}
+
+// Apache-এর একটা VirtualHost ব্লক (PHP চলে mod_proxy_fcgi দিয়ে, php-cgi-র সাথে)
+function apacheServer(serverName, root, phpPort, webPort, localOnly = false, extra = []) {
+  const r = root.replace(/\\/g, '/');
+  return [
+    `<VirtualHost *:${webPort}>`,
+    `  ServerName ${serverName}`,
+    `  DocumentRoot "${r}"`,
+    '  DirectoryIndex index.php index.html',
+    `  <Directory "${r}">`,
+    '    Options Indexes FollowSymLinks',
+    '    AllowOverride All',
+    `    ${localOnly ? 'Require local' : 'Require all granted'}`,
+    '  </Directory>',
+    ...extra,
+    '  <FilesMatch "\\.php$">',
+    `    SetHandler "proxy:fcgi://127.0.0.1:${phpPort}"`,
+    '  </FilesMatch>',
+    '</VirtualHost>',
+    '',
+  ].join('\n');
+}
+
+// conf\server360.conf লেখা এবং httpd.conf-এ তার Include বসানো (বারবার চালালেও একই ফল)
+function writeApacheConf(svc, phpPort, sites, webPort) {
+  const f = (p) => p.replace(/\\/g, '/');
+  const aliasLines = [];
+  const taken = (n) => {
+    try {
+      return fs.readdirSync(WWW_DIR).some((e) => e.toLowerCase() === n);
+    } catch {
+      return false;
+    }
+  };
+  const addAlias = (name, dir) => {
+    if (taken(name)) return;
+    aliasLines.push(
+      `  Alias /${name} "${f(dir)}"`,
+      `  <Directory "${f(dir)}">`,
+      '    DirectoryIndex index.php',
+      '    AllowOverride None',
+      '    Require local',
+      '  </Directory>'
+    );
+  };
+  if (pmaInstalled()) addAlias('phpmyadmin', SERVICES.phpmyadmin.dir);
+  if (adminerInstalled()) addAlias('adminer', ADMINER_DIR);
+
+  // দরকারি মডিউল নিজেই লোড (আগে থেকে লোড থাকলে বাদ যায়, তাই দুবার লোডের এরর হয় না)
+  const mods = [
+    ['proxy_module', 'mod_proxy.so', true],
+    ['proxy_fcgi_module', 'mod_proxy_fcgi.so', true],
+    ['rewrite_module', 'mod_rewrite.so', true],
+    ['authz_host_module', 'mod_authz_host.so', false],
+    ['alias_module', 'mod_alias.so', false],
+    ['dir_module', 'mod_dir.so', false],
+  ];
+  const modLines = [];
+  for (const [name, file, must] of mods) {
+    if (!fs.existsSync(path.join(svc.dir, 'modules', file))) {
+      if (must) throw new Error(`Apache-এর modules\\${file} পাওয়া যায়নি (এই Apache ZIP-এ মডিউলটা নেই)`);
+      continue;
+    }
+    modLines.push(`<IfModule !${name}>`, `  LoadModule ${name} "${f(path.join(svc.dir, 'modules', file))}"`, '</IfModule>');
+  }
+
+  const parts = [
+    '# Server 360 নিজে থেকে তৈরি করে। হাতে বদলালে পরের Start-এ মুছে যাবে।',
+    ...modLines,
+    '',
+    'ProxyTimeout 300',
+    // php-cgi একসময়ে একটাই কানেকশন সামলায়, তাই কানেকশন ধরে না রাখা
+    `<Proxy "fcgi://127.0.0.1:${phpPort}">`,
+    '  ProxySet disablereuse=On',
+    '</Proxy>',
+    '',
+    apacheServer('localhost', WWW_DIR, phpPort, webPort, false, aliasLines),
+    ...sites.map((x) => apacheServer(x.domain, x.root, phpPort, webPort, !!x.system)),
+  ];
+  fs.writeFileSync(path.join(svc.dir, 'conf', 'server360.conf'), parts.join('\n'));
+
+  const confPath = path.join(svc.dir, 'conf', 'httpd.conf');
+  let conf = fs.readFileSync(confPath, 'utf8');
+  conf = conf.replace(/\r?\n?# server360 begin[\s\S]*?# server360 end\r?\n?/g, '\n');
+  conf = conf.replace(/^#(LoadModule (?:proxy_module|proxy_fcgi_module|rewrite_module) )/gm, '$1');
+  conf = conf.trimEnd() + '\n\n# server360 begin\nInclude "${SRVROOT}/conf/server360.conf"\n# server360 end\n';
+  fs.writeFileSync(confPath, conf);
+}
+
+// Nginx-এর কনফিগ প্রতিবার চালুর সময় (ও সাইট রিফ্রেশে) লেখা হয়
+function writeNginxConf(svc, phpPort, sites = [], webPort = 80) {
+  const parts = [
+    'worker_processes 1;',
+    'events { worker_connections 1024; }',
+    'http {',
+    '  include mime.types;',
+    '  default_type application/octet-stream;',
+    '  sendfile on;',
+    '  client_max_body_size 128m;',
+    '  server_names_hash_bucket_size 64;',
+    nginxServer('localhost', WWW_DIR, phpPort, true, webPort, false, toolLocations(phpPort)),
+    ...sites.map((s) => nginxServer(s.domain, s.root, phpPort, false, webPort, !!s.system)),
+    '}',
+    '',
+  ];
+  fs.writeFileSync(path.join(svc.dir, 'conf', 'nginx.conf'), parts.join('\n'));
+}
+
+const SERVICES = {
+  php: makeService('php', 'PHP', PHP_URL, 'php', 'php-cgi.exe', {
+    version: '8.5.12',
+    needsVC: true,
+    afterExtract: setupPhpIni,
+  }),
+  mysql: makeService('mysql', 'MySQL', MYSQL_URL, 'mysql', path.join('bin', 'mysqld.exe'), {
+    version: '8.4.13',
+    needsVC: true,
+  }),
+  postgres: makeService('postgres', 'PostgreSQL', POSTGRES_URL, 'pgsql', path.join('bin', 'postgres.exe'), {
+    version: '18.6',
+    needsVC: true,
+  }),
+  phpmyadmin: makeService('phpmyadmin', 'phpMyAdmin', PMA_URL, 'phpmyadmin', 'index.php', {
+    version: '5.2.3',
+    afterExtract: (dir) => fs.mkdirSync(path.join(dir, 'tmp'), { recursive: true }),
+  }),
+  apache: makeService('apache', 'Apache', APACHE_URL, 'Apache24', path.join('bin', 'httpd.exe'), {
+    version: '2.4.70',
+    needsVC: true,
+    usesPHP: true,
+    vhosts: true,
+    reloadArgs: ['-k', 'restart'],
+    afterExtract: (dir) => {
+      const confPath = path.join(dir, 'conf', 'httpd.conf');
+      let conf = fs.readFileSync(confPath, 'utf8');
+      const root = dir.replace(/\\/g, '/');
+      conf = conf.replace(/Define SRVROOT ".*"/, `Define SRVROOT "${root}"`);
+      fs.writeFileSync(confPath, conf);
+    },
+    // পোর্ট বদলানো: Listen ও ServerName লাইন ঠিক করা
+    beforeStart: (svc, phpPort, sites, webPort) => {
+      const confPath = path.join(svc.dir, 'conf', 'httpd.conf');
+      let conf = fs.readFileSync(confPath, 'utf8');
+      conf = conf.replace(/Define SRVROOT ".*"/, `Define SRVROOT "${svc.dir.replace(/\\/g, '/')}"`);
+      conf = conf.replace(/^Listen\s+\S+/m, `Listen ${webPort}`);
+      conf = conf.replace(/^#?ServerName\s.*$/m, `ServerName localhost:${webPort}`);
+      fs.writeFileSync(confPath, conf);
+      writeApacheConf(svc, phpPort, sites, webPort);
+    },
+  }),
+  nginx: makeService('nginx', 'Nginx', NGINX_URL, 'nginx', 'nginx.exe', {
+    version: '1.30.6',
+    usesPHP: true,
+    vhosts: true,
+    afterExtract: (dir) => {
+      fs.mkdirSync(path.join(dir, 'logs'), { recursive: true });
+      fs.mkdirSync(path.join(dir, 'temp'), { recursive: true });
+    },
+    beforeStart: writeNginxConf,
+    args: (dir) => ['-p', dir.replace(/\\/g, '/') + '/'],
+  }),
+};
+
+// ---------- Virtual host (blog.test) ----------
+const TLD = 'test';
+const HOSTS_PATH = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
+const HOSTS_BEGIN = '# my-laragon begin';
+const HOSTS_END = '# my-laragon end';
+
+// www ফোল্ডারের প্রতিটা সাবফোল্ডার একটা সাইট। ভেতরে public ফোল্ডার থাকলে (Laravel) সেটাই root।
+function scanSites() {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(WWW_DIR, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const sites = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue;
+    const name = e.name.toLowerCase().replace(/\s+/g, '-');
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) continue; // ডোমেইনে চলে না এমন নাম বাদ
+    const dir = path.join(WWW_DIR, e.name);
+    const pub = path.join(dir, 'public');
+    const hasPublic = fs.existsSync(pub) && fs.statSync(pub).isDirectory();
+    sites.push({ name, domain: `${name}.${TLD}`, root: hasPublic ? pub : dir });
+  }
+  return sites;
+}
+
+// ---------- Adminer (ব্রাউজারে ডাটাবেস দেখার টুল) ----------
+const ADMINER_DOMAIN = `adminer.${TLD}`;
+const adminerInstalled = () => fs.existsSync(path.join(ADMINER_DIR, 'adminer.php'));
+
+// index.php: পাসওয়ার্ড-ফাঁকা (root / postgres) ডাটাবেসে ঢোকার অনুমতি দেয়, কিন্তু শুধু localhost থেকে
+const ADMINER_INDEX = `<?php
+if (!in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1', '::1'], true)) {
+  http_response_code(403);
+  exit('Forbidden');
+}
+function adminer_object() {
+  $base = class_exists('Adminer\\\\Adminer') ? 'Adminer\\\\Adminer' : 'Adminer';
+  eval('class MyLaragonAdminer extends ' . $base . ' { function login($login, $password) { return true; } }');
+  return new MyLaragonAdminer;
+}
+include __DIR__ . '/adminer.php';
+`;
+
+async function ensureAdminer() {
+  fs.mkdirSync(ADMINER_DIR, { recursive: true });
+  const file = path.join(ADMINER_DIR, 'adminer.php');
+  if (!fs.existsSync(file)) {
+    sendStatus('Adminer ডাউনলোড হচ্ছে...');
+    const part = file + '.part';
+    await download(ADMINER_URL, part, 'Adminer ডাউনলোড হচ্ছে');
+    fs.renameSync(part, file);
+  }
+  fs.writeFileSync(path.join(ADMINER_DIR, 'index.php'), ADMINER_INDEX);
+}
+
+// ---------- phpMyAdmin (শুধু MySQL) ----------
+const PMA_DOMAIN = `phpmyadmin.${TLD}`;
+const pmaInstalled = () => fs.existsSync(SERVICES.phpmyadmin.exe);
+
+// config.inc.php: root হিসেবে নিজে থেকে লগইন (পাসওয়ার্ড ফাঁকা)। পোর্ট বদলালে আবার লেখা হয়।
+function writePmaConfig() {
+  const dir = SERVICES.phpmyadmin.dir;
+  if (!settings.pmaSecret) {
+    settings.pmaSecret = crypto.randomBytes(16).toString('hex'); // ৩২ অক্ষর
+    saveSettings(settings);
+  }
+  fs.mkdirSync(path.join(dir, 'tmp'), { recursive: true });
+  const f = (p) => p.replace(/\\/g, '/');
+  const cfg = [
+    '<?php',
+    `$cfg['blowfish_secret'] = '${settings.pmaSecret}';`,
+    `$cfg['TempDir'] = '${f(path.join(dir, 'tmp'))}';`,
+    '$i = 1;',
+    `$cfg['Servers'][$i]['auth_type'] = 'config';`,
+    `$cfg['Servers'][$i]['host'] = '127.0.0.1';`,
+    `$cfg['Servers'][$i]['port'] = '${getDbPort('mysql')}';`,
+    `$cfg['Servers'][$i]['user'] = 'root';`,
+    `$cfg['Servers'][$i]['password'] = '';`,
+    `$cfg['Servers'][$i]['AllowNoPassword'] = true;`,
+    `$cfg['VersionCheck'] = false;`,
+    '',
+  ].join('\n');
+  fs.writeFileSync(path.join(dir, 'config.inc.php'), cfg);
+}
+
+async function ensurePhpMyAdmin() {
+  await ensureService(SERVICES.phpmyadmin);
+  writePmaConfig();
+}
+
+// ব্যবহারকারীর সাইটের সাথে adminer.test ও phpmyadmin.test যোগ করা
+// (www-তে একই নামের ফোল্ডার থাকলে সেটাই অগ্রাধিকার পাবে)
+function withToolSites(sites) {
+  const extra = [];
+  if (adminerInstalled()) extra.push({ name: 'adminer', domain: ADMINER_DOMAIN, root: ADMINER_DIR, system: true });
+  if (pmaInstalled()) extra.push({ name: 'phpmyadmin', domain: PMA_DOMAIN, root: SERVICES.phpmyadmin.dir, system: true });
+  return [...sites, ...extra.filter((e) => !sites.some((s) => s.domain === e.domain))];
+}
+
+function readHosts() {
+  try {
+    return fs.readFileSync(HOSTS_PATH, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function buildHostsContent(sites) {
+  const stripped = readHosts()
+    .replace(/\r?\n?# my-laragon begin[\s\S]*?# my-laragon end\r?\n?/g, '\r\n')
+    .trimEnd();
+  if (!sites.length) return stripped + '\r\n';
+  const lines = [HOSTS_BEGIN, ...sites.map((s) => `127.0.0.1 ${s.domain}`), HOSTS_END];
+  return stripped + '\r\n\r\n' + lines.join('\r\n') + '\r\n';
+}
+
+const normText = (t) => t.replace(/\r\n/g, '\n').trim();
+
+// hosts ফাইলে শুধু আমাদের ব্লকটা বদলানো। পড়তে অনুমতি লাগে না, লিখতে Administrator (UAC) লাগে।
+// বদল না থাকলে UAC পপআপ আসে না।
+async function syncHosts(sites) {
+  const next = buildHostsContent(sites);
+  if (normText(readHosts()) === normText(next)) return { ok: true, changed: false };
+
+  fs.mkdirSync(TOOLS_DIR, { recursive: true });
+  const src = path.join(TOOLS_DIR, 'hosts.new');
+  const ps1 = path.join(TOOLS_DIR, 'apply-hosts.ps1');
+  const q = (t) => t.replace(/'/g, "''");
+  fs.writeFileSync(src, next, 'utf8');
+  fs.writeFileSync(
+    ps1,
+    '\ufeff' + `Copy-Item -Force -LiteralPath '${q(src)}' -Destination '${q(HOSTS_PATH)}'\r\n`,
+    'utf8'
+  );
+
+  sendStatus('hosts ফাইল আপডেটের জন্য Administrator অনুমতি লাগবে (Yes চাপুন)...');
+  await new Promise((resolve) =>
+    execFile(
+      'powershell',
+      [
+        '-NoProfile',
+        '-Command',
+        `Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','"${q(ps1)}"'`,
+      ],
+      () => resolve()
+    )
+  );
+
+  return { ok: normText(readHosts()) === normText(next), changed: true };
+}
+
+let win = null;
+let running = null; // { id, procs: [...] } — একসময়ে একটাই সার্ভার চলবে (পোর্ট ৮০)
+let busy = false;
+
+function createWindow() {
+  win = new BrowserWindow({
+    width: 1060,
+    height: 700,
+    minWidth: 900,
+    minHeight: 580,
+    title: 'Server 360',
+    backgroundColor: '#0f172a',
+    webPreferences: { preload: path.join(__dirname, 'preload.js') },
+  });
+  win.setMenuBarVisibility(false);
+  win.loadFile('index.html');
+}
+
+function sendStatus(msg) {
+  if (win) win.webContents.send('status', msg);
+}
+
+function killTree(pid) {
+  exec(`taskkill /pid ${pid} /t /f`);
+}
+
+// আগের বার বন্ধ না হওয়া (লুকিয়ে চলা) nginx / php-cgi প্রসেস মেরে ফেলা।
+// শুধু আমাদের tools ফোল্ডারের প্রসেসই মারা হয়, অন্য প্রোগ্রামের নয়।
+// (Windows-এ দুটো nginx একই পোর্ট ৮০ নিতে পারে, তখন পুরনোটাই সাড়া দেয়)
+function killStale(names = 'nginx,php-cgi,httpd') {
+  const base = TOOLS_DIR.replace(/'/g, "''");
+  const cmd =
+    `powershell -NoProfile -Command "Get-Process ${names} -ErrorAction SilentlyContinue | ` +
+    `Where-Object { $_.Path -like '${base}*' } | Stop-Process -Force"`;
+  return new Promise((resolve) => exec(cmd, () => setTimeout(resolve, 500)));
+}
+
+// ফাইল ডাউনলোড (রিডাইরেক্ট সহ)
+function download(url, dest, label = 'ডাউনলোড হচ্ছে') {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          const next = new URL(res.headers.location, url).toString();
+          return download(next, dest, label).then(resolve, reject);
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error('ডাউনলোড ব্যর্থ, কোড: ' + res.statusCode));
+        }
+
+        const partPath = dest + '.part';
+        const file = fs.createWriteStream(partPath);
+        const total = parseInt(res.headers['content-length'] || '0', 10);
+        let done = 0;
+
+        res.on('data', (chunk) => {
+          done += chunk.length;
+          if (total) sendStatus(`${label}... ${Math.round((done / total) * 100)}%`);
+        });
+        res.pipe(file);
+        file.on('finish', () =>
+          file.close(() => {
+            try {
+              fs.renameSync(partPath, dest);
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          })
+        );
+        file.on('error', reject);
+        res.on('error', reject);
+        res.on('aborted', () => reject(new Error('ডাউনলোড মাঝপথে থেমে গেছে')));
+      })
+      .on('error', reject);
+  });
+}
+
+// ---------- Visual C++ ----------
+function isVCInstalled() {
+  return new Promise((resolve) => {
+    exec(
+      'reg query "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64" /v Installed',
+      (err, stdout) => resolve(!err && /0x1/.test(stdout))
+    );
+  });
+}
+
+function runInstaller(exePath, args) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(exePath, args);
+    p.on('error', reject);
+    p.on('exit', (code) => {
+      if (code === 0 || code === 3010) resolve();
+      else reject(new Error('VC++ ইনস্টল ব্যর্থ, কোড: ' + code));
+    });
+  });
+}
+
+async function ensureVCRedist() {
+  if (await isVCInstalled()) return;
+
+  fs.mkdirSync(TOOLS_DIR, { recursive: true });
+  sendStatus('Visual C++ পাওয়া যায়নি, ডাউনলোড হচ্ছে...');
+  await download(VCREDIST_URL, VCREDIST_PATH, 'Visual C++ ডাউনলোড হচ্ছে');
+
+  sendStatus('Visual C++ ইনস্টল হচ্ছে (Yes চাপুন)...');
+  await runInstaller(VCREDIST_PATH, ['/install', '/quiet', '/norestart']);
+  fs.unlinkSync(VCREDIST_PATH);
+}
+
+// ---------- সার্ভিস ইনস্টল ----------
+function findTopDir(parent) {
+  const entry = fs.readdirSync(parent, { withFileTypes: true }).find((e) => e.isDirectory());
+  if (!entry) throw new Error('zip-এর ভেতরে কোনো ফোল্ডার পাওয়া যায়নি');
+  return path.join(parent, entry.name);
+}
+
+// ZIP খোলা: আগে Windows-এর নিজস্ব tar.exe (দ্রুত ও নির্ভরযোগ্য), না হলে extract-zip।
+// extract-zip বড় ZIP-এ (যেমন PostgreSQL) নীরবে আটকে যেতে পারে, তাই সময়সীমা দেওয়া আছে।
+function extractWithTar(zipPath, dir) {
+  return new Promise((resolve, reject) => {
+    const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+    if (!fs.existsSync(tar)) return reject(new Error('tar.exe পাওয়া যায়নি'));
+    fs.mkdirSync(dir, { recursive: true });
+    execFile(tar, ['-xf', zipPath, '-C', dir], { timeout: 15 * 60 * 1000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (err, _o, stderr) => {
+      if (err) reject(new Error('tar: ' + (String(stderr || '').trim().slice(-200) || err.message)));
+      else resolve();
+    });
+  });
+}
+async function extractZipSafe(zipPath, dir) {
+  try {
+    await extractWithTar(zipPath, dir);
+    return;
+  } catch (e) {
+    sendStatus('tar দিয়ে হয়নি, অন্য পদ্ধতিতে খোলা হচ্ছে...');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  let timer;
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => rej(new Error('ZIP খুলতে অনেক সময় লাগছে (আটকে গেছে)। ' + path.basename(zipPath) + ' ফাইলটা নষ্ট হতে পারে, মুছে আবার চেষ্টা করুন')), 10 * 60 * 1000);
+  });
+  try {
+    await Promise.race([extract(zipPath, { dir }), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// zip (ডাউনলোড করে বা পিসির ফাইল থেকে) খুলে destDir-এ বসানো। ভুল zip হলে exe না পেয়ে এরর দেয়।
+async function installInto(svc, destDir, { url, zipFile } = {}) {
+  fs.mkdirSync(TOOLS_DIR, { recursive: true });
+  const name = path.basename(destDir);
+  const zipPath = zipFile || path.join(TOOLS_DIR, name + '.zip');
+  const tmpDir = path.join(TOOLS_DIR, '_tmp_' + name);
+
+  if (!zipFile) {
+    if (fs.existsSync(zipPath)) {
+      sendStatus(`${svc.label}-এর ZIP আগেই নামানো আছে, সরাসরি খোলা হচ্ছে...`);
+    } else {
+      if (!url) throw new Error(`${svc.label}-এর এই ভার্সনের ফাইল নেই আর ডাউনলোড লিংকও নেই। "টুলস ও ভার্সন" পেজ থেকে আবার যোগ করুন`);
+      sendStatus(`${svc.label} পাওয়া যায়নি, ডাউনলোড শুরু হচ্ছে...`);
+      await download(url, zipPath, `${svc.label} ডাউনলোড হচ্ছে`);
+    }
+  }
+
+  sendStatus('ফাইল খোলা হচ্ছে (বড় ফাইলে কিছুক্ষণ লাগে)...');
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  await extractZipSafe(zipPath, tmpDir);
+
+  // exe সরাসরি উপরে থাকলে (যেমন PHP) ওটাই আসল ফোল্ডার,
+  // নাহলে ভেতরের প্রথম ফোল্ডারটা (যেমন nginx-1.30.6, Apache24)
+  let source;
+  try {
+    source = fs.existsSync(path.join(tmpDir, svc.exeRel)) ? tmpDir : findTopDir(tmpDir);
+    if (!fs.existsSync(path.join(source, svc.exeRel))) {
+      throw new Error(`এটা সঠিক ${svc.label} ZIP নয় (${svc.exeRel} পাওয়া যায়নি)`);
+    }
+  } catch (err) {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (!zipFile) fs.rmSync(zipPath, { force: true }); // ভুল ফাইল জমিয়ে না রাখা
+    throw err;
+  }
+  fs.rmSync(destDir, { recursive: true, force: true });
+  fs.renameSync(source, destDir);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (!zipFile) fs.rmSync(zipPath, { force: true });
+
+  if (svc.afterExtract) svc.afterExtract(destDir);
+}
+
+async function ensureService(svc) {
+  if (fs.existsSync(svc.exe)) return;
+  await installInto(svc, svc.dir, { url: svc.url });
+  sendStatus(`${svc.label} ইনস্টল সম্পন্ন`);
+}
+
+// www ফোল্ডার ও টেস্ট ফাইল
+function ensureWww() {
+  fs.mkdirSync(WWW_DIR, { recursive: true });
+  // ফোল্ডার একদম খালি হলেই টেস্ট ফাইল বানানো (ইউজারের নিজের ফোল্ডারে বাড়তি ফাইল ফেলব না)
+  if (fs.readdirSync(WWW_DIR).length === 0) {
+    fs.writeFileSync(path.join(WWW_DIR, 'index.php'), '<?php phpinfo();\n');
+  }
+}
+
+// প্রসেস চালিয়ে ১.৫ সেকেন্ড দেখা: এর মধ্যে বন্ধ হয়ে গেলে ব্যর্থ
+function spawnChecked(exe, args, options) {
+  return new Promise((resolve) => {
+    const proc = spawn(exe, args, { windowsHide: true, ...options });
+    let output = '';
+    proc.stdout.on('data', (d) => (output += d));
+    proc.stderr.on('data', (d) => (output += d));
+    proc.once('error', (e) => resolve({ proc, failed: e.message, output }));
+    proc.once('exit', (code) => resolve({ proc, failed: `বন্ধ হয়ে গেছে (কোড ${code})`, output }));
+    setTimeout(() => resolve({ proc, failed: null, output }), 1500);
+  });
+}
+
+// ---------- ডাটাবেস (MySQL, PostgreSQL...) ----------
+// নতুন ডাটাবেস (MariaDB, MongoDB...) যোগ করতে নিচের DATABASES-এ একটা এন্ট্রি বাড়ালেই হবে।
+
+// MySQL-এর my.ini: ডাটা ফোল্ডার tools-এর বাইরে, যাতে নতুন করে নামালেও ডাটা না হারায়
+function writeMysqlIni(svc, port) {
+  fs.mkdirSync(path.dirname(mysqlIni()), { recursive: true });
+  const f = (p) => p.replace(/\\/g, '/');
+  const ini = [
+    '[mysqld]',
+    `basedir=${f(svc.dir)}`,
+    `datadir=${f(mysqlDataDir())}`,
+    `port=${port}`,
+    'bind-address=127.0.0.1',
+    'mysqlx=OFF',
+    'character-set-server=utf8mb4',
+    'max_allowed_packet=64M',
+    '',
+    '[client]',
+    `port=${port}`,
+    '',
+  ].join('\n');
+  fs.writeFileSync(mysqlIni(), ini);
+}
+
+// একটা টুল চালিয়ে শেষ হওয়া পর্যন্ত অপেক্ষা (ডাটাবেস প্রথমবার তৈরির জন্য)
+function runTool(exe, args, cwd) {
+  return new Promise((resolve, reject) =>
+    execFile(exe, args, { cwd, timeout: 300000, windowsHide: true }, (err, stdout, stderr) => {
+      if (err) reject(new Error(String(stderr || stdout || err.message).trim().slice(-300)));
+      else resolve();
+    })
+  );
+}
+
+function tcpCheck(port) {
+  return new Promise((resolve) => {
+    const sock = net.connect(port, '127.0.0.1');
+    sock.once('connect', () => {
+      sock.destroy();
+      resolve(true);
+    });
+    sock.once('error', () => {
+      sock.destroy();
+      resolve(false);
+    });
+  });
+}
+
+const DATABASES = {
+  mysql: {
+    id: 'mysql',
+    label: 'MySQL',
+    svcId: 'mysql',
+    portKey: 'mysqlPort',
+    defaultPort: 3306,
+    autoDefault: true,
+    stale: 'mysqld',
+    get dataDir() {
+      return mysqlDataDir();
+    },
+    info: 'হোস্ট: 127.0.0.1 · ইউজার: root · পাসওয়ার্ড: ফাঁকা',
+    prepare: (svc, port) => writeMysqlIni(svc, port),
+    isInitialized: () => fs.existsSync(path.join(mysqlDataDir(), 'mysql')),
+    // root-এর পাসওয়ার্ড ফাঁকা (Laragon-এর মতো)
+    init: (svc) => runTool(svc.exe, [`--defaults-file=${mysqlIni()}`, '--initialize-insecure', '--console'], svc.dir),
+    spawnArgs: () => [`--defaults-file=${mysqlIni()}`, '--console'],
+    check: (svc, port) => tcpCheck(port),
+    shutdownCmd: (svc, port) => ({
+      exe: path.join(svc.dir, 'bin', 'mysqladmin.exe'),
+      args: ['--no-defaults', '-u', 'root', '--protocol=tcp', '-h', '127.0.0.1', `--port=${port}`, 'shutdown'],
+    }),
+  },
+  postgres: {
+    id: 'postgres',
+    label: 'PostgreSQL',
+    svcId: 'postgres',
+    portKey: 'postgresPort',
+    defaultPort: 5432,
+    autoDefault: false,
+    stale: 'postgres',
+    get dataDir() {
+      return pgDataDir();
+    },
+    info: 'হোস্ট: 127.0.0.1 · ইউজার: postgres · পাসওয়ার্ড: ফাঁকা',
+    prepare: () => fs.mkdirSync(path.dirname(pgDataDir()), { recursive: true }),
+    isInitialized: () => fs.existsSync(path.join(pgDataDir(), 'PG_VERSION')),
+    // শুধু নিজের কম্পিউটার থেকে ঢোকা যায় (trust), পাসওয়ার্ড লাগে না
+    init: (svc) =>
+      runTool(
+        path.join(svc.dir, 'bin', 'initdb.exe'),
+        ['-D', pgDataDir(), '-U', 'postgres', '-A', 'trust', '-E', 'UTF8', '--locale=C'],
+        svc.dir
+      ),
+    spawnArgs: (svc, port) => ['-D', pgDataDir(), '-p', String(port), '-c', 'listen_addresses=127.0.0.1'],
+    check: (svc, port) =>
+      new Promise((resolve) =>
+        execFile(
+          path.join(svc.dir, 'bin', 'pg_isready.exe'),
+          ['-h', '127.0.0.1', '-p', String(port)],
+          { timeout: 5000, windowsHide: true },
+          (err) => resolve(!err)
+        )
+      ),
+    shutdownCmd: (svc) => ({
+      exe: path.join(svc.dir, 'bin', 'pg_ctl.exe'),
+      args: ['stop', '-D', pgDataDir(), '-m', 'fast', '-w', '-t', '20'],
+    }),
+  },
+};
+
+// চালু থাকা ডাটাবেস: { mysql: { proc, port }, ... }
+const dbRun = {};
+
+// প্রসেসের পোর্ট সাড়া দেওয়া পর্যন্ত অপেক্ষা (প্রসেস বন্ধ হয়ে গেলে ব্যর্থ)
+async function waitDbReady(db, svc, port, proc, timeoutMs = 90000) {
+  let exited = null;
+  proc.once('exit', (code) => (exited = code === null ? 'অজানা' : code));
+  proc.once('error', (e) => (exited = e.message));
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (exited !== null) return { ok: false, reason: `বন্ধ হয়ে গেছে (কোড ${exited})` };
+    if (await db.check(svc, port)) return { ok: true };
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return { ok: false, reason: 'সময় শেষ হয়ে গেছে' };
+}
+
+async function startDatabase(id) {
+  const db = DATABASES[id];
+  if (!db) return 'সমস্যা: অজানা ডাটাবেস';
+  const svc = SERVICES[db.svcId];
+  if (busy) return 'একটা কাজ চলছে, একটু অপেক্ষা করুন...';
+  if (dbRun[id]) return `${db.label} আগে থেকেই চলছে`;
+
+  busy = true;
+  try {
+    await ensureVCRedist();
+    await ensureService(svc);
+    await killStale(db.stale);
+
+    const port = getDbPort(id);
+    if (!(await isPortFree(port))) {
+      return `সমস্যা: ${db.label}-এর পোর্ট ${port} অন্য কেউ ব্যবহার করছে (আসল ${db.label} বা Laragon হতে পারে)। ওই ডাটাবেসের পোর্ট ঘরে অন্য সংখ্যা দিন।`;
+    }
+
+    db.prepare(svc, port);
+    if (!db.isInitialized()) {
+      sendStatus(`${db.label} ডাটাবেস প্রথমবার তৈরি হচ্ছে (১-২ মিনিট লাগতে পারে)...`);
+      try {
+        await db.init(svc, port);
+      } catch (err) {
+        fs.rmSync(db.dataDir, { recursive: true, force: true }); // আধা-তৈরি ডাটা মুছে যাতে আবার চেষ্টা করা যায়
+        throw new Error(`${db.label} সেটআপ ব্যর্থ: ${err.message}`);
+      }
+    }
+
+    sendStatus(`${db.label} চালু হচ্ছে...`);
+    const proc = spawn(svc.exe, db.spawnArgs(svc, port), { cwd: svc.dir, windowsHide: true });
+    let out = '';
+    const collect = (d) => (out = (out + d).slice(-2000));
+    proc.stdout.on('data', collect);
+    proc.stderr.on('data', collect);
+
+    const r = await waitDbReady(db, svc, port, proc);
+    if (!r.ok) {
+      killTree(proc.pid);
+      return `সমস্যা: ${db.label} চালু হয়নি, ${r.reason}. ${out.trim().slice(-300)}`;
+    }
+
+    dbRun[id] = { proc, port };
+    proc.on('exit', () => {
+      if (dbRun[id] && dbRun[id].proc === proc) delete dbRun[id];
+    });
+    return `${db.label} চালু হয়েছে (পোর্ট ${port})। ${db.info}`;
+  } catch (err) {
+    return 'সমস্যা: ' + err.message;
+  } finally {
+    busy = false;
+  }
+}
+
+async function stopDatabase(id) {
+  const db = DATABASES[id];
+  const run = dbRun[id];
+  if (!db || !run) return `${db ? db.label : 'ডাটাবেস'} চলছে না`;
+  const svc = SERVICES[db.svcId];
+  sendStatus(`${db.label} নিরাপদে বন্ধ হচ্ছে...`);
+
+  // আগে নিয়ম মেনে shutdown, না হলে (যেমন পাসওয়ার্ড দেওয়া থাকলে) জোর করে বন্ধ
+  const cmd = db.shutdownCmd(svc, run.port);
+  await new Promise((resolve) =>
+    execFile(cmd.exe, cmd.args, { timeout: 30000, windowsHide: true }, () => resolve())
+  );
+  await new Promise((resolve) => {
+    if (run.proc.exitCode !== null) return resolve();
+    const t = setTimeout(resolve, 10000);
+    run.proc.once('exit', () => {
+      clearTimeout(t);
+      resolve();
+    });
+  });
+  if (run.proc.exitCode === null) killTree(run.proc.pid);
+  delete dbRun[id];
+  return `${db.label} বন্ধ হয়েছে`;
+}
+
+// ---------- IPC ----------
+async function startWebServer(id) {
+  const svc = SERVICES[id];
+  if (!svc || !['apache', 'nginx'].includes(id)) return 'সমস্যা: অজানা সার্ভার';
+  if (busy) return 'একটা কাজ চলছে, একটু অপেক্ষা করুন...';
+  if (running) {
+    return running.id === id
+      ? `${svc.label} আগে থেকেই চলছে`
+      : `আগে ${SERVICES[running.id].label} বন্ধ করুন (দুটো একসাথে পোর্ট ৮০ নিতে পারে না)`;
+  }
+
+  busy = true;
+  const procs = [];
+  const abort = () => procs.forEach((p) => killTree(p.pid));
+  try {
+    if (svc.needsVC || svc.usesPHP) await ensureVCRedist();
+    if (svc.usesPHP) {
+      await ensureService(SERVICES.php);
+      refreshPhpIni();
+    }
+    await ensureService(svc);
+    ensureWww();
+    await killStale();
+
+    const webPort = getWebPort();
+    if (!(await isPortFree(webPort))) {
+      return `সমস্যা: পোর্ট ${webPort} অন্য কেউ ব্যবহার করছে (IIS, Skype বা আসল Laragon হতে পারে)। নিচের "পোর্ট" ঘরে অন্য সংখ্যা দিন, যেমন 8080।`;
+    }
+    const phpPort = svc.usesPHP ? await getFreePort() : 0;
+    let sites = [];
+    let hostsNote = '';
+    if (svc.vhosts) {
+      try {
+        await ensureAdminer();
+      } catch (err) {
+        hostsNote += ` ⚠ Adminer নামানো যায়নি (${err.message})।`;
+      }
+      try {
+        await ensurePhpMyAdmin();
+      } catch (err) {
+        hostsNote += ` ⚠ phpMyAdmin নামানো যায়নি (${err.message})।`;
+      }
+      sites = withToolSites(scanSites());
+      const h = await syncHosts(sites);
+      if (!h.ok) hostsNote += ' ⚠ hosts ফাইল আপডেট হয়নি (Administrator অনুমতি দিন), তাই শুধু localhost কাজ করবে।';
+    }
+    if (svc.beforeStart) svc.beforeStart(svc, phpPort, sites, webPort);
+
+    // Nginx-এর জন্য আগে php-cgi চালু করা
+    if (svc.usesPHP) {
+      const php = SERVICES.php;
+      const r = await spawnChecked(php.exe, ['-b', `127.0.0.1:${phpPort}`], {
+        cwd: php.dir,
+        env: { ...process.env, PHP_FCGI_MAX_REQUESTS: '0', PHPRC: php.dir },
+      });
+      if (r.failed) {
+        return `সমস্যা: PHP চালু হয়নি, ${r.failed}. ${r.output.trim().slice(0, 200)}`;
+      }
+      procs.push(r.proc);
+    }
+
+    const r = await spawnChecked(svc.exe, svc.args(svc.dir), { cwd: svc.dir });
+    if (r.failed) {
+      abort();
+      const logPath = path.join(svc.dir, 'logs', 'error.log');
+      return `সমস্যা: ${svc.label} চালু হয়নি, ${r.failed}. ${r.output.trim().slice(0, 200)} লগ: ${logPath}`;
+    }
+    procs.push(r.proc);
+
+    running = { id, procs, phpPort, webPort };
+    r.proc.on('exit', () => {
+      if (running && running.procs.includes(r.proc)) {
+        abort();
+        running = null;
+      }
+    });
+    return `${svc.label} চালু হয়েছে${svc.usesPHP ? ' (PHP সহ)' : ''}${svc.vhosts ? `, ${sites.filter((x) => !x.system).length}টা সাইট` : ''}। খুলুন: ${siteUrl('localhost')}${hostsNote}`;
+  } catch (err) {
+    abort();
+    return 'সমস্যা: ' + err.message;
+  } finally {
+    busy = false;
+  }
+}
+
+ipcMain.handle('service:start', (_event, id) => startWebServer(id));
+function stopWebServer() {
+  if (!running) return 'কোনো ওয়েব সার্ভার চলছে না';
+  const { id, procs } = running;
+  running = null;
+  procs.forEach((p) => killTree(p.pid));
+  return `${SERVICES[id].label} বন্ধ হয়েছে`;
+}
+
+ipcMain.handle('service:stop', () => stopWebServer());
+
+ipcMain.handle('web:status', () => (running ? { id: running.id, port: running.webPort } : null));
+
+// ---------- ইনস্টল ফোল্ডার (ROOT) ----------
+const isInside = (parent, child) => {
+  const r = path.relative(path.resolve(parent), path.resolve(child));
+  return r === '' || (!r.startsWith('..') && !path.isAbsolute(r));
+};
+const ROOT_PARTS = ['tools', 'data'];
+
+// পুরনো ROOT থেকে নতুন ফোল্ডারে tools ও data কপি করে সুইচ করা; সফল হলে পুরনোগুলো মোছা হয়
+async function moveRoot(target) {
+  const from = ROOT_DIR;
+  const to = path.resolve(target);
+  if (path.resolve(from).toLowerCase() === to.toLowerCase()) {
+    return { ok: false, path: from, message: 'এটাই এখনকার ইনস্টল ফোল্ডার' };
+  }
+  if (isInside(from, to) || isInside(to, from)) {
+    return { ok: false, path: from, message: 'নতুন ফোল্ডার পুরনো ফোল্ডারের ভেতরে বা বাইরে (একটা আরেকটার অংশ) হতে পারবে না' };
+  }
+  busy = true;
+  const copied = [];
+  try {
+    fs.mkdirSync(to, { recursive: true });
+    const destHas = ROOT_PARTS.some((n) => fs.existsSync(path.join(to, n)));
+    const srcParts = ROOT_PARTS.filter((n) => fs.existsSync(path.join(from, n)));
+    if (!destHas) {
+      for (const n of srcParts) {
+        sendStatus(`"${n}" ফোল্ডার নতুন জায়গায় কপি হচ্ছে (বড় ফাইলে কিছুক্ষণ লাগে)...`);
+        copied.push(n);
+        await fs.promises.cp(path.join(from, n), path.join(to, n), { recursive: true });
+      }
+    }
+    settings.rootDir = to;
+    saveSettings(settings);
+    applyRoot(to);
+    let note = '';
+    if (!destHas) {
+      sendStatus('পুরনো ফাইল মোছা হচ্ছে...');
+      for (const n of srcParts) {
+        try {
+          await fs.promises.rm(path.join(from, n), { recursive: true, force: true });
+        } catch {
+          note = ` (পুরনো জায়গার "${n}" ফোল্ডার মোছা যায়নি, নিজে মুছে দিন: ${from})`;
+        }
+      }
+    }
+    return { ok: true, path: to, message: `ইনস্টল ফোল্ডার বদলে গেছে: ${to}${note}` };
+  } catch (err) {
+    // আধা-কপি হওয়া ফাইল সরিয়ে ফেলা, যাতে আবার চেষ্টা করা যায়
+    for (const n of copied) fs.rmSync(path.join(to, n), { recursive: true, force: true });
+    return { ok: false, path: ROOT_DIR, message: 'সমস্যা: ' + err.message };
+  } finally {
+    busy = false;
+  }
+}
+
+ipcMain.handle('root:get', () => ROOT_DIR);
+ipcMain.handle('root:open', () => {
+  fs.mkdirSync(ROOT_DIR, { recursive: true });
+  return shell.openPath(ROOT_DIR);
+});
+ipcMain.handle('root:choose', async () => {
+  if (busy) return { ok: false, path: ROOT_DIR, message: 'একটা কাজ চলছে, একটু অপেক্ষা করুন...' };
+  if (running || Object.keys(dbRun).length) {
+    return { ok: false, path: ROOT_DIR, message: 'আগে সব সার্ভার বন্ধ করুন (Stop All), তারপর ফোল্ডার বদলান' };
+  }
+  const r = await dialog.showOpenDialog(win, {
+    title: 'ইনস্টল ফোল্ডার বেছে নিন (প্রোগ্রাম ও ডাটাবেস ডাটা এখানে থাকবে)',
+    defaultPath: ROOT_DIR,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (r.canceled || !r.filePaths[0]) return { ok: false, path: ROOT_DIR };
+  const to = path.resolve(r.filePaths[0]);
+  const destHas = ROOT_PARTS.some((n) => fs.existsSync(path.join(to, n)));
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    title: 'ইনস্টল ফোল্ডার বদলানো',
+    message: `ইনস্টল ফোল্ডার বদলে এখানে করবেন?\n${to}`,
+    detail: destHas
+      ? 'ওই ফোল্ডারে আগে থেকেই tools/data আছে। সেগুলোই ব্যবহার করা হবে, পুরনো জায়গার ফাইল মোছা হবে না।'
+      : 'পুরনো জায়গার tools ও data (ডাটাবেস সহ) নতুন ফোল্ডারে সরানো হবে। বড় হলে কিছুক্ষণ লাগবে, এর মধ্যে অ্যাপ বন্ধ করবেন না।',
+    buttons: ['হ্যাঁ, বদলান', 'বাতিল'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response !== 0) return { ok: false, path: ROOT_DIR };
+  return moveRoot(to);
+});
+
+// ---------- সাইট ----------
+const siteUrl = (domain) => `http://${domain}${getWebPort() === 80 ? '' : ':' + getWebPort()}`;
+const publicSites = (sites) => [
+  { name: 'localhost', domain: 'localhost', root: WWW_DIR, system: false, url: siteUrl('localhost') },
+  ...sites.map(({ name, domain, root, system }) => ({ name, domain, root, system: !!system, url: siteUrl(domain) })),
+];
+
+ipcMain.handle('sites:list', () => publicSites(withToolSites(scanSites())));
+
+ipcMain.handle('sites:refresh', async () => {
+  if (busy) return { sites: publicSites(withToolSites(scanSites())), message: 'একটা কাজ চলছে, একটু অপেক্ষা করুন...' };
+  busy = true;
+  try {
+    const sites = withToolSites(scanSites());
+    const h = await syncHosts(sites);
+    let message;
+    const svc = running && SERVICES[running.id];
+    if (svc && svc.vhosts) {
+      svc.beforeStart(svc, running.phpPort, sites, running.webPort);
+      await new Promise((resolve) =>
+        execFile(svc.exe, [...svc.args(svc.dir), ...svc.reloadArgs], { cwd: svc.dir }, () => resolve())
+      );
+      message = `${sites.filter((x) => !x.system).length}টা সাইট লোড হয়েছে`;
+    } else {
+      message = `${sites.filter((x) => !x.system).length}টা সাইট পাওয়া গেছে (Nginx চালু করলে কাজ করবে)`;
+    }
+    if (!h.ok) message += ' ⚠ hosts আপডেট হয়নি (Administrator অনুমতি দিন)';
+    return { sites: publicSites(sites), message };
+  } catch (err) {
+    return { sites: [], message: 'সমস্যা: ' + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
+// ---------- পোর্ট ----------
+ipcMain.handle('port:get', () => getWebPort());
+
+// kind = 'web' অথবা ডাটাবেসের id (mysql, postgres...)
+ipcMain.handle('port:set', (_event, kind, value) => {
+  const db = DATABASES[kind];
+  const label = db ? db.label : 'ওয়েব';
+  const current = db ? getDbPort(kind) : getWebPort();
+  if (db ? dbRun[kind] : running) {
+    return { ok: false, port: current, message: 'আগে সার্ভার বন্ধ করুন, তারপর পোর্ট বদলান' };
+  }
+  const p = validPort(value);
+  if (!p) {
+    return { ok: false, port: current, message: 'পোর্ট ১ থেকে ৬৫৫৩৫-র মধ্যে একটা সংখ্যা হতে হবে' };
+  }
+  const others = [kind === 'web' ? null : getWebPort(), ...Object.keys(DATABASES).filter((k) => k !== kind).map(getDbPort)];
+  if (others.includes(p)) {
+    return { ok: false, port: current, message: `পোর্ট ${p} আরেকটা সার্ভিসে দেওয়া আছে, অন্য সংখ্যা দিন` };
+  }
+  settings[db ? db.portKey : 'webPort'] = p;
+  saveSettings(settings);
+  return { ok: true, port: p, message: `${label} পোর্ট ${p} সেভ হয়েছে।` };
+});
+
+// ---------- ডাটাবেস চালু/বন্ধ ----------
+const autoStartOf = (id) => (settings.autoStart && id in settings.autoStart ? !!settings.autoStart[id] : DATABASES[id].autoDefault);
+
+ipcMain.handle('db:list', () =>
+  Object.values(DATABASES).map((db) => ({
+    id: db.id,
+    label: db.label,
+    port: getDbPort(db.id),
+    running: !!dbRun[db.id],
+    version: activeVersion(db.svcId).version,
+    info: db.info,
+    auto: autoStartOf(db.id),
+  }))
+);
+ipcMain.handle('db:start', (_event, id) => startDatabase(id));
+ipcMain.handle('db:stop', (_event, id) => stopDatabase(id));
+ipcMain.handle('db:setAuto', (_event, id, on) => {
+  if (!DATABASES[id]) return false;
+  settings.autoStart = { ...(settings.autoStart || {}), [id]: !!on };
+  saveSettings(settings);
+  return true;
+});
+
+// ---------- Start All / Stop All ----------
+// নির্বাচিত ওয়েব সার্ভার + "Start All-এ যুক্ত" টিক দেওয়া ডাটাবেসগুলো একসাথে চালু
+ipcMain.handle('all:start', async (_event, webId) => {
+  const lines = [await startWebServer(webId)];
+  for (const id of Object.keys(DATABASES)) {
+    if (autoStartOf(id)) lines.push(await startDatabase(id));
+  }
+  return lines.join('\n');
+});
+
+ipcMain.handle('all:stop', async () => {
+  const lines = [];
+  if (running) lines.push(stopWebServer());
+  for (const id of Object.keys(DATABASES)) {
+    if (dbRun[id]) lines.push(await stopDatabase(id));
+  }
+  return lines.length ? lines.join('\n') : 'কিছুই চলছে না';
+});
+
+// ---------- Adminer খোলা ----------
+// kind = ডাটাবেসের id (mysql / postgres)। লগইন ফর্মে সার্ভার-পোর্ট ও ইউজার আগে থেকে বসানো থাকে।
+ipcMain.handle('adminer:open', async (_event, kind) => {
+  if (!running) {
+    return 'Adminer চালাতে আগে ওয়েব সার্ভার (Nginx বা Apache) চালু করুন (Start All বা Start)।';
+  }
+  if (!adminerInstalled()) {
+    return 'Adminer এখনো নামানো হয়নি। ওয়েব সার্ভার একবার বন্ধ করে আবার চালু করুন।';
+  }
+  const db = DATABASES[kind];
+  let query = '';
+  if (db) {
+    const server = encodeURIComponent(`127.0.0.1:${getDbPort(kind)}`);
+    query = kind === 'postgres' ? `?pgsql=${server}&username=postgres` : `?server=${server}&username=root`;
+  }
+  await shell.openExternal(siteUrl(ADMINER_DOMAIN) + '/' + query);
+  const warn = db && !dbRun[kind] ? ` (সতর্কতা: ${db.label} এখন চালু নেই, আগে Start করুন)` : '';
+  return `Adminer ব্রাউজারে খোলা হয়েছে${warn}। লগইন ফর্মে শুধু "Login" চাপুন।`;
+});
+
+// ---------- phpMyAdmin খোলা ----------
+ipcMain.handle('pma:open', async () => {
+  if (!running) {
+    return 'phpMyAdmin চালাতে আগে ওয়েব সার্ভার (Nginx বা Apache) চালু করুন (Start All বা Start)।';
+  }
+  if (!pmaInstalled()) {
+    return 'phpMyAdmin এখনো নামানো হয়নি। ওয়েব সার্ভার একবার বন্ধ করে আবার চালু করুন।';
+  }
+  writePmaConfig(); // MySQL-এর পোর্ট বদলে থাকলে ঠিক করে নেওয়া
+  await shell.openExternal(siteUrl(PMA_DOMAIN) + '/');
+  const warn = dbRun.mysql ? '' : ' (সতর্কতা: MySQL এখন চালু নেই, আগে Start করুন)';
+  return `phpMyAdmin ব্রাউজারে খোলা হয়েছে${warn}। নিজে থেকেই root হিসেবে লগইন হবে।`;
+});
+
+// শুধু localhost ও *.test লিংক খোলা যাবে
+ipcMain.handle('open:url', (_event, url) => {
+  if (/^http:\/\/(localhost|[a-z0-9-]+\.test)(:\d{1,5})?\/?$/.test(url)) return shell.openExternal(url);
+});
+
+
+// ---------- টুলস ও ভার্সন ----------
+const TOOL_ORDER = ['php', 'nginx', 'apache', 'mysql', 'postgres', 'phpmyadmin'];
+const TOOL_HELP = {
+  php: 'https://windows.php.net/download/',
+  nginx: 'https://nginx.org/en/download.html',
+  apache: 'https://www.apachelounge.com/download/',
+  mysql: 'https://dev.mysql.com/downloads/mysql/',
+  postgres: 'https://www.enterprisedb.com/download-postgresql-binaries',
+  phpmyadmin: 'https://www.phpmyadmin.net/downloads/',
+};
+const TOOL_HINT = {
+  php: 'Thread Safe নয় এমন (NTS) x64 ZIP নামান',
+  nginx: 'Windows-এর ZIP নামান',
+  apache: 'Win64 ZIP নামান (Apache Lounge)',
+  mysql: '"ZIP Archive" (Windows x64) নামান, MSI নয়',
+  postgres: 'EDB-র "Windows x86-64" binaries ZIP নামান',
+  phpmyadmin: 'all-languages.zip নামান',
+};
+const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._-]{0,30}$/;
+// কোনো টুল চলার সময় ভার্সন বদলানো যাবে না
+const toolInUse = (id) => (id === 'mysql' || id === 'postgres' ? !!dbRun[id] : !!running);
+
+ipcMain.handle('tools:list', () =>
+  TOOL_ORDER.map((id) => {
+    const svc = SERVICES[id];
+    const def = TOOL_DEFAULTS[id];
+    const act = activeVersion(id);
+    const items = (settings.toolVersions && settings.toolVersions[id] && settings.toolVersions[id].items) || {};
+    const all = [
+      { version: def.version, folder: def.folder, isDefault: true, source: 'built-in' },
+      ...Object.entries(items).map(([v, it]) => ({ version: v, folder: it.folder, isDefault: false, source: it.url ? 'url' : 'local' })),
+    ];
+    return {
+      id,
+      label: svc.label,
+      hint: TOOL_HINT[id],
+      isDb: id === 'mysql' || id === 'postgres',
+      active: act.version,
+      inUse: toolInUse(id),
+      versions: all.map((v) => ({
+        ...v,
+        active: v.version === act.version,
+        installed: fs.existsSync(path.join(TOOLS_DIR, v.folder, svc.exeRel)),
+      })),
+    };
+  })
+);
+
+ipcMain.handle('tools:help', (_event, id) => (TOOL_HELP[id] ? shell.openExternal(TOOL_HELP[id]) : undefined));
+
+ipcMain.handle('tools:use', (_event, id, version) => {
+  const def = TOOL_DEFAULTS[id];
+  if (!def) return { ok: false, message: 'সমস্যা: অজানা টুল' };
+  if (busy) return { ok: false, message: 'একটা কাজ চলছে, একটু অপেক্ষা করুন...' };
+  if (toolInUse(id)) return { ok: false, message: `আগে ${SERVICES[id].label} বন্ধ করুন (Stop), তারপর ভার্সন বদলান` };
+  const st = toolState(id);
+  if (version !== def.version && !st.items[version]) return { ok: false, message: 'সমস্যা: এই ভার্সন তালিকায় নেই' };
+  st.active = version === def.version ? null : version;
+  saveSettings(settings);
+  const installed = fs.existsSync(SERVICES[id].exe);
+  return {
+    ok: true,
+    message: `${SERVICES[id].label} এখন ${version} ভার্সন ব্যবহার করবে।${installed ? '' : ' (ফাইল এখনো নামানো নেই, Start চাপলে নামবে)'}`,
+  };
+});
+
+ipcMain.handle('tools:add', async (_event, opts = {}) => {
+  const { id, local } = opts;
+  const def = TOOL_DEFAULTS[id];
+  if (!def) return { ok: false, message: 'সমস্যা: অজানা টুল' };
+  const svc = SERVICES[id];
+  if (busy) return { ok: false, message: 'একটা কাজ চলছে, একটু অপেক্ষা করুন...' };
+
+  let zipFile = null;
+  let url = null;
+  if (local) {
+    const r = await dialog.showOpenDialog(win, {
+      title: `${svc.label}-এর ZIP ফাইল বেছে নিন`,
+      properties: ['openFile'],
+      filters: [{ name: 'ZIP', extensions: ['zip'] }],
+    });
+    if (r.canceled || !r.filePaths[0]) return { ok: false, cancelled: true, message: '' };
+    zipFile = r.filePaths[0];
+  } else {
+    url = String(opts.url || '').trim();
+    if (!/^https:\/\/\S+$/i.test(url)) return { ok: false, message: 'সমস্যা: ZIP ফাইলের https লিংক দিন (যেমন https://.../php-8.4.10-nts-Win32-vs17-x64.zip)' };
+  }
+
+  let version = String(opts.version || '').trim();
+  if (!version) {
+    const m = /(\d+\.\d+(?:\.\d+)*)/.exec(path.basename(zipFile || url));
+    if (m) version = m[1];
+  }
+  if (!VERSION_RE.test(version)) {
+    return { ok: false, message: 'সমস্যা: ভার্সন নম্বর দিন (শুধু অক্ষর, সংখ্যা, . - _ চলবে), যেমন 8.4.10' };
+  }
+  const st = toolState(id);
+  if (version === def.version || st.items[version]) return { ok: false, message: `সমস্যা: ${svc.label} ${version} আগে থেকেই তালিকায় আছে` };
+
+  const folder = `${def.folder}-${version}`;
+  const destDir = path.join(TOOLS_DIR, folder);
+  busy = true;
+  try {
+    if (svc.needsVC) await ensureVCRedist();
+    await installInto(svc, destDir, { url, zipFile });
+    st.items[version] = { folder, url, added: new Date().toISOString() };
+    saveSettings(settings);
+    return { ok: true, version, message: `${svc.label} ${version} যোগ হয়েছে। ব্যবহার করতে "ব্যবহার করুন" চাপুন।` };
+  } catch (err) {
+    fs.rmSync(destDir, { recursive: true, force: true });
+    return { ok: false, message: 'সমস্যা: ' + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
+ipcMain.handle('tools:remove', (_event, id, version) => {
+  const def = TOOL_DEFAULTS[id];
+  if (!def) return { ok: false, message: 'সমস্যা: অজানা টুল' };
+  if (busy) return { ok: false, message: 'একটা কাজ চলছে, একটু অপেক্ষা করুন...' };
+  const st = toolState(id);
+  const it = st.items[version];
+  if (!it) return { ok: false, message: 'সমস্যা: এই ভার্সন তালিকায় নেই (ডিফল্ট ভার্সন মোছা যায় না)' };
+  if (activeVersion(id).version === version) return { ok: false, message: 'চালু ভার্সন মোছা যায় না, আগে অন্য ভার্সনে যান' };
+  fs.rmSync(path.join(TOOLS_DIR, it.folder), { recursive: true, force: true });
+  delete st.items[version];
+  saveSettings(settings);
+  const dbNote = id === 'mysql' || id === 'postgres' ? ' (ওই ভার্সনের ডাটাবেস ডাটা data ফোল্ডারে রয়ে গেছে)' : '';
+  return { ok: true, message: `${SERVICES[id].label} ${version} মুছে ফেলা হয়েছে${dbNote}` };
+});
+
+// ---------- www ফোল্ডার ----------
+ipcMain.handle('www:get', () => WWW_DIR);
+
+ipcMain.handle('www:choose', async () => {
+  if (running) {
+    return { ok: false, path: WWW_DIR, message: 'আগে সার্ভার বন্ধ করুন, তারপর ফোল্ডার বদলান' };
+  }
+  const r = await dialog.showOpenDialog(win, {
+    title: 'ওয়েবসাইটের ফোল্ডার বেছে নিন',
+    defaultPath: WWW_DIR,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (r.canceled || !r.filePaths[0]) return { ok: false, path: WWW_DIR };
+  WWW_DIR = r.filePaths[0];
+  settings.wwwDir = WWW_DIR;
+  saveSettings(settings);
+  return { ok: true, path: WWW_DIR };
+});
+
+ipcMain.handle('www:open', () => {
+  fs.mkdirSync(WWW_DIR, { recursive: true });
+  return shell.openPath(WWW_DIR);
+});
+
+// প্রথমবার চালালে www ফোল্ডার কোথায় হবে জিজ্ঞেস করা
+// (async: window পুরো লোড হওয়ার পর দেখানো হয়, নাহলে window ফাঁকা থাকে)
+async function askWwwFolderFirstRun() {
+  // ধাপ ১: প্রোগ্রাম ও ডাটাবেসের ডাটা কোথায় থাকবে
+  const first = await dialog.showMessageBox(win, {
+    type: 'question',
+    title: 'ইনস্টল ফোল্ডার',
+    message: 'Apache, PHP, MySQL ইত্যাদি প্রোগ্রাম ও ডাটাবেসের ডাটা কোন ফোল্ডারে রাখবেন?',
+    detail: `ডিফল্ট: ${DEFAULT_ROOT}\n\nঅন্য ড্রাইভে (যেমন I:\\my-laragon-app) রাখতে চাইলে "অন্য ফোল্ডার" চাপুন। পরে সেটিংস থেকেও বদলানো যাবে।`,
+    buttons: ['ডিফল্ট রাখুন', 'অন্য ফোল্ডার বেছে নিন'],
+    defaultId: 0,
+    cancelId: 0,
+  });
+  if (first.response === 1) {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'ইনস্টল ফোল্ডার বেছে নিন',
+      defaultPath: DEFAULT_ROOT,
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (!r.canceled && r.filePaths[0]) {
+      settings.rootDir = path.resolve(r.filePaths[0]); // এখনো কিছু নামানো হয়নি, তাই কপি লাগবে না
+      applyRoot(settings.rootDir);
+    }
+  }
+  win.webContents.send('root:changed', ROOT_DIR);
+
+  // ধাপ ২: ওয়েবসাইটের ফাইল কোথায় থাকবে
+  const suggested = settings.rootDir ? path.join(ROOT_DIR, 'www') : DEFAULT_WWW;
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    title: 'ওয়েবসাইটের ফোল্ডার',
+    message: 'আপনার ওয়েবসাইটের ফাইল কোন ফোল্ডারে রাখবেন?',
+    detail: `ডিফল্ট: ${suggested}\n\nপরে যেকোনো সময় বদলানো যাবে।`,
+    buttons: ['ডিফল্ট রাখুন', 'অন্য ফোল্ডার বেছে নিন'],
+    defaultId: 0,
+    cancelId: 0,
+  });
+  WWW_DIR = suggested;
+  if (response === 1) {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'ওয়েবসাইটের ফোল্ডার বেছে নিন',
+      defaultPath: suggested,
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (!r.canceled && r.filePaths[0]) WWW_DIR = r.filePaths[0];
+  }
+  settings.wwwDir = WWW_DIR;
+  saveSettings(settings);
+  win.webContents.send('www:changed', WWW_DIR);
+}
+
+app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
+  createWindow();
+  if (!settings.wwwDir) {
+    win.webContents.once('did-finish-load', () => askWwwFolderFirstRun());
+  }
+});
+
+app.on('before-quit', () => {
+  if (running) running.procs.forEach((p) => killTree(p.pid));
+  // ডাটাবেসকে আগে নিয়ম মেনে বন্ধ করার চেষ্টা (ডাটা নিরাপদ রাখতে)
+  for (const [id, run] of Object.entries(dbRun)) {
+    const cmd = DATABASES[id].shutdownCmd(SERVICES[DATABASES[id].svcId], run.port);
+    try {
+      execFileSync(cmd.exe, cmd.args, { timeout: 15000, windowsHide: true });
+    } catch {}
+    killTree(run.proc.pid);
+  }
+});

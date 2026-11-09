@@ -1,76 +1,409 @@
 <!DOCTYPE html>
-<html>
+<html lang="bn">
 <head>
   <meta charset="UTF-8">
-  <title>My Laragon</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Server 360</title>
   <style>
-    body { font-family: sans-serif; padding: 24px; }
-    button { padding: 8px 16px; margin-right: 8px; cursor: pointer; }
-    .big { padding: 14px 28px; font-size: 17px; font-weight: bold; }
-    #startAll { background: #2e7d32; color: #fff; border: none; border-radius: 6px; }
-    #stopAll { background: #c62828; color: #fff; border: none; border-radius: 6px; }
-    #status { margin-top: 16px; font-weight: bold; word-break: break-word; white-space: pre-line; }
-    .box { margin-top: 22px; padding-top: 14px; border-top: 1px solid #ccc; }
-    .row { margin: 12px 0; padding: 10px; background: #f6f6f6; border-radius: 6px; }
-    .row .name { font-weight: bold; font-size: 16px; }
-    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #999; margin-right: 6px; }
-    .dot.on { background: #2e7d32; }
-    .row input[type=number] { width: 80px; padding: 5px; }
-    .row button { padding: 5px 12px; }
-    #wwwPath { font-family: monospace; word-break: break-all; margin: 8px 0 12px; }
-    #sites { margin: 10px 0; line-height: 1.8; }
-    #sites a { color: #0645ad; cursor: pointer; text-decoration: underline; }
-    .hint { color: #666; font-size: 13px; margin-top: 4px; }
-    label { cursor: pointer; }
+    :root {
+      --bg: #f3f5f9;
+      --panel: #ffffff;
+      --panel-2: #f8fafc;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --accent: #2563eb;
+      --accent-soft: #dbeafe;
+      --ok: #16a34a;
+      --ok-soft: #dcfce7;
+      --danger: #dc2626;
+      --warn-soft: #fef3c7;
+      --shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 4px 14px rgba(15, 23, 42, .05);
+      --sidebar: #0f172a;
+      --sidebar-text: #94a3b8;
+      --sidebar-active: #1e293b;
+      --radius: 12px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1220;
+        --panel: #111a2e;
+        --panel-2: #0f1729;
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --border: #1f2a44;
+        --accent: #3b82f6;
+        --accent-soft: #1e3a8a;
+        --ok: #22c55e;
+        --ok-soft: #14532d;
+        --danger: #ef4444;
+        --warn-soft: #78350f;
+        --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+        --sidebar: #070d1a;
+        --sidebar-active: #15203a;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "Segoe UI", "Nirmala UI", system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      color: var(--text);
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ---------- বিন্যাস ---------- */
+    .app { flex: 1; display: flex; min-height: 0; }
+
+    .sidebar {
+      width: 220px;
+      flex-shrink: 0;
+      background: var(--sidebar);
+      color: var(--sidebar-text);
+      display: flex;
+      flex-direction: column;
+      padding: 18px 12px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px; }
+    .logo {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      color: #fff; font-weight: 700; font-size: 18px;
+      display: grid; place-items: center;
+    }
+    .brand b { color: #fff; font-size: 15px; display: block; }
+    .brand small { font-size: 11px; color: var(--sidebar-text); }
+
+    .nav {
+      display: flex; align-items: center; gap: 10px;
+      width: 100%; padding: 10px 12px; margin-bottom: 4px;
+      background: transparent; color: var(--sidebar-text);
+      border: 0; border-radius: 8px; cursor: pointer;
+      font: inherit; text-align: left;
+    }
+    .nav svg { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .nav:hover { background: var(--sidebar-active); color: #e2e8f0; }
+    .nav.active { background: var(--sidebar-active); color: #fff; box-shadow: inset 3px 0 0 var(--accent); }
+    .nav .count {
+      margin-left: auto; font-size: 11px; padding: 1px 8px; border-radius: 999px;
+      background: rgba(148, 163, 184, .18); color: #cbd5e1;
+    }
+    .side-foot { margin-top: auto; font-size: 11px; padding: 8px; line-height: 1.6; }
+
+    main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 18px 28px; background: var(--panel); border-bottom: 1px solid var(--border);
+    }
+    .topbar h1 { margin: 0; font-size: 20px; }
+    .topbar p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+    .actions { display: flex; gap: 10px; }
+
+    .content { flex: 1; overflow-y: auto; padding: 24px 28px 28px; }
+    .page { display: none; max-width: 860px; }
+    .page.active { display: block; }
+
+    /* ---------- বাটন ---------- */
+    .btn {
+      font: inherit; font-weight: 600; cursor: pointer;
+      padding: 8px 16px; border-radius: 8px;
+      border: 1px solid var(--border); background: var(--panel); color: var(--text);
+      transition: background .15s, border-color .15s, opacity .15s;
+      display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+    }
+    /* শুধু সাধারণ বাটনে হোভার; রঙিন বাটনে (সবুজ/লাল/নীল) আলাদা হোভার নিচে */
+    .btn:not(.primary):not(.danger):not(.accent):hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn.primary { background: var(--ok); border-color: var(--ok); color: #fff; }
+    .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+    .btn.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover:not(:disabled), .btn.danger:hover:not(:disabled), .btn.accent:hover:not(:disabled) {
+      filter: brightness(1.1);
+    }
+    .btn.sm { padding: 5px 11px; font-size: 13px; }
+    .btn.working::after {
+      content: ""; width: 12px; height: 12px; border-radius: 50%;
+      border: 2px solid currentColor; border-right-color: transparent;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ---------- কার্ড ---------- */
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: var(--shadow);
+      padding: 18px 20px; margin-bottom: 16px;
+    }
+    .card-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+    .card-icon {
+      width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center;
+      background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 11px;
+    }
+    .card-title { font-size: 16px; font-weight: 700; }
+    .card-sub { color: var(--muted); font-size: 12px; margin-top: 1px; }
+    .card-head .badge { margin-left: auto; }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: var(--panel-2); color: var(--muted); border: 1px solid var(--border);
+    }
+    .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+    .badge.on { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+    .badge.on::before { background: var(--ok); box-shadow: 0 0 0 3px rgba(34, 197, 94, .25); }
+    .badge.tool { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+    .badge.tool::before { display: none; }
+
+    .row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+    .row.first { margin-top: 0; }
+    .field { display: flex; align-items: center; gap: 8px; }
+    .field label { color: var(--muted); font-size: 13px; }
+    .spacer { flex: 1; }
+
+    input[type=number], input[type=text] {
+      font: inherit; color: var(--text); background: var(--panel-2);
+      border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; width: 92px;
+    }
+    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    input:disabled { opacity: .6; }
+
+    /* সেগমেন্ট (Nginx | Apache) */
+    .segment { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; padding: 3px; }
+    .segment label { cursor: pointer; }
+    .segment input { position: absolute; opacity: 0; pointer-events: none; }
+    .segment span { display: block; padding: 6px 18px; border-radius: 6px; font-weight: 600; color: var(--muted); }
+    .segment input:checked + span { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+    .segment input:disabled + span { opacity: .6; }
+
+    /* সুইচ */
+    .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--muted); font-size: 13px; }
+    .switch input { position: absolute; opacity: 0; }
+    .switch i { width: 34px; height: 20px; border-radius: 999px; background: var(--border); position: relative; transition: background .15s; }
+    .switch i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.3); }
+    .switch input:checked + i { background: var(--ok); }
+    .switch input:checked + i::after { transform: translateX(14px); }
+
+    .hint { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.6; }
+    .hint.warn { background: var(--warn-soft); padding: 8px 10px; border-radius: 8px; }
+    .hint[hidden] { display: none; }
+    .info { font-size: 12px; color: var(--muted); margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
+    .section-title { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 22px 2px 10px; }
+    .section-title:first-child { margin-top: 0; }
+
+    select {
+      font: inherit; color: var(--text); background: var(--panel-2);
+      border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; max-width: 100%;
+    }
+    select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    select:disabled { opacity: .6; }
+    .lang-btn { margin: auto 8px 0; justify-content: center; background: transparent; color: var(--sidebar-text); border-color: rgba(148, 163, 184, .3); }
+    .lang-btn + .side-foot { margin-top: 8px; }
+    .php-text { color: var(--muted); font-size: 12px; }
+
+    /* ---------- টুলস ও ভার্সন ---------- */
+    .ver-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px; margin-top: 8px; background: var(--panel-2); }
+    .ver-row.active { border-color: var(--ok); }
+    .ver-state { color: var(--muted); font-size: 12px; }
+    .add-box { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); }
+    input[type="text"] { width: 100%; }
+    .add-box .row input[type="text"] { width: auto; flex: 1; min-width: 160px; }
+
+    /* ---------- সাইট টেবিল ---------- */
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 8px 12px; }
+    td { padding: 12px; border-top: 1px solid var(--border); vertical-align: middle; }
+    td.path { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+    a.link { color: var(--accent); cursor: pointer; text-decoration: none; font-weight: 600; }
+    a.link:hover { text-decoration: underline; }
+    .empty { text-align: center; color: var(--muted); padding: 28px 10px; }
+
+    /* ---------- সেটিংস পাথ ---------- */
+    .pathbox {
+      font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 9px 12px; word-break: break-all; margin: 10px 0 12px;
+    }
+
+    /* ---------- স্ট্যাটাস বার ---------- */
+    .statusbar {
+      display: flex; align-items: flex-start; gap: 10px;
+      background: var(--panel); border-top: 1px solid var(--border);
+      padding: 9px 18px; min-height: 42px;
+    }
+    .statusbar .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); margin-top: 6px; flex-shrink: 0; }
+    .statusbar.ok .dot { background: var(--ok); }
+    .statusbar.err .dot { background: var(--danger); }
+    .statusbar.err #status { color: var(--danger); }
+    #status { flex: 1; white-space: pre-line; word-break: break-word; max-height: 62px; overflow-y: auto; line-height: 1.5; padding-top: 1px; }
+
+    #logPanel {
+      position: fixed; right: 18px; bottom: 56px; width: 480px; max-height: 300px; overflow-y: auto;
+      background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, .25); padding: 10px 14px; font-size: 12px; z-index: 10;
+    }
+    #logPanel[hidden] { display: none; }
+    #logPanel .l { padding: 5px 0; border-bottom: 1px solid var(--border); white-space: pre-line; word-break: break-word; }
+    #logPanel .l:last-child { border-bottom: 0; }
+    #logPanel time { color: var(--muted); margin-right: 8px; }
+    #logPanel .l.err { color: var(--danger); }
   </style>
 </head>
 <body>
-  <h2>My Laragon</h2>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">S</div>
+        <div><b>Server 360</b><small>Local Dev Environment</small></div>
+      </div>
 
-  <div>
-    <button id="startAll" class="big">▶ Start All</button>
-    <button id="stopAll" class="big">■ Stop All</button>
-    <div class="hint">Start All চালু করে: নিচে বাছা ওয়েব সার্ভার + "Start All-এ যুক্ত" টিক দেওয়া ডাটাবেস।</div>
+      <button class="nav active" data-page="services">
+        <svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+        <span data-i18n="nav.services">সার্ভিস</span>
+      </button>
+      <button class="nav" data-page="sites">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        <span data-i18n="nav.sites">সাইটসমূহ</span> <span class="count" id="siteCount">0</span>
+      </button>
+      <button class="nav" data-page="tools">
+        <svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+        <span data-i18n="nav.tools">টুলস ও ভার্সন</span>
+      </button>
+      <button class="nav" data-page="settings">
+        <svg viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+        <span data-i18n="nav.settings">সেটিংস</span>
+      </button>
+
+      <button class="btn sm lang-btn" id="langBtn" title="Language / ভাষা">🌐 <span id="langBtnText">English</span></button>
+      <div class="side-foot">
+        Apache · Nginx · PHP<br>MySQL · PostgreSQL<br>Adminer · phpMyAdmin
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">সার্ভিস</h1>
+          <p id="pageSub">ওয়েব সার্ভার ও ডাটাবেস চালু/বন্ধ করুন</p>
+        </div>
+        <div class="actions">
+          <button id="startAll" class="btn primary">▶ Start All</button>
+          <button id="stopAll" class="btn danger">■ Stop All</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <!-- ======== সার্ভিস ======== -->
+        <section id="page-services" class="page active">
+          <div class="section-title" data-i18n="web.section">ওয়েব সার্ভার</div>
+          <div class="card" id="webCard">
+            <div class="card-head">
+              <div class="card-icon">WEB</div>
+              <div>
+                <div class="card-title" data-i18n="web.title">ওয়েব সার্ভার</div>
+                <div class="card-sub" data-i18n="web.sub">Nginx অথবা Apache (একসময়ে একটাই চলে)</div>
+              </div>
+              <span class="badge" id="webBadge">বন্ধ</span>
+            </div>
+            <div class="row first">
+              <div class="segment" id="serverSeg">
+                <label><input type="radio" name="server" value="nginx" checked><span>Nginx</span></label>
+                <label><input type="radio" name="server" value="apache"><span>Apache</span></label>
+              </div>
+              <div class="field">
+                <label for="port" data-i18n="port">পোর্ট</label>
+                <input id="port" type="number" min="1" max="65535">
+                <button id="savePort" class="btn sm" data-i18n="save">সেভ</button>
+              </div>
+              <span class="spacer"></span>
+              <button id="start" class="btn sm primary">▶ Start</button>
+              <button id="stop" class="btn sm danger">■ Stop</button>
+            </div>
+            <div class="hint" data-i18n="web.hint">ডিফল্ট পোর্ট ৮০। ৮০ ব্যস্ত থাকলে ৮০৮০ দিন। পোর্ট বা সার্ভার বদলাতে আগে সার্ভার বন্ধ করুন।</div>
+            <div class="hint" id="apacheNote" data-i18n="web.apacheNote" hidden>Apache-তেও এখন PHP, www ফোল্ডার, ভার্চুয়াল হোস্ট (.test), .htaccess আর Adminer/phpMyAdmin কাজ করে। সার্ভার বদলালে আগে চলমানটা বন্ধ করুন।</div>
+          </div>
+
+          <div class="section-title" data-i18n="db.section">ডাটাবেস</div>
+          <div id="dbs"></div>
+        </section>
+
+        <!-- ======== সাইটসমূহ ======== -->
+        <section id="page-sites" class="page">
+          <div class="card">
+            <div class="row first">
+              <button id="refreshSites" class="btn sm accent" data-i18n="sites.refresh">↻ সাইট রিফ্রেশ</button>
+              <button id="openWww2" class="btn sm" data-i18n="sites.openWww">📁 www ফোল্ডার খুলুন</button>
+            </div>
+            <div class="hint" data-i18n-html="sites.hint">www ফোল্ডারে নতুন সাবফোল্ডার (যেমন <b>blog</b>) বানিয়ে রিফ্রেশ চাপলে <b>blog.test</b> নামে সাইট পাবেন। ফোল্ডারের ভেতরে <b>public</b> থাকলে (Laravel) সেটাই root হবে।</div>
+          </div>
+          <div class="card" style="padding: 8px 8px 6px;">
+            <table>
+              <thead><tr><th style="width:34%" data-i18n="sites.colAddr">ঠিকানা</th><th data-i18n="sites.colFolder">ফোল্ডার</th><th style="width:150px" data-i18n="sites.colPhp">PHP</th></tr></thead>
+              <tbody id="sitesBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ======== টুলস ও ভার্সন ======== -->
+        <section id="page-tools" class="page">
+          <div class="card">
+            <div class="hint" style="margin-top:0" data-i18n="tools.hint">PHP, Nginx, Apache, MySQL, PostgreSQL বা phpMyAdmin-এর নতুন ভার্সন চাইলে এখান থেকে যোগ করুন। ZIP-এর লিংক দিন, অথবা নিজের পিসিতে নামানো ZIP বেছে নিন। যোগ করার পর "ব্যবহার করুন" চাপলেই ওই ভার্সনে চলবে। পুরনো ভার্সনও থাকবে, যেকোনো সময় ফেরা যাবে। ভার্সন বদলাতে সংশ্লিষ্ট সার্ভার বন্ধ থাকতে হবে।</div>
+          </div>
+          <div id="toolsList"></div>
+        </section>
+
+        <!-- ======== সেটিংস ======== -->
+        <section id="page-settings" class="page">
+          <div class="section-title" data-i18n="settings.folders">ফোল্ডার</div>
+          <div class="card">
+            <div class="card-title" data-i18n="settings.root.title">ইনস্টল ফোল্ডার</div>
+            <div class="card-sub" data-i18n-html="settings.root.sub">Apache, PHP, MySQL ইত্যাদি প্রোগ্রাম (<b>tools</b>) ও ডাটাবেসের ডাটা (<b>data</b>) এখানে থাকে</div>
+            <div class="pathbox" id="rootPath">...</div>
+            <div class="row first">
+              <button id="changeRoot" class="btn sm accent" data-i18n="settings.change">ফোল্ডার বদলান</button>
+              <button id="openRoot" class="btn sm" data-i18n="settings.open">📁 খুলুন</button>
+            </div>
+            <div class="hint" data-i18n-html="settings.root.hint">বদলালে পুরনো প্রোগ্রাম ও ডাটাবেস নতুন ফোল্ডারে সরে যায় (বড় হলে কিছুক্ষণ লাগে)। বদলানোর আগে সব সার্ভার বন্ধ থাকতে হবে। <b>data</b> ফোল্ডার মুছবেন না, ওখানে আপনার সব ডাটাবেস আছে।</div>
+          </div>
+
+          <div class="card">
+            <div class="card-title" data-i18n="settings.www.title">ওয়েবসাইট ফোল্ডার (www)</div>
+            <div class="card-sub" data-i18n="settings.www.sub">আপনার প্রজেক্ট/ওয়েবসাইটের ফাইল এখানে রাখুন</div>
+            <div class="pathbox" id="wwwPath">...</div>
+            <div class="row first">
+              <button id="changeWww" class="btn sm accent" data-i18n="settings.change">ফোল্ডার বদলান</button>
+              <button id="openWww" class="btn sm" data-i18n="settings.open">📁 খুলুন</button>
+            </div>
+          </div>
+
+          <div class="section-title" data-i18n="settings.lang.section">ভাষা</div>
+          <div class="card">
+            <div class="card-title" data-i18n="settings.lang.title">অ্যাপের ভাষা</div>
+            <div class="card-sub" data-i18n="settings.lang.sub">মেনু, বাটন ও বার্তা এই ভাষায় দেখাবে</div>
+            <div class="row">
+              <select id="langSel">
+                <option value="bn">বাংলা</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
   </div>
 
-  <p id="status">অপেক্ষা করছে...</p>
+  <div id="logPanel" hidden></div>
+  <footer class="statusbar" id="statusbar">
+    <span class="dot"></span>
+    <span id="status">অপেক্ষা করছে...</span>
+    <button class="btn sm" id="logToggle" data-i18n="log">লগ</button>
+  </footer>
 
-  <div class="box">
-    <strong>ওয়েব সার্ভার:</strong>
-    <div style="margin: 10px 0;">
-      <label><input type="radio" name="server" value="apache" checked> Apache</label>
-      &nbsp;&nbsp;
-      <label><input type="radio" name="server" value="nginx"> Nginx</label>
-    </div>
-    <div>
-      পোর্ট:
-      <input id="port" type="number" min="1" max="65535" style="width: 80px; padding: 5px;">
-      <button id="savePort">সেভ</button>
-      <button id="start">Start</button>
-      <button id="stop">Stop</button>
-    </div>
-    <div class="hint">ডিফল্ট পোর্ট ৮০। ৮০ ব্যস্ত থাকলে ৮০৮০ দিন। (সার্ভার বন্ধ থাকা অবস্থায় বদলান)</div>
-  </div>
-
-  <div class="box">
-    <strong>ডাটাবেস:</strong>
-    <div id="dbs">...</div>
-  </div>
-
-  <div class="box">
-    <strong>ওয়েবসাইট ফোল্ডার (www):</strong>
-    <div id="wwwPath">...</div>
-    <button id="changeWww">ফোল্ডার বদলান</button>
-    <button id="openWww">ফোল্ডার খুলুন</button>
-  </div>
-
-  <div class="box">
-    <strong>সাইটসমূহ:</strong>
-    <div id="sites">...</div>
-    <button id="refreshSites">সাইট রিফ্রেশ</button>
-    <p class="hint">www-তে নতুন ফোল্ডার বানালে রিফ্রেশ চাপুন। (এখন শুধু Nginx-এ কাজ করে)</p>
-  </div>
-
+  <script src="i18n.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

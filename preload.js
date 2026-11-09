@@ -16,9 +16,29 @@ contextBridge.exposeInMainWorld('api', {
   stopDb: (id) => ipcRenderer.invoke('db:stop', id),
   setDbAuto: (id, on) => ipcRenderer.invoke('db:setAuto', id, on),
 
+  // Adminer (ব্রাউজারে ডাটাবেস)
+  openAdminer: (kind) => ipcRenderer.invoke('adminer:open', kind),
+  openPma: () => ipcRenderer.invoke('pma:open'),
+
+  // টুলস ও ভার্সন
+  listTools: () => ipcRenderer.invoke('tools:list'),
+  addTool: (opts) => ipcRenderer.invoke('tools:add', opts),
+  useTool: (id, version) => ipcRenderer.invoke('tools:use', id, version),
+  removeTool: (id, version) => ipcRenderer.invoke('tools:remove', id, version),
+  toolHelp: (id) => ipcRenderer.invoke('tools:help', id),
+
   // পোর্ট
   getPort: () => ipcRenderer.invoke('port:get'),
   setPort: (kind, value) => ipcRenderer.invoke('port:set', kind, value),
+
+  // ওয়েব সার্ভারের অবস্থা
+  webStatus: () => ipcRenderer.invoke('web:status'),
+
+  // ইনস্টল ফোল্ডার
+  getRoot: () => ipcRenderer.invoke('root:get'),
+  chooseRoot: () => ipcRenderer.invoke('root:choose'),
+  openRoot: () => ipcRenderer.invoke('root:open'),
+  onRootChanged: (callback) => ipcRenderer.on('root:changed', (_event, p) => callback(p)),
 
   // www ফোল্ডার ও সাইট
   getWww: () => ipcRenderer.invoke('www:get'),
@@ -28,4 +48,12 @@ contextBridge.exposeInMainWorld('api', {
   listSites: () => ipcRenderer.invoke('sites:list'),
   refreshSites: () => ipcRenderer.invoke('sites:refresh'),
   openUrl: (url) => ipcRenderer.invoke('open:url', url),
+
+  // সাইট ধরে PHP ভার্সন
+  listPhp: () => ipcRenderer.invoke('php:list'),
+  setSitePhp: (domain, version) => ipcRenderer.invoke('site:setPhp', domain, version),
+
+  // ভাষা
+  getLang: () => ipcRenderer.invoke('lang:get'),
+  setLang: (lang) => ipcRenderer.invoke('lang:set', lang),
 });
