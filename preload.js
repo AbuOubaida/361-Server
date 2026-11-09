@@ -72,6 +72,15 @@ contextBridge.exposeInMainWorld('api', {
   listPhp: () => ipcRenderer.invoke('php:list'),
   setSitePhp: (domain, version) => ipcRenderer.invoke('site:setPhp', domain, version),
 
+  // Node.js সাইট
+  listNodeSites: () => ipcRenderer.invoke('node:list'),
+  startNode: (domain) => ipcRenderer.invoke('node:start', domain),
+  stopNode: (domain) => ipcRenderer.invoke('node:stop', domain),
+  restartNode: (domain) => ipcRenderer.invoke('node:restart', domain),
+  installNode: (domain) => ipcRenderer.invoke('node:install', domain),
+  configNode: (domain, cfg) => ipcRenderer.invoke('node:config', domain, cfg),
+  nodeLog: (domain) => ipcRenderer.invoke('node:log', domain),
+
   // ভাষা
   getLang: () => ipcRenderer.invoke('lang:get'),
   setLang: (lang) => ipcRenderer.invoke('lang:set', lang),

@@ -24,6 +24,9 @@ const ADMINER_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/
 // phpMyAdmin: phpmyadmin.net থেকে phpMyAdmin-5.2.3-all-languages.zip নামিয়ে Release-এ আপলোড করুন
 const PMA_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/phpMyAdmin-5.2.3-all-languages.zip';
 
+// Node.js (LTS): nodejs.org/dist থেকে node-v24.x.y-win-x64.zip নামিয়ে Release-এ আপলোড করুন
+const NODE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/node-v24.22.2-win-x64.zip';
+
 // Microsoft-এর স্থির লিংক: সর্বশেষ সাপোর্টেড VC++ Redistributable (x64)
 const VCREDIST_URL = 'https://aka.ms/vc14/vc_redist.x64.exe';
 // ====================================
@@ -316,7 +319,7 @@ function pinnedPhp(domain) {
 const sitePhpVersion = (domain) => pinnedPhp(domain) || defaultPhpVersion();
 const phpOfSite = (s) => (s.system ? defaultPhpVersion() : sitePhpVersion(s.domain));
 // এই সাইটগুলো চালাতে যে PHP ভার্সনগুলো লাগবে
-const neededPhpVersions = (sites) => [...new Set([defaultPhpVersion(), ...sites.filter((s) => !s.disabled).map(phpOfSite)])];
+const neededPhpVersions = (sites) => [...new Set([defaultPhpVersion(), ...sites.filter((s) => !s.disabled && !s.node).map(phpOfSite)])];
 
 // Nginx-এর একটা server ব্লক (সাইটের জন্য)
 function nginxServer(serverName, root, phpUp, isDefault, webPort, localOnly = false, extra = [], sessionMin = 0) {
@@ -398,6 +401,66 @@ function apacheServer(serverName, root, phpVer, webPort, localOnly = false, extr
     '    AllowOverride All',
     `    ${localOnly ? 'Require local' : 'Require all granted'}`,
     '  </Directory>',
+    ...extra,
+    '</VirtualHost>',
+    '',
+  ].join('\n');
+}
+
+// ---------- Node.js সাইটের reverse proxy ----------
+// settings.nodeSites = { '<domain>': { cmd?: 'npm start', port?: 3100, manual?: true } }
+const nodeCfg = (domain) => (settings.nodeSites && settings.nodeSites[domain]) || {};
+// সাইটের স্থির পোর্ট (কনফিগে বসে, তাই অ্যাপ বন্ধ থাকলেও proxy একই পোর্টে যায়)। প্রথমবার 3100 থেকে খালি নম্বর বাছা হয়
+function nodePortOf(domain) {
+  const cfg = nodeCfg(domain);
+  if (validPort(cfg.port)) return validPort(cfg.port);
+  const used = new Set(Object.values(settings.nodeSites || {}).map((c) => c && c.port));
+  let p = 3100;
+  while (used.has(p)) p++;
+  settings.nodeSites = { ...(settings.nodeSites || {}), [domain]: { ...cfg, port: p } };
+  saveSettings(settings);
+  return p;
+}
+
+function nginxNodeServer(domain, port, webPort, extra = []) {
+  return [
+    '  server {',
+    `    listen ${webPort};`,
+    `    server_name ${domain};`,
+    ...extra,
+    '    location / {',
+    `      proxy_pass http://127.0.0.1:${port};`,
+    '      proxy_http_version 1.1;',
+    '      proxy_set_header Host $http_host;',
+    '      proxy_set_header X-Real-IP $remote_addr;',
+    '      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+    '      proxy_set_header X-Forwarded-Proto $scheme;',
+    '      proxy_set_header Upgrade $http_upgrade;',
+    '      proxy_set_header Connection $connection_upgrade;',
+    '      proxy_read_timeout 3600s;',
+    '      proxy_send_timeout 3600s;',
+    '    }',
+    '  }',
+  ].join('\n');
+}
+
+// Apache: mod_proxy_http (+ WebSocket-এর জন্য mod_proxy_wstunnel) থাকলে কাজ করে; না থাকলে IfModule-এ বাদ যায়, Apache চালু হতে বাধা পায় না
+function apacheNodeServer(domain, port, webPort, extra = []) {
+  const up = `http://127.0.0.1:${port}`;
+  return [
+    `<VirtualHost *:${webPort}>`,
+    `  ServerName ${domain}`,
+    '  <IfModule proxy_http_module>',
+    '    ProxyPreserveHost On',
+    '    ProxyTimeout 3600',
+    '    <IfModule proxy_wstunnel_module>',
+    '      RewriteEngine On',
+    '      RewriteCond %{HTTP:Upgrade} =websocket [NC]',
+    `      RewriteRule ^/?(.*)$ ws://127.0.0.1:${port}/$1 [P,L]`,
+    '    </IfModule>',
+    `    ProxyPass / ${up}/`,
+    `    ProxyPassReverse / ${up}/`,
+    '  </IfModule>',
     ...extra,
     '</VirtualHost>',
     '',
@@ -530,7 +593,8 @@ function publicRedirects(sites, webPort, kind, upOf) {
 function disabledBlocks(sites, kind) {
   const out = [];
   for (const x of sites) {
-    if (x.system || !x.disabled) continue;
+    // বন্ধ সাইট, আর Node সাইট (এর ফোল্ডারে server.js, .env, node_modules আছে, সেগুলো localhost/<ফোল্ডার> দিয়ে খোলা উচিত নয়; অ্যাপ <নাম>.test দিয়ে খোলে)
+    if (x.system || !(x.disabled || x.node)) continue;
     const folder = path.basename(path.basename(x.root).toLowerCase() === 'public' ? path.dirname(x.root) : x.root);
     if (!/^[A-Za-z0-9._ -]+$/.test(folder)) continue;
     const esc = folder.replace(/\./g, '\\.');
@@ -546,7 +610,7 @@ function nginxEntries(sites, webPort, upOf) {
     { file: '00-default.conf', extras: 'localhost', text: nginxServer('localhost', WWW_DIR, defUp, true, webPort, false, [...toolLocations(defUp), ...publicRedirects(sites, webPort, 'nginx', upOf), ...disabledBlocks(sites, 'nginx'), nginxExtraInclude('localhost')]) },
     ...sites
       .filter((s) => !s.disabled)
-      .map((s) => ({ file: `${s.domain}.conf`, extras: s.system ? '' : s.domain, text: nginxServer(s.domain, s.root, upOf(s), false, webPort, !!s.system, s.system ? [] : [nginxExtraInclude(s.domain)], s.system ? 0 : siteSessionMin(s.domain)) })),
+      .map((s) => ({ file: `${s.domain}.conf`, extras: s.system ? '' : s.domain, text: s.node ? nginxNodeServer(s.domain, nodePortOf(s.domain), webPort, [nginxExtraInclude(s.domain)]) : nginxServer(s.domain, s.root, upOf(s), false, webPort, !!s.system, s.system ? [] : [nginxExtraInclude(s.domain)], s.system ? 0 : siteSessionMin(s.domain)) })),
   ];
 }
 
@@ -582,7 +646,7 @@ function apacheEntries(sites, webPort) {
     { file: '00-default.conf', extras: 'localhost', text: apacheServer('localhost', WWW_DIR, defVer, webPort, false, [...apacheAliasLines(), ...publicRedirects(sites, webPort, 'apache'), ...disabledBlocks(sites, 'apache'), apacheExtraInclude('localhost')]) },
     ...sites
       .filter((x) => !x.disabled)
-      .map((x) => ({ file: `${x.domain}.conf`, extras: x.system ? '' : x.domain, text: apacheServer(x.domain, x.root, phpOfSite(x), webPort, !!x.system, x.system ? [] : [apacheExtraInclude(x.domain)], x.system ? 0 : siteSessionMin(x.domain)) })),
+      .map((x) => ({ file: `${x.domain}.conf`, extras: x.system ? '' : x.domain, text: x.node ? apacheNodeServer(x.domain, nodePortOf(x.domain), webPort, [apacheExtraInclude(x.domain)]) : apacheServer(x.domain, x.root, phpOfSite(x), webPort, !!x.system, x.system ? [] : [apacheExtraInclude(x.domain)], x.system ? 0 : siteSessionMin(x.domain)) })),
   ];
 }
 
@@ -596,6 +660,10 @@ function writeApacheConf(svc, _phpPorts, sites, webPort) {
     ['cgi_module', 'mod_cgi.so', true],
     ['actions_module', 'mod_actions.so', true],
     ['rewrite_module', 'mod_rewrite.so', true],
+    // Node.js সাইটের reverse proxy (না থাকলে Node সাইট কাজ করবে না, কিন্তু Apache চালু হবে)
+    ['proxy_module', 'mod_proxy.so', false],
+    ['proxy_http_module', 'mod_proxy_http.so', false],
+    ['proxy_wstunnel_module', 'mod_proxy_wstunnel.so', false],
     ['env_module', 'mod_env.so', false],
     ['authz_host_module', 'mod_authz_host.so', false],
     ['alias_module', 'mod_alias.so', false],
@@ -673,6 +741,8 @@ function writeNginxConf(svc, phpPorts, sites = [], webPort = 80) {
     '  sendfile on;',
     '  client_max_body_size 128m;',
     '  server_names_hash_bucket_size 64;',
+    // Node.js সাইটের WebSocket-এর জন্য
+    "  map $http_upgrade $connection_upgrade { default upgrade; '' close; }",
     ...upstreams,
     // প্রতিটা সাইটের server ব্লক আলাদা ফাইলে: conf\sites-enabled\*.conf (00-default.conf-এ localhost)
     '  include sites-enabled/*.conf;',
@@ -725,6 +795,10 @@ const SERVICES = {
       writeApacheConf(svc, phpPorts, sites, webPort);
     },
   }),
+  // Node.js runtime: node.exe zip-এর ভেতরের node-v...-win-x64 ফোল্ডারে থাকে (installInto নিজে ওই ফোল্ডার বেছে নেয়)
+  node: makeService('node', 'Node.js', NODE_URL, 'node', 'node.exe', {
+    version: '24.22.2',
+  }),
   nginx: makeService('nginx', 'Nginx', NGINX_URL, 'nginx', 'nginx.exe', {
     version: '1.30.6',
     usesPHP: true,
@@ -761,7 +835,10 @@ function scanSites() {
     const pub = path.join(dir, 'public');
     const hasPublic = fs.existsSync(pub) && fs.statSync(pub).isDirectory();
     const domain = `${name}.${TLD}`;
-    sites.push({ name, domain, root: hasPublic ? pub : dir, disabled: !!(settings.siteDisabled && settings.siteDisabled[domain]) });
+    // Node.js সাইট: package.json আছে, কিন্তু PHP/Laravel/WordPress-এর চিহ্ন (index.php, artisan, composer.json, wp-config.php) নেই
+    const has = (f) => fs.existsSync(path.join(dir, f));
+    const isNode = has('package.json') && !has('index.php') && !has('artisan') && !has('composer.json') && !has('wp-config.php') && !(hasPublic && fs.existsSync(path.join(pub, 'index.php')));
+    sites.push({ name, domain, root: isNode ? dir : hasPublic ? pub : dir, node: isNode, disabled: !!(settings.siteDisabled && settings.siteDisabled[domain]) });
   }
   return sites;
 }
@@ -909,6 +986,28 @@ function createWindow() {
   });
   win.setMenuBarVisibility(false);
   win.loadFile('index.html');
+  // ডায়াগনস্টিক: পেজ ক্র্যাশ/ঝুলে গেলে userData\\crash.log-এ লেখা, ক্র্যাশ হলে পেজ নিজে থেকে আবার লোড; F12 বা Ctrl+Shift+I = DevTools
+  const crashLog = (what, extra) => {
+    try {
+      fs.appendFileSync(path.join(app.getPath('userData'), 'crash.log'), `${new Date().toISOString()} ${what} ${extra ? JSON.stringify(extra) : ''}\n`);
+    } catch {}
+  };
+  win.webContents.on('render-process-gone', (_e, details) => {
+    crashLog('render-process-gone', details);
+    setTimeout(() => {
+      try {
+        win.reload();
+      } catch {}
+    }, 500);
+  });
+  win.webContents.on('unresponsive', () => crashLog('unresponsive'));
+  win.webContents.on('did-fail-load', (_e, code, desc) => crashLog('did-fail-load', { code, desc }));
+  win.webContents.on('console-message', (_e, level, message, line, source) => {
+    if (level >= 3) crashLog('renderer-error', { message, line, source }); // শুধু error
+  });
+  win.webContents.on('before-input-event', (e, input) => {
+    if (input.type === 'keyDown' && (input.key === 'F12' || (input.control && input.shift && String(input.key).toUpperCase() === 'I'))) win.webContents.toggleDevTools();
+  });
 }
 
 function sendStatus(msg) {
@@ -1583,8 +1682,9 @@ ipcMain.handle('root:choose', async () => {
 const siteUrl = (domain) => `http://${domain}${getWebPort() === 80 ? '' : ':' + getWebPort()}`;
 const publicSites = (sites) => [
   { name: 'localhost', domain: 'localhost', root: WWW_DIR, system: false, url: siteUrl('localhost'), php: defaultPhpVersion(), phpPinned: '', sessionMin: 0, enabled: true },
-  ...sites.map(({ name, domain, root, system, disabled }) => ({
+  ...sites.map(({ name, domain, root, system, disabled, node }) => ({
     name,
+    node: !!node,
     enabled: !disabled,
     domain,
     root,
@@ -1827,12 +1927,119 @@ async function installLaravel(dest, name, dbName) {
   return { turnedOn, warnings, sessMin };
 }
 
+// ---------- Node.js স্টার্টার টেমপ্লেট ----------
+// basic = কোনো প্যাকেজ লাগে না (সরাসরি node server.js), express, vite, next = npm install লাগে।
+// ফাইলগুলো সাধারণ টেক্সট; তৈরির পর www\<নাম> ফোল্ডারে থাকে, ইচ্ছামতো বদলানো যায়।
+const NODE_KINDS = ['node-basic', 'node-express', 'node-vite', 'node-next'];
+function writeNodeTemplate(kind, dest, name) {
+  const w = (rel, text) => {
+    const f = path.join(dest, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, text.replace(/^\n/, ''));
+  };
+  const pkg = (extra) => JSON.stringify({ name, version: '1.0.0', private: true, ...extra }, null, 2) + '\n';
+  w('.gitignore', 'node_modules/\n.next/\ndist/\n.env\n');
+  if (kind === 'node-basic') {
+    w('package.json', pkg({ scripts: { start: 'node server.js' } }));
+    w('server.js', `
+// Server 360 starter (basic): no packages needed.
+// Server 360 gives the port in the PORT variable.
+const http = require('http');
+const port = process.env.PORT || 3000;
+let hits = 0;
+http
+  .createServer((req, res) => {
+    hits++;
+    if (req.url === '/api/hello') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, node: process.version, hits }));
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<h1>${name}.test</h1><p>Node ' + process.version + ' &middot; hits: ' + hits + '</p><p><a href="/api/hello">/api/hello</a></p>');
+  })
+  .listen(port, () => console.log('${name} listening on port ' + port + ' (Node ' + process.version + ')'));
+`);
+  } else if (kind === 'node-express') {
+    w('package.json', pkg({ scripts: { start: 'node server.js' }, dependencies: { express: '^4.21.2' } }));
+    w('server.js', `
+// Server 360 starter (Express). Run "npm install" first.
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('<h1>${name}.test</h1><p>Express on Node ' + process.version + '</p><p><a href="/api/hello">/api/hello</a></p>'));
+app.get('/api/hello', (req, res) => res.json({ ok: true, node: process.version, time: new Date().toISOString() }));
+app.listen(port, () => console.log('${name} (Express) listening on port ' + port + ' (Node ' + process.version + ')'));
+`);
+  } else if (kind === 'node-vite') {
+    w('package.json', pkg({ type: 'module', scripts: { dev: 'vite', build: 'vite build' }, devDependencies: { vite: '^6.0.0' } }));
+    // host 127.0.0.1: Nginx/Apache proxy 127.0.0.1-এ পাঠায়; allowedHosts: .test ঠিকানা মানার জন্য
+    w('vite.config.js', `
+import { defineConfig } from 'vite';
+
+// Server 360: the port comes in PORT; the proxy talks to 127.0.0.1; *.test hosts must be allowed.
+export default defineConfig({
+  server: {
+    host: '127.0.0.1',
+    port: Number(process.env.PORT) || 5173,
+    strictPort: true,
+    allowedHosts: ['.test'],
+  },
+});
+`);
+    w('index.html', `
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${name}.test</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>
+`);
+    w('main.js', `
+const app = document.getElementById('app');
+app.innerHTML = '<h1>${name}.test</h1><p>Vite is running. Edit <code>main.js</code> and save: the page updates by itself.</p>';
+`);
+  } else if (kind === 'node-next') {
+    w('package.json', pkg({ scripts: { dev: 'next dev', build: 'next build', start: 'next start' }, dependencies: { next: '^15.1.0', react: '^19.0.0', 'react-dom': '^19.0.0' } }));
+    w('next.config.mjs', `
+// Server 360: allow the *.test address in dev mode.
+export default { allowedDevOrigins: ['*.test'] };
+`);
+    w('app/layout.js', `
+export const metadata = { title: '${name}.test' };
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
+`);
+    w('app/page.js', `
+export default function Home() {
+  return (
+    <main>
+      <h1>${name}.test</h1>
+      <p>Next.js is running. Edit app/page.js and save.</p>
+    </main>
+  );
+}
+`);
+  }
+}
+
 ipcMain.handle('site:create', async (_event, kind, rawName) => {
   const fail = (m) => ({ ok: false, message: m });
   if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
   const name = siteSlug(rawName);
   if (!name) return fail(tr('সমস্যা: সাইটের নাম দিন (a-z, 0-9, -)', 'Error: enter a site name (a-z, 0-9, -)'));
-  if (!['blank', 'wordpress', 'laravel'].includes(kind)) return fail(tr('সমস্যা: অজানা ধরন', 'Error: unknown type'));
+  if (!['blank', 'wordpress', 'laravel', ...NODE_KINDS].includes(kind)) return fail(tr('সমস্যা: অজানা ধরন', 'Error: unknown type'));
   const dest = path.join(WWW_DIR, name);
   if (fs.existsSync(dest)) return fail(tr(`সমস্যা: ${name} নামে ফোল্ডার আগে থেকেই আছে`, `Error: a folder named ${name} already exists`));
   busy = true;
@@ -1842,6 +2049,19 @@ ipcMain.handle('site:create', async (_event, kind, rawName) => {
     if (kind === 'blank') {
       fs.mkdirSync(dest, { recursive: true });
       fs.writeFileSync(path.join(dest, 'index.php'), `<?php\necho '<h1>${name}.test</h1><p>PHP ' . PHP_VERSION . '</p>';\n`);
+    } else if (NODE_KINDS.includes(kind)) {
+      fs.mkdirSync(dest, { recursive: true });
+      try {
+        writeNodeTemplate(kind, dest, name);
+      } catch (e) {
+        fs.rmSync(dest, { recursive: true, force: true });
+        throw e;
+      }
+      // Next-এ scripts.start = production মোড (build লাগে), তাই ডেভ কমান্ড আগে থেকেই বসিয়ে দেওয়া
+      if (kind === 'node-next') {
+        settings.nodeSites = { ...(settings.nodeSites || {}), [`${name}.${TLD}`]: { cmd: 'npm run dev' } };
+        saveSettings(settings);
+      }
     } else if (kind === 'wordpress') {
       try {
         await installWordPress(dest, name.replace(/-/g, '_'));
@@ -1861,7 +2081,10 @@ ipcMain.handle('site:create', async (_event, kind, rawName) => {
     const h = await syncHosts(sites);
     const live = await reloadRunning(sites);
     let message = tr(`${name}.test তৈরি হয়েছে`, `${name}.test created`);
-    if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে কাজ করবে)', ' (it will work once a web server is started)');
+    if (NODE_KINDS.includes(kind)) {
+      message += kind === 'node-basic' ? tr('। নিচের Node.js কার্ডে ▶ চালু চাপুন', '. Click ▶ Start in the Node.js card below') : tr('। npm install চলবে, শেষ হলে ▶ চালু চাপুন', '. npm install will run, then click ▶ Start');
+      if (!live) message += tr(' (.test ঠিকানার জন্য ওয়েব সার্ভারও চালু করুন)', ' (also start a web server for the .test address)');
+    } else if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে কাজ করবে)', ' (it will work once a web server is started)');
     if (!h.ok) message += tr(' ⚠ hosts আপডেট হয়নি (Administrator অনুমতি দিন)', ' ⚠ hosts file was not updated (allow Administrator access)');
     if (kind === 'wordpress' || kind === 'laravel') message += tr('। ডাটাবেস: ' + name.replace(/-/g, '_') + ' (root, খালি পাসওয়ার্ড)', '. Database: ' + name.replace(/-/g, '_') + ' (root, empty password)');
     if (laravelInfo) {
@@ -1869,7 +2092,8 @@ ipcMain.handle('site:create', async (_event, kind, rawName) => {
       if (laravelInfo.turnedOn.length) message += tr(`। চালু করা হয়েছে: ${laravelInfo.turnedOn.join(', ')} (ওয়েব সার্ভার একবার বন্ধ করে চালু করুন)`, `. Turned on: ${laravelInfo.turnedOn.join(', ')} (stop and start the web server once)`);
       if (laravelInfo.warnings.length) message += ' ' + laravelInfo.warnings.join(' ');
     }
-    return { ok: true, message, url: live ? siteUrl(`${name}.test`) : '', sites: publicSites(sites) };
+    const isNodeKind = NODE_KINDS.includes(kind);
+    return { ok: true, message, url: !isNodeKind && live ? siteUrl(`${name}.test`) : '', node: isNodeKind ? { domain: `${name}.${TLD}`, install: kind !== 'node-basic' } : null, sites: publicSites(sites) };
   } catch (err) {
     return fail(tr('সমস্যা: ', 'Error: ') + err.message);
   } finally {
@@ -1905,6 +2129,7 @@ ipcMain.handle('site:setEnabled', async (_event, domain, on) => {
     if (on) delete settings.siteDisabled[domain];
     else settings.siteDisabled[domain] = true;
     saveSettings(settings);
+    if (!on && nodeRun[domain]) await stopNodeApp(domain); // বন্ধ করা Node সাইটের অ্যাপও থামানো
     const sites = withToolSites(scanSites());
     const h = await syncHosts(sites);
     const live = await reloadRunning(sites);
@@ -2329,6 +2554,16 @@ ipcMain.handle('all:start', async (_event, webId) => {
   for (const id of Object.keys(DATABASES)) {
     if (autoStartOf(id)) lines.push(await startDatabase(id));
   }
+  // \"Start All-এ চালু\" সুইচ দেওয়া Node অ্যাপগুলোও (ওয়েব সার্ভার ও ডাটাবেসের পরে, যাতে .test ঠিকানায় খোলে)
+  try {
+    for (const s of scanSites().filter((x) => x.node && !x.disabled && nodeCfg(x.domain).startall)) {
+      if (nodeRun[s.domain]) continue;
+      const r = await startNodeApp(s.domain);
+      lines.push(r.message);
+    }
+  } catch (err) {
+    lines.push(tr('Node অটো-চালু ব্যর্থ: ', 'Node auto-start failed: ') + err.message);
+  }
   return lines.join('\n');
 });
 
@@ -2344,6 +2579,10 @@ ipcMain.handle('all:restart', async () => {
 
 ipcMain.handle('all:stop', async () => {
   const lines = [];
+  // চলমান Node অ্যাপগুলোও বন্ধ (npm install চললে সেটা ছোঁয়া হয় না)
+  for (const d of Object.keys(nodeRun)) {
+    if (nodeRun[d] && nodeRun[d].task === 'run' && (await stopNodeApp(d))) lines.push(tr(`${d} বন্ধ হয়েছে`, `${d} stopped`));
+  }
   if (running) lines.push(stopWebServer());
   for (const id of Object.keys(DATABASES)) {
     if (dbRun[id]) lines.push(await stopDatabase(id));
@@ -2391,8 +2630,315 @@ ipcMain.handle('open:url', (_event, url) => {
 });
 
 
+// ---------- Node.js সাইট (অ্যাপ চালানো, লগ, npm install) ----------
+// www-র যে সাবফোল্ডারে package.json আছে (index.php/artisan/composer.json/wp-config.php নেই) সেটা Node সাইট।
+// অ্যাপ নিজের পোর্টে চলে (PORT ভেরিয়েবলে পাঠানো হয়), <নাম>.test ঠিকানা Nginx/Apache-র reverse proxy দিয়ে সেখানে যায়।
+// Node অ্যাপ ওয়েব সার্ভারের সাথে নিজে থেকে চালু/বন্ধ হয় না; অ্যাপ বন্ধ করলে বা অ্যাপ কোয়িট করলে এগুলোও বন্ধ হয়।
+const nodeRun = {}; // domain -> { proc, task: 'run' | 'install', port, exit: Promise<code> }
+const nodeLogs = {}; // domain -> [লাইন...] (প্রসেস বন্ধ হলেও লগ থাকে, যাতে এরর পড়া যায়)
+const NODE_LOG_MAX = 400;
+const nodeBusyMsg = () => tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...');
+
+function nodeLogPush(domain, text) {
+  const arr = (nodeLogs[domain] = nodeLogs[domain] || []);
+  const clean = String(text).replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ''); // রঙের escape কোড বাদ
+  for (const line of clean.split(/\r?\n/)) {
+    if (line.trim()) arr.push(line.slice(0, 500));
+  }
+  if (arr.length > NODE_LOG_MAX) arr.splice(0, arr.length - NODE_LOG_MAX);
+}
+
+// ব্যর্থতার বার্তায় লগের শেষ কয়েকটা কাজের লাইন (নিজের [শেষ...] লাইন ও Node-এর ভার্সন লাইন বাদে)
+const nodeTail = (domain) =>
+  (nodeLogs[domain] || [])
+    .filter((l) => !l.startsWith('[') && !l.startsWith('---') && !/^Node\.js v\d/.test(l))
+    .slice(-3)
+    .join(' | ')
+    .slice(-300);
+
+const findNodeSite = (domain) => scanSites().find((s) => s.domain === domain && s.node) || null;
+
+// চালানোর কমান্ড নিজে ধরা: scripts.start -> scripts.dev -> package.json "main" -> server.js/index.js/app.js/main.js
+function detectNodeCmd(dir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    const sc = pkg.scripts || {};
+    if (sc.start) return 'npm start';
+    if (sc.dev) return 'npm run dev';
+    if (typeof pkg.main === 'string' && /^[\w./-]+$/.test(pkg.main) && fs.existsSync(path.join(dir, pkg.main))) return `node ${pkg.main}`;
+  } catch {}
+  for (const f of ['server.js', 'index.js', 'app.js', 'main.js']) {
+    if (fs.existsSync(path.join(dir, f))) return `node ${f}`;
+  }
+  return '';
+}
+const nodeCmdOf = (site) => String(nodeCfg(site.domain).cmd || '').trim() || detectNodeCmd(site.root);
+
+// ---- Node ভার্সন (step 2): "টুলস ও ভার্সন" পেজের Node তালিকা থেকে সাইট ধরে ভার্সন বাছা ----
+// settings.nodeSites[domain].version = '22.12.0'। না থাকলে (বা তালিকা থেকে মুছে গেলে) চালু (active) ভার্সন ব্যবহার হয়।
+function nodeVersionList() {
+  const def = TOOL_DEFAULTS.node;
+  const items = (settings.toolVersions && settings.toolVersions.node && settings.toolVersions.node.items) || {};
+  return [{ version: def.version, folder: def.folder, url: def.url }, ...Object.entries(items).map(([v, it]) => ({ version: v, folder: it.folder, url: it.url || null }))].map((x) => {
+    const dir = path.join(TOOLS_DIR, x.folder);
+    return { version: x.version, folder: x.folder, url: x.url, dir, installed: fs.existsSync(path.join(dir, SERVICES.node.exeRel)) };
+  });
+}
+const pinnedNodeVersion = (domain) => {
+  const v = nodeCfg(domain).version;
+  return v && nodeVersionList().some((x) => x.version === v) ? v : '';
+};
+const nodeVersionOf = (domain) => pinnedNodeVersion(domain) || activeVersion('node').version;
+
+// অ্যাপের পরিবেশ: PORT, আর PATH-এর শুরুতে Node-এর ফোল্ডার (যাতে node, npm, npx পাওয়া যায়)
+function nodeEnv(port, nodeDir) {
+  const env = { ...process.env, PORT: String(port), FORCE_COLOR: '0' };
+  const pk = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  env[pk] = (nodeDir || path.dirname(SERVICES.node.exe)) + path.delimiter + (env[pk] || '');
+  return env;
+}
+
+// নির্দিষ্ট Node ভার্সন তৈরি আছে কিনা দেখে (না থাকলে নামায়)। ফেরত দেয় { version, dir, ... }
+async function ensureNodeRuntime(version) {
+  const find = () => nodeVersionList().find((x) => x.version === version) || nodeVersionList().find((x) => x.version === activeVersion('node').version);
+  let v = find();
+  if (v.installed) return v;
+  if (busy) throw new Error(nodeBusyMsg());
+  busy = true;
+  try {
+    if (v.version === activeVersion('node').version) {
+      await ensureService(SERVICES.node);
+    } else {
+      if (!v.url) throw new Error(tr(`Node ${v.version}-এর ফাইল নেই (লোকাল ZIP থেকে যোগ হয়েছিল)। \"টুলস ও ভার্সন\" থেকে আবার যোগ করুন`, `Node ${v.version} files are missing (it was added from a local ZIP). Add it again from \"Tools & Versions\"`));
+      sendStatus(tr(`Node ${v.version} নামানো হচ্ছে...`, `Downloading Node ${v.version}...`));
+      await installInto(SERVICES.node, v.dir, { url: v.url });
+      sendStatus(tr(`Node ${v.version} ইনস্টল সম্পন্ন`, `Node ${v.version} installed`));
+    }
+  } finally {
+    busy = false;
+  }
+  v = find();
+  if (!v.installed) throw new Error(tr(`Node ${v.version} পাওয়া যায়নি`, `Node ${v.version} not found`));
+  return v;
+}
+
+function spawnNodeTask(domain, site, command, task, port, nodeEntry) {
+  nodeLogPush(domain, `--- ${new Date().toLocaleTimeString()} ---`);
+  nodeLogPush(domain, `> ${command}${task === 'run' ? `   (PORT=${port}, Node ${nodeEntry.version})` : `   (Node ${nodeEntry.version})`}`);
+  const proc = spawn(command, { cwd: site.root, env: nodeEnv(port, nodeEntry.dir), shell: true, windowsHide: true });
+  const run = { proc, task, port, version: nodeEntry.version };
+  run.exit = new Promise((resolve) => {
+    proc.once('exit', (code) => resolve(code));
+    proc.once('error', (e) => {
+      nodeLogPush(domain, 'error: ' + e.message);
+      resolve(-1);
+    });
+  });
+  nodeRun[domain] = run;
+  proc.stdout.on('data', (d) => nodeLogPush(domain, d));
+  proc.stderr.on('data', (d) => nodeLogPush(domain, d));
+  run.exit.then((code) => {
+    nodeLogPush(domain, tr(`[শেষ হয়েছে, কোড ${code}]`, `[exited, code ${code}]`));
+    if (nodeRun[domain] === run) delete nodeRun[domain];
+  });
+  return run;
+}
+
+async function stopNodeApp(domain) {
+  const run = nodeRun[domain];
+  if (!run) return false;
+  killTree(run.proc.pid);
+  await Promise.race([run.exit, new Promise((r) => setTimeout(r, 4000))]);
+  if (nodeRun[domain] === run) delete nodeRun[domain];
+  return true;
+}
+
+// প্রক্সির কনফিগ বদলালে চলমান ওয়েব সার্ভারে লোড করা (Apache-তে ভেতরে ভেতরে রিস্টার্ট হয়)
+async function reloadWebLocked() {
+  if (!running || busy) return false;
+  busy = true;
+  try {
+    return await reloadRunning(withToolSites(scanSites()));
+  } catch {
+    return false;
+  } finally {
+    busy = false;
+  }
+}
+
+const nodeFail = (msg) => ({ ok: false, message: tr('সমস্যা: ', 'Error: ') + msg });
+
+async function startNodeApp(domain) {
+  const site = findNodeSite(domain);
+  if (!site) return nodeFail(tr('Node সাইটটা পাওয়া যায়নি', 'Node site not found'));
+  if (site.disabled) return nodeFail(tr('সাইটটা বন্ধ আছে (সাইটের টেবিলে \"চালু\" টিক দিন)', 'the site is disabled (tick \"On\" in the sites table)'));
+  if (nodeRun[domain]) return { ok: false, message: tr(`${domain} আগে থেকেই ${nodeRun[domain].task === 'install' ? 'npm install চালাচ্ছে' : 'চলছে'}`, `${domain} is already ${nodeRun[domain].task === 'install' ? 'running npm install' : 'running'}`) };
+  const command = nodeCmdOf(site);
+  if (!command) return nodeFail(tr('চালানোর কমান্ড পাওয়া যায়নি। কমান্ড ঘরে লিখুন (যেমন node server.js)', 'no start command found. Enter one in the command field (e.g. node server.js)'));
+  let nodeEntry;
+  try {
+    nodeEntry = await ensureNodeRuntime(nodeVersionOf(domain));
+  } catch (err) {
+    return nodeFail(err.message);
+  }
+
+  // পোর্ট: খালি না থাকলে (নিজের বসানো না হলে) পরের খালি নম্বর নেওয়া, আর proxy-র কনফিগ নতুন পোর্টে লোড করা
+  let port = nodePortOf(domain);
+  let portChanged = false;
+  if (!(await isPortFree(port))) {
+    if (nodeCfg(domain).manual) return nodeFail(tr(`পোর্ট ${port} অন্য কেউ ব্যবহার করছে। অন্য পোর্ট দিন বা ঘরটা ফাঁকা রাখুন (অটো)`, `port ${port} is in use. Enter another port or leave the field empty (auto)`));
+    const used = new Set(Object.values(settings.nodeSites || {}).map((c) => c && c.port));
+    let p = 3100;
+    while (p < 4000 && (used.has(p) || !(await isPortFree(p)))) p++;
+    if (p >= 4000) return nodeFail(tr('খালি পোর্ট পাওয়া যায়নি (3100-3999)', 'no free port found (3100-3999)'));
+    settings.nodeSites = { ...(settings.nodeSites || {}), [domain]: { ...nodeCfg(domain), port: p } };
+    saveSettings(settings);
+    port = p;
+    portChanged = true;
+  }
+
+  const run = spawnNodeTask(domain, site, command, 'run', port, nodeEntry);
+  // ১.৫ সেকেন্ডের মধ্যে বন্ধ হয়ে গেলে ব্যর্থ
+  const early = await Promise.race([run.exit, new Promise((r) => setTimeout(() => r(null), 1500))]);
+  if (early !== null) {
+    const tail = nodeTail(domain);
+    return nodeFail(tr(`অ্যাপ চালু হয়নি (কোড ${early}). ${tail}`, `the app did not start (code ${early}). ${tail}`));
+  }
+  if (portChanged) await reloadWebLocked();
+
+  // পোর্টে সাড়া না দেওয়া পর্যন্ত কিছুক্ষণ অপেক্ষা (সর্বোচ্চ ~8 সেকেন্ড)
+  let listening = false;
+  for (let i = 0; i < 20 && nodeRun[domain] === run; i++) {
+    if (await tcpCheck(port)) {
+      listening = true;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  if (nodeRun[domain] !== run) {
+    const tail = nodeTail(domain);
+    return nodeFail(tr(`অ্যাপ চালু হয়ে বন্ধ হয়ে গেছে। ${tail}`, `the app started and then stopped. ${tail}`));
+  }
+  const where = running ? siteUrl(domain) : `http://localhost:${port}`;
+  return {
+    ok: true,
+    message: listening
+      ? tr(`${domain} চালু হয়েছে (পোর্ট ${port}, Node ${nodeEntry.version})। খুলুন: ${where}${running ? '' : ' (ওয়েব সার্ভার চালু করলে .test ঠিকানাতেও খুলবে)'}`, `${domain} started (port ${port}, Node ${nodeEntry.version}). Open: ${where}${running ? '' : ' (start a web server to open it on the .test address)'}`)
+      : tr(`${domain}-এর কমান্ড চালু হয়েছে, কিন্তু পোর্ট ${port} এখনো সাড়া দিচ্ছে না। লগ দেখুন; অ্যাপ PORT না মানলে পোর্ট ঘরে অ্যাপের আসল পোর্ট দিন`, `${domain} command is running, but port ${port} does not answer yet. Check the log; if the app ignores PORT, enter the app's real port in the port field`),
+  };
+}
+
+async function installNodeDeps(domain) {
+  const site = findNodeSite(domain);
+  if (!site) return nodeFail(tr('Node সাইটটা পাওয়া যায়নি', 'Node site not found'));
+  if (nodeRun[domain]) return { ok: false, message: tr(`${domain} এখন চলছে, আগে বন্ধ করুন`, `${domain} is busy, stop it first`) };
+  let nodeEntry;
+  try {
+    nodeEntry = await ensureNodeRuntime(nodeVersionOf(domain));
+  } catch (err) {
+    return nodeFail(err.message);
+  }
+  const npm = path.join(nodeEntry.dir, 'npm.cmd');
+  if (!fs.existsSync(npm)) return nodeFail(tr('এই Node ZIP-এ npm.cmd নেই', 'this Node ZIP does not include npm.cmd'));
+  sendStatus(tr(`${domain}: npm install চলছে (কিছুক্ষণ লাগবে)...`, `${domain}: running npm install (this takes a while)...`));
+  const run = spawnNodeTask(domain, site, `\"${npm}\" install`, 'install', nodePortOf(domain), nodeEntry);
+  const timer = setTimeout(() => killTree(run.proc.pid), 15 * 60 * 1000);
+  const code = await run.exit;
+  clearTimeout(timer);
+  if (code === 0) return { ok: true, message: tr(`${domain}: npm install শেষ হয়েছে`, `${domain}: npm install finished`) };
+  const tail = nodeTail(domain);
+  return nodeFail(tr(`npm install ব্যর্থ (কোড ${code}). ${tail}`, `npm install failed (code ${code}). ${tail}`));
+}
+
+ipcMain.handle('node:list', () =>
+  withToolSites(scanSites())
+    .filter((s) => s.node)
+    .map((s) => {
+      const cfg = nodeCfg(s.domain);
+      const run = nodeRun[s.domain];
+      return {
+        domain: s.domain,
+        name: s.name,
+        root: s.root,
+        url: siteUrl(s.domain),
+        enabled: !s.disabled,
+        cmd: String(cfg.cmd || ''),
+        cmdAuto: detectNodeCmd(s.root),
+        port: nodePortOf(s.domain),
+        manual: !!cfg.manual,
+        state: run ? run.task : 'stopped', // 'run' | 'install' | 'stopped'
+        hasModules: fs.existsSync(path.join(s.root, 'node_modules')),
+        version: pinnedNodeVersion(s.domain), // '' = চালু (active) ভার্সন
+        runVersion: run ? run.version : '',
+        autostart: !!cfg.autostart,
+        startall: !!cfg.startall,
+        defVersion: activeVersion('node').version,
+        versions: nodeVersionList().map((v) => ({ version: v.version, installed: v.installed })),
+        webRunning: !!running,
+      };
+    })
+);
+
+ipcMain.handle('node:config', async (_event, domain, cfg = {}) => {
+  const site = findNodeSite(domain);
+  if (!site) return nodeFail(tr('Node সাইটটা পাওয়া যায়নি', 'Node site not found'));
+  const prev = nodeCfg(domain);
+  const cmd = (cfg.cmd === undefined ? String(prev.cmd || '') : String(cfg.cmd || '')).trim(); // পাঠানো না হলে আগেরটা থাকে
+  if (cmd.length > 300 || /[\r\n\0]/.test(cmd)) return nodeFail(tr('কমান্ড এক লাইনে ও ৩০০ অক্ষরের মধ্যে হতে হবে', 'the command must be a single line of at most 300 characters'));
+  const portSent = cfg.port !== undefined; // পাঠানো না হলে পোর্ট (ও manual চিহ্ন) আগের মতোই থাকে
+  const portRaw = String(cfg.port ?? '').trim();
+  let port = prev.port;
+  let manual = portSent ? false : !!prev.manual;
+  if (portSent && portRaw) {
+    port = validPort(portRaw);
+    if (!port) return nodeFail(tr('পোর্ট ১-৬৫৫৩৫-এর মধ্যে একটা সংখ্যা হতে হবে', 'the port must be a number between 1 and 65535'));
+    const taken = port === getWebPort() || Object.keys(DATABASES).some((id) => getDbPort(id) === port) || Object.entries(settings.nodeSites || {}).some(([d, c]) => d !== domain && c && c.port === port);
+    if (taken) return nodeFail(tr(`পোর্ট ${port} ওয়েব সার্ভার, ডাটাবেস বা অন্য Node সাইট নিয়ে রেখেছে`, `port ${port} is used by the web server, a database or another Node site`));
+    manual = true;
+  }
+  const portChanged = port !== prev.port;
+  // Node ভার্সন (ফাঁকা = চালু ভার্সন) ও অ্যাপ খুললে অটো-চালু: পাঠানো না হলে আগের মান থাকে
+  let version = cfg.version === undefined ? prev.version || '' : String(cfg.version || '').trim();
+  if (version && !nodeVersionList().some((x) => x.version === version)) return nodeFail(tr(`Node ${version} তালিকায় নেই। আগে \"টুলস ও ভার্সন\" পেজে যোগ করুন`, `Node ${version} is not in the list. Add it on the \"Tools & Versions\" page first`));
+  if (version === activeVersion('node').version) version = ''; // চালু ভার্সনের সাথে এক হলে আলাদা করে বাঁধার দরকার নেই
+  const autostart = cfg.autostart === undefined ? !!prev.autostart : !!cfg.autostart;
+  const startall = cfg.startall === undefined ? !!prev.startall : !!cfg.startall; // Start All চাপলে চালু হবে কি না (অ্যাপ খোলার অটো-চালু থেকে আলাদা)
+  settings.nodeSites = { ...(settings.nodeSites || {}), [domain]: { ...(cmd ? { cmd } : {}), ...(port ? { port } : {}), ...(manual ? { manual: true } : {}), ...(version ? { version } : {}), ...(autostart ? { autostart: true } : {}), ...(startall ? { startall: true } : {}) } };
+  saveSettings(settings);
+  if (portChanged) await reloadWebLocked();
+  const live = !!nodeRun[domain];
+  return { ok: true, message: tr(`${domain}-এর সেটিং সেভ হয়েছে${live ? ' (চলমান অ্যাপে প্রযোজ্য হতে রিস্টার্ট করুন)' : ''}`, `${domain} settings saved${live ? ' (restart the running app to apply)' : ''}`) };
+});
+
+ipcMain.handle('node:start', (_event, domain) => startNodeApp(domain));
+ipcMain.handle('node:stop', async (_event, domain) => ((await stopNodeApp(domain)) ? { ok: true, message: tr(`${domain} বন্ধ হয়েছে`, `${domain} stopped`) } : { ok: false, message: tr(`${domain} চলছে না`, `${domain} is not running`) }));
+ipcMain.handle('node:restart', async (_event, domain) => {
+  if (nodeRun[domain] && nodeRun[domain].task === 'install') return { ok: false, message: tr('npm install চলছে, শেষ হওয়া পর্যন্ত অপেক্ষা করুন', 'npm install is running, wait for it to finish') };
+  await stopNodeApp(domain);
+  return startNodeApp(domain);
+});
+ipcMain.handle('node:install', (_event, domain) => installNodeDeps(domain));
+ipcMain.handle('node:log', (_event, domain) => ({ lines: (nodeLogs[domain] || []).slice(-300), state: nodeRun[domain] ? nodeRun[domain].task : 'stopped' }));
+
+// অ্যাপ খুললে: আগের বার ক্র্যাশ/জোর-বন্ধ হওয়ায় রয়ে যাওয়া node.exe (শুধু আমাদের tools ফোল্ডারেরগুলো) মেরে ফেলা,
+// তারপর \"অ্যাপ খুললে চালু\" টিক দেওয়া Node অ্যাপগুলো একটা একটা করে চালু করা।
+async function startupNodeApps() {
+  try {
+    await killStale('node');
+    const list = scanSites().filter((s) => s.node && !s.disabled && nodeCfg(s.domain).autostart);
+    for (const s of list) {
+      if (nodeRun[s.domain]) continue;
+      sendStatus(tr(`${s.domain} নিজে থেকে চালু হচ্ছে...`, `Auto-starting ${s.domain}...`));
+      const r = await startNodeApp(s.domain);
+      sendStatus(r.message);
+    }
+  } catch (err) {
+    sendStatus(tr('Node অটো-চালু ব্যর্থ: ', 'Node auto-start failed: ') + err.message);
+  }
+}
+
 // ---------- টুলস ও ভার্সন ----------
-const TOOL_ORDER = ['php', 'nginx', 'apache', 'mysql', 'postgres', 'phpmyadmin'];
+const TOOL_ORDER = ['php', 'nginx', 'apache', 'mysql', 'postgres', 'phpmyadmin', 'node'];
 const TOOL_HELP = {
   php: 'https://windows.php.net/download/',
   nginx: 'https://nginx.org/en/download.html',
@@ -2400,6 +2946,7 @@ const TOOL_HELP = {
   mysql: 'https://dev.mysql.com/downloads/mysql/',
   postgres: 'https://www.enterprisedb.com/download-postgresql-binaries',
   phpmyadmin: 'https://www.phpmyadmin.net/downloads/',
+  node: 'https://nodejs.org/en/download',
 };
 const TOOL_HINT = {
   php: ['Thread Safe নয় এমন (NTS) x64 ZIP নামান', 'Download the Non-Thread-Safe (NTS) x64 ZIP'],
@@ -2408,10 +2955,11 @@ const TOOL_HINT = {
   mysql: ['"ZIP Archive" (Windows x64) নামান, MSI নয়', 'Download the "ZIP Archive" (Windows x64), not the MSI'],
   postgres: ['EDB-র "Windows x86-64" binaries ZIP নামান', 'Download the EDB "Windows x86-64" binaries ZIP'],
   phpmyadmin: ['all-languages.zip নামান', 'Download all-languages.zip'],
+  node: ['nodejs.org/dist থেকে node-v...-win-x64.zip নামান (Windows Binary ZIP, MSI নয়)', 'Download node-v...-win-x64.zip from nodejs.org/dist (the Windows Binary ZIP, not the MSI)'],
 };
 const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._-]{0,30}$/;
 // কোনো টুল চলার সময় ভার্সন বদলানো যাবে না
-const toolInUse = (id) => (id === 'mysql' || id === 'postgres' ? !!dbRun[id] : !!running);
+const toolInUse = (id) => (id === 'mysql' || id === 'postgres' ? !!dbRun[id] : id === 'node' ? Object.keys(nodeRun).length > 0 : !!running);
 
 ipcMain.handle('tools:list', () =>
   TOOL_ORDER.map((id) => {
@@ -2518,6 +3066,10 @@ ipcMain.handle('tools:remove', (_event, id, version) => {
   const it = st.items[version];
   if (!it) return { ok: false, message: tr('সমস্যা: এই ভার্সন তালিকায় নেই (ডিফল্ট ভার্সন মোছা যায় না)', 'Error: this version is not in the list (the built-in version cannot be removed)') };
   if (activeVersion(id).version === version) return { ok: false, message: tr('চালু ভার্সন মোছা যায় না, আগে অন্য ভার্সনে যান', 'The active version cannot be removed, switch to another version first') };
+  // যে Node ভার্সনে কোনো অ্যাপ এখন চলছে সেটা মোছা যাবে না (ফাইল আটকে থাকে)
+  if (id === 'node' && Object.values(nodeRun).some((r) => r.version === version)) {
+    return { ok: false, message: tr(`Node ${version} এখন কোনো অ্যাপ ব্যবহার করছে। আগে সেই অ্যাপ বন্ধ করুন`, `Node ${version} is in use by a running app. Stop that app first`) };
+  }
   // চলমান সার্ভারের php-cgi ফাইল আটকে রাখতে পারে, তাই PHP মোছার আগে সার্ভার বন্ধ থাকতে হবে
   if (id === 'php' && running) {
     return { ok: false, message: tr('আগে ওয়েব সার্ভার বন্ধ করুন, তারপর PHP ভার্সন মুছুন', 'Stop the web server first, then remove a PHP version') };
@@ -2530,6 +3082,12 @@ ipcMain.handle('tools:remove', (_event, id, version) => {
     const moved = Object.keys(settings.sitePhp).filter((d) => settings.sitePhp[d] === version);
     moved.forEach((d) => delete settings.sitePhp[d]);
     if (moved.length) phpNote = tr(` (${moved.length}টা সাইট ডিফল্ট PHP-তে ফিরেছে)`, ` (${moved.length} site(s) went back to the default PHP)`);
+  }
+  // যে Node সাইটগুলো এই ভার্সনে বাঁধা ছিল সেগুলো চালু (active) ভার্সনে ফিরবে
+  if (id === 'node' && settings.nodeSites) {
+    const moved = Object.keys(settings.nodeSites).filter((d) => settings.nodeSites[d] && settings.nodeSites[d].version === version);
+    moved.forEach((d) => delete settings.nodeSites[d].version);
+    if (moved.length) phpNote = tr(` (${moved.length}টা Node সাইট চালু ভার্সনে ফিরেছে)`, ` (${moved.length} Node site(s) went back to the active version)`);
   }
   saveSettings(settings);
   const dbNote = id === 'mysql' || id === 'postgres' ? tr(' (ওই ভার্সনের ডাটাবেস ডাটা data ফোল্ডারে রয়ে গেছে)', ' (that version\'s database data remains in the data folder)') : '';
@@ -2631,11 +3189,15 @@ app.whenReady().then(() => {
   createWindow();
   if (!settings.wwwDir) {
     win.webContents.once('did-finish-load', () => askWwwFolderFirstRun());
+  } else {
+    // আগের বারের রয়ে যাওয়া node.exe সাফ করে \"অ্যাপ খুললে চালু\" Node অ্যাপগুলো চালু করা (উইন্ডো তৈরির একটু পরে)
+    win.webContents.once('did-finish-load', () => setTimeout(() => startupNodeApps(), 2500));
   }
 });
 
 app.on('before-quit', () => {
   if (running) running.procs.forEach((p) => killTree(p.pid));
+  for (const r of Object.values(nodeRun)) killTree(r.proc.pid); // Node অ্যাপগুলোও বন্ধ
   // ডাটাবেসকে আগে নিয়ম মেনে বন্ধ করার চেষ্টা (ডাটা নিরাপদ রাখতে)
   for (const [id, run] of Object.entries(dbRun)) {
     const cmd = DATABASES[id].shutdownCmd(SERVICES[DATABASES[id].svcId], run.port);

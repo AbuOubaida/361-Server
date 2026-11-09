@@ -1,5 +1,16 @@
 const $ = (id) => document.getElementById(id);
 
+// নিরাপত্তা-জাল: কোনো কারণে পুরো পাতা (body/html) স্ক্রল হয়ে গেলে (যেমন লুকানো ইনপুটে ফোকাস গেলে) সাইডবার/কনটেন্ট
+// জানালার বাইরে চলে গিয়ে ফাঁকা দেখায়। তাই পাতার নিজের স্ক্রল সবসময় ০ তে ফিরিয়ে দিই (.content-এর নিজের স্ক্রল ঠিক থাকে)।
+window.addEventListener(
+  'scroll',
+  () => {
+    const se = document.scrollingElement;
+    if (se && (se.scrollTop || se.scrollLeft)) se.scrollTo(0, 0);
+  },
+  true
+);
+
 function el(tag, props = {}, ...children) {
   const node = Object.assign(document.createElement(tag), props);
   node.append(...children.filter((c) => c !== null && c !== undefined));
@@ -31,6 +42,8 @@ async function setLang(lang) {
   // ডাইনামিক অংশ নতুন ভাষায় আবার আঁকা
   dbsEl.textContent = '';
   for (const k of Object.keys(dbUi)) delete dbUi[k];
+  $('nodeList').textContent = '';
+  for (const k of Object.keys(nodeUi)) delete nodeUi[k];
   await refreshAll();
   loadSites();
   if (currentPage === 'tools') loadTools();
@@ -291,6 +304,7 @@ async function loadDbs() {
 
 // ---------- সাইট ----------
 function phpCell(s, php) {
+  if (s.node) return el('td', { className: 'php-text', textContent: 'Node.js' });
   if (s.system) return el('td', { className: 'php-text', textContent: '—' });
   if (s.name === 'localhost') return el('td', { className: 'php-text', textContent: t('php.defaultText', php.def) });
   const sel = el('select', {});
@@ -308,7 +322,7 @@ function phpCell(s, php) {
 }
 
 function sessionCell(s) {
-  if (s.system || s.name === 'localhost') return el('td', { className: 'php-text', textContent: '—' });
+  if (s.system || s.node || s.name === 'localhost') return el('td', { className: 'php-text', textContent: '—' });
   const inp = el('input', { type: 'number', min: 1, max: 525600, placeholder: t('sites.sessionPh') });
   inp.style.width = '90px';
   if (s.sessionMin) inp.value = s.sessionMin;
@@ -431,7 +445,7 @@ async function renderSites(sites, php) {
       'tr',
       {},
       enabledCell(s),
-      el('td', {}, a, ...(s.system ? [' ', el('span', { className: 'badge tool', textContent: t('sites.tool') })] : [])),
+      el('td', {}, a, ...(s.system ? [' ', el('span', { className: 'badge tool', textContent: t('sites.tool') })] : []), ...(s.node ? [' ', el('span', { className: 'badge tool', textContent: t('sites.node') })] : [])),
       folderCell(s),
       phpCell(s, php),
       sessionCell(s),
@@ -447,6 +461,182 @@ async function renderSites(sites, php) {
 async function loadSites() {
   const [sites, php] = await Promise.all([window.api.listSites(), window.api.listPhp()]);
   renderSites(sites, php);
+  loadNodeSites();
+}
+
+// ---------- Node.js অ্যাপ ----------
+// প্রতিটা Node সাইটের জন্য একটা ব্লক: কমান্ড, পোর্ট, চালু/বন্ধ/রিস্টার্ট, npm install, লগ।
+// ব্লকগুলো একবার বানানো হয়, পরে শুধু অবস্থা বদলায় (যাতে টাইপ করা লেখা মুছে না যায়)।
+const nodeUi = {};
+let nodeLogTimer = null;
+
+function nodeStateText(state) {
+  return state === 'run' ? t('node.state.run') : state === 'install' ? t('node.state.install') : t('node.state.stopped');
+}
+
+function buildNodeApp(n) {
+  const name = el('b', { textContent: n.domain });
+  const badge = el('span', { className: 'badge' });
+  const openLink = el('a', { className: 'link' });
+  const cmdIn = el('input', { type: 'text', maxLength: 300 });
+  const portIn = el('input', { type: 'number', min: 1, max: 65535 });
+  const verSel = el('select', { title: t('node.version.tip') });
+  const autoChk = el('input', { type: 'checkbox' });
+  const autoLbl = el('label', { className: 'switch', title: t('node.auto.tip') }, autoChk, el('i'), t('node.auto'));
+  const allChk = el('input', { type: 'checkbox' });
+  const allLbl = el('label', { className: 'switch', title: t('node.all.tip') }, allChk, el('i'), t('node.all'));
+  const saveBtn = el('button', { className: 'btn sm', textContent: t('node.save') });
+  const startBtn = el('button', { className: 'btn sm primary', textContent: t('node.start') });
+  const stopBtn = el('button', { className: 'btn sm danger', textContent: t('node.stop') });
+  const restartBtn = el('button', { className: 'btn sm', textContent: t('node.restart') });
+  const installBtn = el('button', { className: 'btn sm accent', textContent: t('node.install'), title: t('node.install.tip') });
+  const logBtn = el('button', { className: 'btn sm', textContent: t('node.log') });
+  const logBox = el('pre', { className: 'node-log', hidden: true });
+  const folder = el('div', { className: 'hint', style: 'margin-top:6px' });
+  const domain = n.domain;
+  const done = async (r) => {
+    if (r && r.message) setStatus(r.message);
+    cmdIn.dataset.dirty = '';
+    portIn.dataset.dirty = '';
+    await loadNodeSites();
+    if (!logBox.hidden) pollLog(domain);
+  };
+
+  openLink.addEventListener('click', () => {
+    const u = nodeUi[domain] && nodeUi[domain].data;
+    if (u) window.api.openUrl(u.webRunning ? u.url : `http://localhost:${u.port}`);
+  });
+  const cfgNow = () => ({ cmd: cmdIn.value, port: portIn.value, version: verSel.value, autostart: autoChk.checked, startall: allChk.checked });
+  saveBtn.addEventListener('click', () => work(saveBtn, async () => done(await window.api.configNode(domain, cfgNow()))));
+  // ভার্সন বা অটো-চালু বদলালেই সেভ (এগুলোর জন্য আলাদা বাটন লাগে না)
+  const quickSave = (ctl) => () =>
+    work(ctl, async () => {
+      const r = await window.api.configNode(domain, { version: verSel.value, autostart: autoChk.checked, startall: allChk.checked });
+      verSel.dataset.dirty = '';
+      setStatus(r.message);
+      await loadNodeSites();
+    });
+  verSel.addEventListener('change', quickSave(verSel));
+  autoChk.addEventListener('change', quickSave(autoChk));
+  allChk.addEventListener('change', quickSave(allChk));
+  startBtn.addEventListener('click', () =>
+    work(startBtn, async () => {
+      setStatus(t('node.starting', domain));
+      const c = await window.api.configNode(domain, cfgNow()); // ঘরের বর্তমান মান আগে সেভ
+      if (!c.ok) return setStatus(c.message);
+      logBox.hidden = false;
+      startLogTimer();
+      await done(await window.api.startNode(domain));
+    })
+  );
+  stopBtn.addEventListener('click', () => work(stopBtn, async () => done(await window.api.stopNode(domain))));
+  restartBtn.addEventListener('click', () => work(restartBtn, async () => done(await window.api.restartNode(domain))));
+  installBtn.addEventListener('click', () =>
+    work(installBtn, async () => {
+      logBox.hidden = false;
+      startLogTimer();
+      await done(await window.api.installNode(domain));
+    })
+  );
+  logBtn.addEventListener('click', () => {
+    logBox.hidden = !logBox.hidden;
+    if (!logBox.hidden) {
+      pollLog(domain);
+      startLogTimer();
+    }
+  });
+
+  const box = el(
+    'div',
+    { className: 'node-app' },
+    el('div', { className: 'row first' }, name, badge, el('span', { className: 'spacer' }), openLink),
+    folder,
+    el('div', { className: 'row' }, cmdIn, portIn, saveBtn),
+    el('div', { className: 'row' }, el('span', { className: 'hint', textContent: t('node.version') }), verSel, el('span', { className: 'spacer' }), autoLbl, allLbl),
+    el('div', { className: 'row' }, startBtn, stopBtn, restartBtn, installBtn, el('span', { className: 'spacer' }), logBtn),
+    logBox
+  );
+  nodeUi[domain] = { box, badge, openLink, cmdIn, portIn, verSel, autoChk, allChk, startBtn, stopBtn, restartBtn, installBtn, saveBtn, logBox, folder, data: n };
+  return box;
+}
+
+function updateNodeApp(n) {
+  const u = nodeUi[n.domain];
+  u.data = n;
+  u.badge.textContent = nodeStateText(n.state);
+  u.badge.classList.toggle('on', n.state === 'run');
+  u.openLink.textContent = n.webRunning ? n.url : `http://localhost:${n.port}`;
+  u.folder.textContent = n.root + (n.hasModules ? '' : t('node.noModules'));
+  u.cmdIn.placeholder = t('node.cmdPh', n.cmdAuto || '—');
+  u.portIn.placeholder = t('node.portPh');
+  // ঘরে ফোকাস থাকলে বা লেখা বদলানো থাকলে ওভাররাইট করি না
+  if (document.activeElement !== u.cmdIn && u.cmdIn.dataset.dirty !== '1') u.cmdIn.value = n.cmd;
+  if (document.activeElement !== u.portIn && u.portIn.dataset.dirty !== '1') u.portIn.value = n.manual ? n.port : '';
+  // Node ভার্সন তালিকা: প্রথমে চালু ভার্সন (ডিফল্ট), তারপর যোগ করা বাকিগুলো
+  if (!u.verSel.classList.contains('working') && document.activeElement !== u.verSel) {
+    u.verSel.textContent = '';
+    u.verSel.appendChild(el('option', { value: '', textContent: t('node.version.def', n.defVersion) }));
+    for (const v of n.versions) {
+      if (v.version === n.defVersion) continue;
+      u.verSel.appendChild(el('option', { value: v.version, textContent: 'Node ' + v.version + (v.installed ? '' : t('node.version.missing')) }));
+    }
+    u.verSel.value = n.version || '';
+  }
+  u.verSel.disabled = n.state !== 'stopped'; // চলার সময় ভার্সন বদলানো যাবে না (আগে বন্ধ করুন)
+  if (document.activeElement !== u.autoChk) u.autoChk.checked = n.autostart;
+  if (document.activeElement !== u.allChk) u.allChk.checked = n.startall;
+  if (n.state === 'run' && n.runVersion) u.badge.textContent += ' · Node ' + n.runVersion;
+  const idle = n.state === 'stopped' && n.enabled;
+  if (!u.startBtn.classList.contains('working')) u.startBtn.disabled = !idle;
+  if (!u.stopBtn.classList.contains('working')) u.stopBtn.disabled = n.state !== 'run';
+  if (!u.restartBtn.classList.contains('working')) u.restartBtn.disabled = n.state !== 'run';
+  if (!u.installBtn.classList.contains('working')) u.installBtn.disabled = !idle;
+  u.box.style.opacity = n.enabled ? '' : '0.55';
+}
+
+async function pollLog(domain) {
+  const u = nodeUi[domain];
+  if (!u || u.logBox.hidden) return;
+  const r = await window.api.nodeLog(domain);
+  const atBottom = u.logBox.scrollTop + u.logBox.clientHeight >= u.logBox.scrollHeight - 30;
+  u.logBox.textContent = r.lines.length ? r.lines.join('\n') : t('node.noLog');
+  if (atBottom) u.logBox.scrollTop = u.logBox.scrollHeight;
+}
+function startLogTimer() {
+  if (nodeLogTimer) return;
+  nodeLogTimer = setInterval(async () => {
+    const open = Object.keys(nodeUi).filter((d) => nodeUi[d] && !nodeUi[d].logBox.hidden);
+    if (!open.length || currentPage !== 'sites') {
+      clearInterval(nodeLogTimer);
+      nodeLogTimer = null;
+      return;
+    }
+    for (const d of open) await pollLog(d);
+  }, 1500);
+}
+
+async function loadNodeSites() {
+  let list = [];
+  try {
+    list = await window.api.listNodeSites();
+  } catch {}
+  $('nodeCard').hidden = list.length === 0;
+  const holder = $('nodeList');
+  for (const d of Object.keys(nodeUi)) {
+    if (!list.some((n) => n.domain === d)) {
+      nodeUi[d].box.remove();
+      delete nodeUi[d];
+    }
+  }
+  for (const n of list) {
+    if (!nodeUi[n.domain]) {
+      const box = buildNodeApp(n);
+      nodeUi[n.domain].cmdIn.addEventListener('input', () => (nodeUi[n.domain].cmdIn.dataset.dirty = '1'));
+      nodeUi[n.domain].portIn.addEventListener('input', () => (nodeUi[n.domain].portIn.dataset.dirty = '1'));
+      holder.appendChild(box);
+    }
+    updateNodeApp(n);
+  }
 }
 $('refreshSites').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
@@ -472,6 +662,31 @@ function createSite(kind) {
       }
     });
 }
+// Node.js স্টার্টার টেমপ্লেট (basic / express / vite / next)। npm লাগে এমনগুলোর জন্য তৈরির পরে নিজে থেকে npm install চালায়।
+$('newNode').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    const name = $('newSiteName').value;
+    setStatus(t('starting'));
+    const r = await window.api.createSite($('newNodeKind').value, name);
+    setStatus(r.message);
+    if (!r.ok) return;
+    $('newSiteName').value = '';
+    renderSites(r.sites, await window.api.listPhp());
+    if (r.node && r.node.install) {
+      await loadNodeSites();
+      const u = nodeUi[r.node.domain];
+      if (u) {
+        u.logBox.hidden = false;
+        startLogTimer();
+        setStatus(t('node.creating', r.node.domain));
+        const ir = await window.api.installNode(r.node.domain);
+        setStatus(ir.ok ? ir.message + t('node.thenStart') : ir.message);
+        await loadNodeSites();
+        pollLog(r.node.domain);
+      }
+    }
+  })
+);
 $('newBlank').addEventListener('click', createSite('blank'));
 $('newWp').addEventListener('click', createSite('wordpress'));
 $('newLaravel').addEventListener('click', createSite('laravel'));
@@ -642,6 +857,7 @@ async function refreshAll() {
   try {
     applyWeb(await window.api.webStatus());
     await loadDbs();
+    if (currentPage === 'sites') await loadNodeSites(); // Node অ্যাপ চলছে/বন্ধ অবস্থা হালনাগাদ
   } catch {}
 }
 

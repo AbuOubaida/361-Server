@@ -176,15 +176,17 @@
 
     /* সেগমেন্ট (Nginx | Apache) */
     .segment { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; padding: 3px; }
-    .segment label { cursor: pointer; }
+    .segment label { cursor: pointer; position: relative; }
     .segment input { position: absolute; opacity: 0; pointer-events: none; }
     .segment span { display: block; padding: 6px 18px; border-radius: 6px; font-weight: 600; color: var(--muted); }
     .segment input:checked + span { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
     .segment input:disabled + span { opacity: .6; }
 
     /* সুইচ */
-    .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--muted); font-size: 13px; }
-    .switch input { position: absolute; opacity: 0; }
+    .switch { position: relative; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--muted); font-size: 13px; }
+    /* position:relative ওপরে জরুরি: না থাকলে অদৃশ্য ইনপুট পাতার শুরুতে "ভেসে" থাকে, ফোকাস পেলে ব্রাউজার পুরো পাতা স্ক্রল করে ফাঁকা জানালা দেখায় */
+    .switch input { position: absolute; left: 0; top: 0; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+    .switch input:focus-visible + i { outline: 2px solid var(--accent); outline-offset: 2px; }
     .switch i { width: 34px; height: 20px; border-radius: 999px; background: var(--border); position: relative; transition: background .15s; }
     .switch i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.3); }
     .switch input:checked + i { background: var(--ok); }
@@ -257,6 +259,13 @@
     .conf-cell .btn, .conf-cell .badge { margin: 2px 2px 2px 0; }
     .badge.custom { background: var(--warn-soft); color: var(--text); border-color: transparent; }
     .badge.custom::before { background: #d97706; }
+    .card[hidden] { display: none; }
+    .node-app { border: 1px solid var(--border); border-radius: 9px; padding: 12px; margin-top: 10px; background: var(--panel-2); }
+    .node-app .row { margin-top: 10px; }
+    .node-app .row.first { margin-top: 0; }
+    .node-app input[type="text"] { width: auto; flex: 1; min-width: 160px; }
+    .node-app input[type="number"] { width: 110px; }
+    .node-log { margin: 10px 0 0; max-height: 260px; overflow: auto; background: #0b1220; color: #cbd5e1; font: 12px/1.5 Consolas, monospace; padding: 10px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
     .modal-back { position: fixed; inset: 0; background: rgba(15, 23, 42, .45); display: flex; align-items: center; justify-content: center; z-index: 50; }
     .modal-box { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; width: min(420px, 90vw); }
     .modal-title { font-weight: 600; margin-bottom: 4px; }
@@ -385,6 +394,15 @@
               <button id="newWp" class="btn sm primary" data-i18n="sites.new.wp">+ WordPress</button>
               <button id="newLaravel" class="btn sm primary" data-i18n="sites.new.laravel">+ Laravel</button>
             </div>
+            <div class="row">
+              <select id="newNodeKind">
+                <option value="node-basic" data-i18n="sites.new.nodeBasic">Node.js — Basic (প্যাকেজ লাগে না)</option>
+                <option value="node-express" data-i18n="sites.new.nodeExpress">Node.js — Express</option>
+                <option value="node-vite" data-i18n="sites.new.nodeVite">Node.js — Vite</option>
+                <option value="node-next" data-i18n="sites.new.nodeNext">Node.js — Next.js</option>
+              </select>
+              <button id="newNode" class="btn sm primary" data-i18n="sites.new.node">+ Node.js অ্যাপ</button>
+            </div>
             <div class="hint" data-i18n="sites.new.hint">নাম দিন (যেমন blog), তারপর বাটন চাপুন। WordPress-এর জন্য MySQL চালু থাকতে হবে। ডাটাবেস নিজে বানাবে।</div>
           </div>
           <div class="card" style="padding: 8px 8px 6px; overflow-x: auto;">
@@ -392,6 +410,11 @@
               <thead><tr><th style="width:56px" data-i18n="sites.colEnabled">চালু</th><th style="width:28%" data-i18n="sites.colAddr">ঠিকানা</th><th data-i18n="sites.colFolder">ফোল্ডার</th><th style="width:150px" data-i18n="sites.colPhp">PHP</th><th style="width:120px" data-i18n="sites.colSession">সেশন (মিনিট)</th><th style="width:330px" data-i18n="sites.colConf">কনফিগ</th></tr></thead>
               <tbody id="sitesBody"></tbody>
             </table>
+          </div>
+          <div class="card" id="nodeCard" hidden>
+            <div class="card-title" data-i18n="node.title">Node.js অ্যাপ</div>
+            <div class="hint" style="margin-top:6px" data-i18n-html="node.hint">www-র যে সাবফোল্ডারে package.json আছে সেটা Node অ্যাপ।</div>
+            <div id="nodeList"></div>
           </div>
         </section>
 
