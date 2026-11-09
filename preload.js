@@ -54,6 +54,12 @@ contextBridge.exposeInMainWorld('api', {
   setSiteSession: (domain, minutes) => ipcRenderer.invoke('site:setSession', domain, minutes),
   setSiteEnabled: (domain, on) => ipcRenderer.invoke('site:setEnabled', domain, on),
   openSiteConf: (domain, webId) => ipcRenderer.invoke('site:openConf', domain, webId),
+  addSiteExtra: (domain, webId, name) => ipcRenderer.invoke('site:addExtra', domain, webId, name),
+  openSiteExtras: (domain, webId) => ipcRenderer.invoke('site:openExtras', domain, webId),
+  confState: (webId) => ipcRenderer.invoke('sites:confState', webId),
+  keepSiteConf: (domain, webId) => ipcRenderer.invoke('site:keepConf', domain, webId),
+  resetSiteConf: (domain, webId) => ipcRenderer.invoke('site:resetConf', domain, webId),
+  resetAllConf: (webId) => ipcRenderer.invoke('sites:resetAll', webId),
   openSitesDir: (webId) => ipcRenderer.invoke('sites:openDir', webId),
   openSiteFolder: (domain) => ipcRenderer.invoke('site:openFolder', domain),
 

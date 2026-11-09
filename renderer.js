@@ -123,6 +123,7 @@ radios().forEach((r) =>
   r.addEventListener('change', () => {
     localStorage.setItem('server', selectedServer());
     updateApacheNote();
+    loadSites(); // "নিজের" ব্যাজ নির্বাচিত সার্ভার অনুযায়ী
   })
 );
 {
@@ -343,7 +344,33 @@ function enabledCell(s) {
   return el('td', {}, cb);
 }
 
-function confCell(s) {
+// নাম জিজ্ঞেস করার ছোট পপআপ (Electron-এ prompt() নেই); বাতিল করলে null
+function askName(title, hint, placeholder) {
+  return new Promise((resolve) => {
+    const input = el('input', { type: 'text', maxLength: 40, placeholder });
+    const ok = el('button', { className: 'btn sm primary', textContent: t('dlg.ok') });
+    const cancel = el('button', { className: 'btn sm', textContent: t('dlg.cancel') });
+    const box = el('div', { className: 'modal-box' }, el('div', { className: 'modal-title', textContent: title }), el('div', { className: 'hint', textContent: hint }), input, el('div', { className: 'row' }, ok, cancel));
+    const back = el('div', { className: 'modal-back' }, box);
+    const close = (v) => {
+      back.remove();
+      resolve(v);
+    };
+    ok.addEventListener('click', () => close(input.value.trim()));
+    cancel.addEventListener('click', () => close(null));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') close(input.value.trim());
+      if (e.key === 'Escape') close(null);
+    });
+    back.addEventListener('mousedown', (e) => {
+      if (e.target === back) close(null);
+    });
+    document.body.appendChild(back);
+    input.focus();
+  });
+}
+
+function confCell(s, custom) {
   const b = el('button', { className: 'btn sm', textContent: t('sites.conf'), disabled: !s.enabled });
   b.addEventListener('click', () =>
     work(b, async () => {
@@ -351,10 +378,49 @@ function confCell(s) {
       setStatus(r.message);
     })
   );
-  return el('td', {}, b);
+  // এক্সট্রা conf: sites-enabled\<domain>.d\*.conf (সিস্টেম সাইট ও বন্ধ সাইটে নয়)
+  const noExtra = !s.enabled || s.system;
+  const add = el('button', { className: 'btn sm', textContent: t('sites.addExtra'), title: t('sites.addExtra.tip'), disabled: noExtra });
+  add.addEventListener('click', () =>
+    work(add, async () => {
+      const name = await askName(t('dlg.extra.title', s.domain), t('dlg.extra.hint'), t('dlg.extra.ph'));
+      if (!name) return;
+      const r = await window.api.addSiteExtra(s.domain, selectedServer(), name);
+      setStatus(r.message);
+    })
+  );
+  const dir = el('button', { className: 'btn sm', textContent: '📁', title: t('sites.openExtras.tip'), disabled: noExtra });
+  dir.addEventListener('click', () =>
+    work(dir, async () => {
+      const r = await window.api.openSiteExtras(s.domain, selectedServer());
+      if (!r.ok) setStatus(r.message);
+    })
+  );
+  // নিজের করে রাখা (marker নেই) হলে "নিজের" ব্যাজ + "অটোতে ফিরুন"; নইলে "নিজের করে রাখুন"
+  const own = custom.has(s.domain);
+  const keepBtn = el('button', {
+    className: 'btn sm',
+    textContent: own ? t('sites.reset') : t('sites.keep'),
+    title: own ? t('sites.reset.tip') : t('sites.keep.tip'),
+    disabled: !s.enabled,
+  });
+  keepBtn.addEventListener('click', () =>
+    work(keepBtn, async () => {
+      if (own && !confirm(t('sites.reset.confirm', s.domain))) return;
+      const r = own ? await window.api.resetSiteConf(s.domain, selectedServer()) : await window.api.keepSiteConf(s.domain, selectedServer());
+      setStatus(r.message);
+      await loadSites();
+    })
+  );
+  const badge = own ? el('span', { className: 'badge custom', textContent: t('sites.custom'), title: t('sites.custom.tip') }) : null;
+  return el('td', { className: 'conf-cell' }, b, ' ', add, ' ', dir, ' ', keepBtn, ...(badge ? [' ', badge] : []));
 }
 
 async function renderSites(sites, php) {
+  let custom = new Set();
+  try {
+    custom = new Set((await window.api.confState(selectedServer())).custom);
+  } catch {}
   const body = $('sitesBody');
   body.textContent = '';
   $('siteCount').textContent = sites.filter((s) => !s.system).length;
@@ -369,7 +435,7 @@ async function renderSites(sites, php) {
       folderCell(s),
       phpCell(s, php),
       sessionCell(s),
-      confCell(s)
+      confCell(s, custom)
     );
     if (!s.enabled) row.style.opacity = '0.55';
     body.appendChild(row);
@@ -428,6 +494,15 @@ $('openSitesDir').addEventListener('click', (e) =>
     if (!r.ok) setStatus(r.message);
   })
 );
+
+$('resetAllConf').addEventListener('click', (e) => {
+  if (!confirm(t('sites.resetAll.confirm'))) return;
+  work(e.currentTarget, async () => {
+    const r = await window.api.resetAllConf(selectedServer());
+    setStatus(r.message);
+    await loadSites();
+  });
+});
 
 $('changeRoot').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
