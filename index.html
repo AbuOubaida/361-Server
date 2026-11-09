@@ -5,30 +5,57 @@
   <title>My Laragon</title>
   <style>
     body { font-family: sans-serif; padding: 24px; }
-    .choice { margin: 16px 0; }
-    .choice label { margin-right: 20px; cursor: pointer; font-size: 16px; }
-    button { padding: 10px 20px; margin-right: 8px; cursor: pointer; }
-    #status { margin-top: 20px; font-weight: bold; word-break: break-word; }
-    .box { margin-top: 24px; padding-top: 16px; border-top: 1px solid #ccc; }
+    button { padding: 8px 16px; margin-right: 8px; cursor: pointer; }
+    .big { padding: 14px 28px; font-size: 17px; font-weight: bold; }
+    #startAll { background: #2e7d32; color: #fff; border: none; border-radius: 6px; }
+    #stopAll { background: #c62828; color: #fff; border: none; border-radius: 6px; }
+    #status { margin-top: 16px; font-weight: bold; word-break: break-word; white-space: pre-line; }
+    .box { margin-top: 22px; padding-top: 14px; border-top: 1px solid #ccc; }
+    .row { margin: 12px 0; padding: 10px; background: #f6f6f6; border-radius: 6px; }
+    .row .name { font-weight: bold; font-size: 16px; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #999; margin-right: 6px; }
+    .dot.on { background: #2e7d32; }
+    .row input[type=number] { width: 80px; padding: 5px; }
+    .row button { padding: 5px 12px; }
     #wwwPath { font-family: monospace; word-break: break-all; margin: 8px 0 12px; }
-    .box button { padding: 6px 14px; }
     #sites { margin: 10px 0; line-height: 1.8; }
     #sites a { color: #0645ad; cursor: pointer; text-decoration: underline; }
-    .hint { color: #666; font-size: 13px; }
+    .hint { color: #666; font-size: 13px; margin-top: 4px; }
+    label { cursor: pointer; }
   </style>
 </head>
 <body>
   <h2>My Laragon</h2>
 
-  <div class="choice">
-    <strong>ওয়েব সার্ভার:</strong><br><br>
-    <label><input type="radio" name="server" value="apache" checked> Apache</label>
-    <label><input type="radio" name="server" value="nginx"> Nginx</label>
+  <div>
+    <button id="startAll" class="big">▶ Start All</button>
+    <button id="stopAll" class="big">■ Stop All</button>
+    <div class="hint">Start All চালু করে: নিচে বাছা ওয়েব সার্ভার + "Start All-এ যুক্ত" টিক দেওয়া ডাটাবেস।</div>
   </div>
 
-  <button id="start">Start</button>
-  <button id="stop">Stop</button>
   <p id="status">অপেক্ষা করছে...</p>
+
+  <div class="box">
+    <strong>ওয়েব সার্ভার:</strong>
+    <div style="margin: 10px 0;">
+      <label><input type="radio" name="server" value="apache" checked> Apache</label>
+      &nbsp;&nbsp;
+      <label><input type="radio" name="server" value="nginx"> Nginx</label>
+    </div>
+    <div>
+      পোর্ট:
+      <input id="port" type="number" min="1" max="65535" style="width: 80px; padding: 5px;">
+      <button id="savePort">সেভ</button>
+      <button id="start">Start</button>
+      <button id="stop">Stop</button>
+    </div>
+    <div class="hint">ডিফল্ট পোর্ট ৮০। ৮০ ব্যস্ত থাকলে ৮০৮০ দিন। (সার্ভার বন্ধ থাকা অবস্থায় বদলান)</div>
+  </div>
+
+  <div class="box">
+    <strong>ডাটাবেস:</strong>
+    <div id="dbs">...</div>
+  </div>
 
   <div class="box">
     <strong>ওয়েবসাইট ফোল্ডার (www):</strong>
