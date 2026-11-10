@@ -836,10 +836,20 @@ function disabledBlocks(sites, kind) {
 
 const pubN = (text, s) => (s.system ? text : withPublicNames(text, s.domain));
 
+// B5: কোনো সাইটে পাবলিক নাম থাকলে অচেনা Host/IP-র (যেমন সরাসরি পাবলিক IP) ডিফল্ট সাইট শুধু এই PC ও LAN থেকে খোলা থাকে,
+// ইন্টারনেট থেকে এলে 403 (নামী সাইটগুলোর নিজের server ব্লক আগের মতো খোলা)। https-এ অচেনা নামের TLS handshake-ই ফিরিয়ে দেওয়া হয়।
+const publicSiteList = (sites) => sites.filter((x) => !x.system && !x.disabled && sitePublicNames(x.domain).length);
+const hasPublicSites = (sites) => publicSiteList(sites).length > 0;
+const anyTlsSites = (sites) => publicSiteList(sites).some((x) => !!tlsFor(sitePublicNames(x.domain)));
+const NG_LAN_ONLY = ['    allow 127.0.0.0/8;', '    allow ::1;', '    allow 10.0.0.0/8;', '    allow 172.16.0.0/12;', '    allow 192.168.0.0/16;', '    allow fc00::/7;', '    allow fe80::/10;', '    deny all;'];
+const NG_TLS_CATCHALL = ['  server {', '    listen 443 ssl default_server;', '    server_name _;', '    ssl_reject_handshake on;', '  }'].join('\n');
+// Apache: <If> শুধু ইন্টারনেটের ক্লায়েন্টে চলে, তাই আগের Require (যেমন phpMyAdmin-এর Require local) বদলায় না
+const AP_LAN_ONLY = ['  <If "%{REMOTE_ADDR} !~ /^(127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|::1$|fe80:|f[cd][0-9a-f]{2}:)/i">', '    Require all denied', '  </If>'];
+
 function nginxEntries(sites, webPort, upOf) {
   const defUp = phpUpstream(defaultPhpVersion());
   return [
-    { file: '00-default.conf', extras: 'localhost', text: nginxServer('localhost', WWW_DIR, defUp, true, webPort, false, [...toolLocations(defUp), ...publicRedirects(sites, webPort, 'nginx', upOf), ...disabledBlocks(sites, 'nginx'), nginxExtraInclude('localhost')]) },
+    { file: '00-default.conf', extras: 'localhost', text: nginxServer('localhost', WWW_DIR, defUp, true, webPort, false, [...toolLocations(defUp), ...publicRedirects(sites, webPort, 'nginx', upOf), ...disabledBlocks(sites, 'nginx'), nginxExtraInclude('localhost'), ...(hasPublicSites(sites) ? NG_LAN_ONLY : [])]) + (webPort === 80 && anyTlsSites(sites) ? '\n' + NG_TLS_CATCHALL : '') },
     ...sites
       .filter((s) => !s.disabled)
       .map((s) => {
@@ -879,7 +889,7 @@ function apacheAliasLines() {
 function apacheEntries(sites, webPort) {
   const defVer = defaultPhpVersion();
   return [
-    { file: '00-default.conf', extras: 'localhost', text: apacheServer('localhost', WWW_DIR, defVer, webPort, false, [...apacheAliasLines(), ...publicRedirects(sites, webPort, 'apache'), ...disabledBlocks(sites, 'apache'), apacheExtraInclude('localhost')]) },
+    { file: '00-default.conf', extras: 'localhost', text: apacheServer('localhost', WWW_DIR, defVer, webPort, false, [...apacheAliasLines(), ...publicRedirects(sites, webPort, 'apache'), ...disabledBlocks(sites, 'apache'), apacheExtraInclude('localhost'), ...(hasPublicSites(sites) ? AP_LAN_ONLY : [])]) },
     ...sites
       .filter((x) => !x.disabled)
       .map((x) => {
