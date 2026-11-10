@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld('api', {
   acmeFolder: () => ipcRenderer.invoke('acme:folder'),
   netInfo: () => ipcRenderer.invoke('net:info'),
   allowFirewall: () => ipcRenderer.invoke('fw:allow'),
+  allowPublicFirewall: () => ipcRenderer.invoke('fw:allowPublic'),
   setSiteEnabled: (domain, on) => ipcRenderer.invoke('site:setEnabled', domain, on),
   openSiteConf: (domain, webId) => ipcRenderer.invoke('site:openConf', domain, webId),
   addSiteExtra: (domain, webId, name) => ipcRenderer.invoke('site:addExtra', domain, webId, name),

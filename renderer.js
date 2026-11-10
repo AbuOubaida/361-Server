@@ -452,6 +452,15 @@ function publicBtn(s) {
     email.style.width = '100%';
     const stg = el('input', { type: 'checkbox' });
     const get = el('button', { className: 'btn sm accent', textContent: t('cert.get') });
+    const fwLine = el('div', { style: 'font-size:13px; margin:6px 0 2px;' });
+    const fwBtn = el('button', { className: 'btn sm primary', textContent: t('cert.fwBtn'), style: 'display:none;' });
+    fwBtn.addEventListener('click', () =>
+      work(fwBtn, async () => {
+        const r = await window.api.allowPublicFirewall();
+        setStatus(r.message);
+        await refreshCert();
+      })
+    );
     const refreshCert = async () => {
       let st;
       try {
@@ -467,7 +476,15 @@ function publicBtn(s) {
         line.style.color = c.status === 'ok' ? '#2e9d4f' : c.status === 'none' ? '' : '#d1493f';
         certLines.appendChild(line);
       }
+      fwLine.textContent = st.fwPublic ? t('cert.fwOk') : t('cert.fwNo');
+      fwLine.style.color = st.fwPublic ? '#2e9d4f' : '#d1493f';
+      fwBtn.style.display = st.fwPublic ? 'none' : '';
       const notes = [];
+      if (st.httpsOn) {
+        const h = el('div', { textContent: st.webId === 'apache' ? t('cert.httpsApache') : t('cert.httpsOn') });
+        h.style.color = st.webId === 'apache' ? '#d1493f' : '#2e9d4f';
+        certLines.appendChild(h);
+      }
       if (!st.installed) notes.push(t('cert.notinst'));
       if (!st.serverRunning) notes.push(t('cert.srvStopped'));
       else if (!st.port80) notes.push(t('cert.port'));
@@ -498,6 +515,7 @@ function publicBtn(s) {
         el('b', { textContent: t('cert.title') }),
         el('div', { className: 'hint', textContent: t('cert.hint') }),
         certLines,
+        el('div', { style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, fwLine, fwBtn),
         el('label', { style: 'display:block; font-weight:600; margin:8px 0 3px;', textContent: t('cert.email') }),
         email,
         el('label', { style: 'display:flex; gap:6px; align-items:center; margin:8px 0; font-size:13px;' }, stg, el('span', { textContent: t('cert.test') })),

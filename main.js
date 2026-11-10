@@ -367,6 +367,19 @@ const withPublicNames = (text, domain) => {
     '    ForceType text/plain',
     '  </Directory>',
   ].join('\n');
+  // B3 (শুধু Nginx): বৈধ সার্টিফিকেট থাকলে (১) 443 ssl ব্লক, (২) পোর্ট ৮০-তে পাবলিক নামগুলো আলাদা ব্লকে: challenge পথ + https-এ 301
+  const port = (/^\s*listen (\d+)/m.exec(text) || [])[1];
+  const tls = text.includes('server_name') ? tlsFor(names) : null;
+  if (tls) {
+    const https = text
+      .replace(/^(\s*)listen \d+;/m, '$1listen 443 ssl;')
+      .replace(`    server_name ${domain};`, () => `    server_name ${tls.hosts.join(' ')};\n    ssl_certificate \"${tls.crt}\";\n    ssl_certificate_key \"${tls.key}\";\n    ssl_protocols TLSv1.2 TLSv1.3;\n    ssl_session_cache shared:SSL:10m;\n    ssl_session_timeout 10m;`);
+    if (port === '80') {
+      const redirect = ['  server {', '    listen 80;', `    server_name ${names.join(' ')};`, ngChallenge, '    location / { return 301 https://$host$request_uri; }', '  }'].join('\n');
+      return text + '\n' + redirect + '\n' + https;
+    }
+    return text.replace(`    server_name ${domain};`, () => `    server_name ${domain} ${names.join(' ')};\n${ngChallenge}`) + '\n' + https;
+  }
   return text
     .replace(`    server_name ${domain};`, () => `    server_name ${domain} ${names.join(' ')};\n${ngChallenge}`)
     .replace(`  ServerName ${domain}\n`, () => `  ServerName ${domain}\n  ServerAlias ${names.join(' ')}\n${apChallenge}\n`);
@@ -397,6 +410,20 @@ function certFor(host) {
   let best = null;
   for (const c of certScan()) if (c.names.includes(host) && (!best || c.end > best.end)) best = c;
   return best;
+}
+// B3: পাবলিক নামের জন্য বৈধ সার্টিফিকেট + key থাকলে Nginx-এর https ব্লকের ফাইল/নাম (না থাকলে null)
+// win-acme pemfiles: <base>-crt.pem (শুধু সার্টিফিকেট), <base>-chain.pem (পূর্ণ চেইন, না থাকলে crt), <base>-key.pem
+function tlsFor(names) {
+  if (!names || !names.length) return null;
+  const c = certFor(names[0]);
+  if (!c || c.end.getTime() < Date.now()) return null;
+  const base = c.file.replace(/-crt\.pem$/i, '');
+  const key = path.join(certsDir(), base + '-key.pem');
+  const chain = path.join(certsDir(), base + '-chain.pem');
+  const crt = fs.existsSync(chain) ? chain : path.join(certsDir(), c.file);
+  if (!fs.existsSync(key) || !fs.existsSync(crt)) return null;
+  const hosts = names.filter((n) => c.names.includes(n));
+  return hosts.length ? { crt: fwdSlash(crt), key: fwdSlash(key), hosts } : null;
 }
 function acmeTaskExists() {
   return new Promise((resolve) => execFile('schtasks.exe', ['/Query', '/TN', ACME_TASK], { windowsHide: true, timeout: 15000 }, (err) => resolve(!err)));
@@ -2538,6 +2565,28 @@ ipcMain.handle('fw:allow', async () => {
   return { ok: false, message: tr(`Firewall নিয়ম বসানো যায়নি। Explorer-এ খোলা ${path.basename(cmdFile)} ফাইলে ডান ক্লিক করে "Run as administrator" দিন`, `Could not add the firewall rule. In the Explorer window, right-click ${path.basename(cmdFile)} and choose "Run as administrator"`) };
 });
 
+// B4: পাবলিক সার্ভারের জন্য TCP 80 + 443 ইনবাউন্ড নিয়ম (সব প্রোফাইল, প্রোগ্রাম নির্বিশেষে)। UAC লাগে; না হলে .cmd ফাইল হাতে চালাতে হয়।
+const PUBLIC_FW_RULE = 'Server 360 - Public web 80,443';
+ipcMain.handle('fw:allowPublic', async () => {
+  const cmdFile = path.join(TOOLS_DIR, 'allow-firewall-public.cmd');
+  const lines = [
+    '@echo off',
+    'net session >nul 2>&1',
+    'if errorlevel 1 ( echo Run this file as Administrator. & pause & exit /b 1 )',
+    `netsh advfirewall firewall delete rule name=\"${PUBLIC_FW_RULE}\" >nul 2>&1`,
+    `netsh advfirewall firewall add rule name=\"${PUBLIC_FW_RULE}\" dir=in action=allow protocol=TCP localport=80,443 enable=yes profile=any`,
+    'echo Done.',
+  ];
+  fs.mkdirSync(TOOLS_DIR, { recursive: true });
+  fs.writeFileSync(cmdFile, lines.join('\r\n') + '\r\n');
+  await new Promise((resolve) =>
+    execFile('powershell.exe', ['-NoProfile', '-Command', `Start-Process -FilePath cmd.exe -ArgumentList '/c','\"${cmdFile}\"' -Verb RunAs -Wait`], { windowsHide: true, timeout: 120000 }, () => resolve())
+  );
+  if (await fwRuleExists(PUBLIC_FW_RULE)) return { ok: true, message: tr('Firewall-এ পোর্ট ৮০ ও ৪৪৩ খোলা হয়েছে', 'Firewall: ports 80 and 443 are now allowed') };
+  shell.showItemInFolder(cmdFile);
+  return { ok: false, message: tr(`Firewall নিয়ম বসানো যায়নি। Explorer-এ খোলা ${path.basename(cmdFile)} ফাইলে ডান ক্লিক করে \"Run as administrator\" দিন`, `Could not add the firewall rule. In the Explorer window, right-click ${path.basename(cmdFile)} and choose \"Run as administrator\"`) };
+});
+
 ipcMain.handle('site:setShare', async (_event, domain, on, portRaw) => {
   if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
   const sites = withToolSites(scanSites());
@@ -3476,6 +3525,9 @@ ipcMain.handle('acme:status', async (_event, domain) => {
     certsDir: certsDir(),
     serverRunning: !!running,
     port80: getWebPort() === 80,
+    webId: running ? running.id : '',
+    httpsOn: !!tlsFor(names),
+    fwPublic: await fwRuleExists(PUBLIC_FW_RULE),
     certs: names.map((h) => {
       const c = certFor(h);
       if (!c) return { host: h, status: 'none' };
@@ -3565,16 +3617,20 @@ ipcMain.handle('acme:issue', async (_event, domain, emailRaw, staging) => {
       '--store', 'pemfiles', '--pemfilespath', certsDir(),
       '--installation', 'script', '--script', bat,
       '--accepttos', '--emailaddress', email, '--notaskscheduler',
-      ...(staging ? ['--test'] : []),
+      // NOT '--test': in win-acme, --test adds interactive prompts ("Try in default browser?", "Quit?") that crash without a console.
+      // --baseuri alone selects Let's Encrypt staging, still fully non-interactive.
+      ...(staging ? ['--baseuri', 'https://acme-staging-v02.api.letsencrypt.org/'] : []),
     ];
     sendStatus(tr(`${names.join(', ')}-এর সার্টিফিকেট নেওয়া হচ্ছে (১-২ মিনিট লাগতে পারে)...`, `Getting the certificate for ${names.join(', ')} (may take 1-2 minutes)...`));
-    const run = await new Promise((resolve) =>
-      execFile(winAcmeExe(), args, { cwd: winAcmeDir(), timeout: 5 * 60 * 1000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => resolve({ err, out: String(stdout || '') + String(stderr || '') }))
-    );
+    const run = await new Promise((resolve) => {
+      const child = execFile(winAcmeExe(), args, { cwd: winAcmeDir(), timeout: 5 * 60 * 1000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => resolve({ err, out: String(stdout || '') + String(stderr || '') }));
+      try { child.stdin.end(); } catch (_) {}
+    });
     const tail = run.out.replace(/\x1b\[[0-9;]*m/g, '').trim().split(/\r?\n/).slice(-70).join('\n').slice(-5000);
     const got = certFor(names[0]);
     const allIn = got && names.every((h) => got.names.includes(h));
     if (!run.err && allIn) {
+      try { await reloadRunning(withToolSites(scanSites())); } catch {}
       return { ok: true, message: tr(`সার্টিফিকেট পাওয়া গেছে (মেয়াদ ${got.end.toISOString().slice(0, 10)} পর্যন্ত${got.staging ? ', টেস্ট/staging, ব্রাউজার বিশ্বাস করবে না' : ''})`, `Certificate issued (valid until ${got.end.toISOString().slice(0, 10)}${got.staging ? ', test/staging, browsers will not trust it' : ''})`), output: tail };
     }
     return { ok: false, message: tr('সার্টিফিকেট পাওয়া যায়নি। নিচের লগ দেখুন (DNS, রাউটার ফরওয়ার্ড ৮০ আর ফায়ারওয়াল আগে ঠিক করুন)', 'The certificate was not issued. See the log below (check DNS, the router forward for port 80 and the firewall first)'), output: tail || (run.err && run.err.message) || '' };
