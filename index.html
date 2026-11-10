@@ -167,7 +167,7 @@
     .field label { color: var(--muted); font-size: 13px; }
     .spacer { flex: 1; }
 
-    input[type=number], input[type=text] {
+    input[type=number], input[type=text], input[type=password], input[type=time] {
       font: inherit; color: var(--text); background: var(--panel-2);
       border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; width: 92px;
     }
@@ -316,6 +316,10 @@
         <svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
         <span data-i18n="nav.tools">টুলস ও ভার্সন</span>
       </button>
+      <button class="nav" data-page="backup">
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span data-i18n="nav.backup">ব্যাকআপ</span>
+      </button>
       <button class="nav" data-page="settings">
         <svg viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
         <span data-i18n="nav.settings">সেটিংস</span>
@@ -446,6 +450,87 @@
             </div>
             <div class="hint" data-i18n="acme.hint">win-acme।</div>
             <div id="acmeBox"></div>
+          </div>
+        </section>
+
+        <!-- ======== ব্যাকআপ ======== -->
+        <section id="page-backup" class="page">
+          <div class="section-title" data-i18n="bk.dest.title">কোথায় রাখবেন</div>
+          <div class="card">
+            <div class="row first">
+              <label class="switch"><input type="checkbox" id="bkLocalOn"><i></i><b data-i18n="bk.local">লোকাল ফোল্ডার / এক্সটার্নাল ড্রাইভ</b></label>
+            </div>
+            <div class="pathbox" id="bkLocalDir" style="margin-top:10px">—</div>
+            <div class="row"><button id="bkLocalPick" class="btn sm accent" data-i18n="bk.choose">ফোল্ডার বেছে নিন</button></div>
+          </div>
+          <div class="card">
+            <div class="row first">
+              <label class="switch"><input type="checkbox" id="bkShareOn"><i></i><b data-i18n="bk.share">অন্য পিসির নেটওয়ার্ক শেয়ার</b></label>
+            </div>
+            <div class="row">
+              <input id="bkShareUnc" type="text" style="flex:1; min-width:240px; width:auto" placeholder="\\192.168.1.20\backup" spellcheck="false">
+            </div>
+            <div class="row">
+              <input id="bkShareUser" type="text" style="width:170px" data-i18n-ph="bk.share.user" placeholder="ইউজার" spellcheck="false" autocomplete="off">
+              <input id="bkSharePw" type="password" style="width:170px" data-i18n-ph="bk.share.pw" placeholder="পাসওয়ার্ড" autocomplete="new-password">
+              <input id="bkShareSub" type="text" style="width:170px" data-i18n-ph="bk.share.sub" placeholder="সাবফোল্ডার (ঐচ্ছিক)" spellcheck="false">
+            </div>
+            <div class="hint" data-i18n="bk.share.hint">ইউজার ফাঁকা রাখলে এই পিসির আগের লগইন দিয়েই শেয়ারে ঢোকার চেষ্টা হবে। পাসওয়ার্ড সেভ হলে আর দেখানো হয় না, ফাঁকা রাখলে আগেরটাই থাকে।</div>
+          </div>
+
+          <div class="section-title" data-i18n="bk.sched.title">কখন চলবে</div>
+          <div class="card">
+            <div class="row first">
+              <input id="bkTimeInput" type="time" style="width:130px" value="02:00">
+              <button id="bkTimeAdd" class="btn sm accent" data-i18n="bk.time.add">সময় যোগ করুন</button>
+            </div>
+            <div class="row" id="bkTimes"></div>
+            <div class="row">
+              <label class="switch"><input type="checkbox" id="bkAppTimer"><i></i><span data-i18n="bk.appTimer">অ্যাপ খোলা থাকলে এই সময়গুলোতে নিজে চালান</span></label>
+            </div>
+            <div class="hint" data-i18n="bk.sched.hint">অ্যাপ বন্ধ থাকলেও চালানোর জন্য Windows Task Scheduler-এর সুবিধা পরের ধাপে আসছে।</div>
+          </div>
+
+          <div class="section-title" data-i18n="bk.what.title">কী কী backup হবে</div>
+          <div class="card">
+            <div class="row first">
+              <label class="switch"><input type="checkbox" id="bkMysql"><i></i><span>MySQL</span></label>
+              <label class="switch"><input type="checkbox" id="bkPg"><i></i><span>PostgreSQL</span></label>
+              <label class="switch"><input type="checkbox" id="bkWww"><i></i><span data-i18n="bk.what.www">www সাইট ফোল্ডার</span></label>
+              <label class="switch"><input type="checkbox" id="bkCerts"><i></i><span data-i18n="bk.what.certs">সার্টিফিকেট ও সেটিংস</span></label>
+            </div>
+            <div class="hint" data-i18n="bk.what.hint">ডাটাবেস সবসময় dump হয় (চলমান ডাটা ফোল্ডার কপি হয় না), বন্ধ থাকলে ওই ধাপ বাদ যায়। www থেকে node_modules ও .git বাদ। সার্টিফিকেট ও সেটিংসে প্রাইভেট কী ও পাসওয়ার্ড থাকে, তাই এটা শুধু পাসওয়ার্ড দেওয়া (encrypted) backup-এ যায়।</div>
+            <div class="row">
+              <button id="bkExtraAdd" class="btn sm" data-i18n="bk.extra.add">+ নিজের ফোল্ডার যোগ করুন</button>
+            </div>
+            <div id="bkExtra"></div>
+          </div>
+
+          <div class="section-title" data-i18n="bk.sec.title">নিরাপত্তা ও পুরনো backup</div>
+          <div class="card">
+            <div class="row first">
+              <input id="bkZipPw" type="password" style="width:220px" data-i18n-ph="bk.zipPw" placeholder="Backup পাসওয়ার্ড (ঐচ্ছিক)" autocomplete="new-password">
+              <button id="bkZipClear" class="btn sm" data-i18n="bk.zipPwClear">পাসওয়ার্ড মুছুন</button>
+              <span id="bkZipState" class="hint" style="margin:0"></span>
+            </div>
+            <div class="row">
+              <span id="bkSevenState" class="hint" style="margin:0"></span>
+              <button id="bkSevenInstall" class="btn sm" data-i18n="bk.sevenInstall">7-Zip ইনস্টল করুন</button>
+            </div>
+            <div class="row">
+              <div class="field"><label data-i18n="bk.retention">পুরনো backup রাখার দিন (০ = সব রাখুন)</label><input id="bkRetention" type="number" min="0" max="3650"></div>
+              <div class="field"><label data-i18n="bk.minFree">ন্যূনতম ফাঁকা জায়গা (GB, ০ = দেখবে না)</label><input id="bkMinFree" type="number" min="0" max="100000"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="row first">
+              <button id="bkSave" class="btn sm accent" data-i18n="bk.save">সেভ করুন</button>
+              <button id="bkRun" class="btn sm primary" data-i18n="bk.run">▶ এখনই backup নিন</button>
+              <button id="bkOpenLogs" class="btn sm" data-i18n="bk.openLogs">📁 লগ ফোল্ডার</button>
+            </div>
+            <div class="info" id="bkLast">—</div>
+            <pre id="bkLog" style="margin:10px 0 0; max-height:240px; overflow:auto; font-size:12px; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:8px 10px; white-space:pre-wrap;"></pre>
           </div>
         </section>
 

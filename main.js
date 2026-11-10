@@ -4453,6 +4453,82 @@ async function askWwwFolderFirstRun() {
   win.webContents.send('www:changed', WWW_DIR);
 }
 
+// ---------- Backup (Session 12, step 1) ----------
+// মূল কাজ backup.js-এ; এখানে শুধু ctx জোগান ও IPC। পাসওয়ার্ড settings.json-এ সাধারণ লেখায় নয়: Electron safeStorage (DPAPI) দিয়ে মোড়া।
+const { safeStorage } = require('electron');
+const { createBackup } = require('./backup.js');
+const SEVENZIP_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/7z2606-x64.exe';
+const backup = createBackup({
+  tr,
+  settings: () => settings,
+  save: saveSettings,
+  rootDir: () => ROOT_DIR,
+  toolsDir: () => TOOLS_DIR,
+  wwwDir: () => WWW_DIR,
+  certsDir: () => certsDir(),
+  settingsPath: () => SETTINGS_PATH,
+  mysqlDir: () => SERVICES.mysql.dir,
+  pgDir: () => SERVICES.postgres.dir,
+  mysqlPort: () => getDbPort('mysql'),
+  pgPort: () => getDbPort('postgres'),
+  mysqlEnv: () => mysqlEnv(),
+  pgEnv: () => pgEnv(),
+  secret: {
+    enc: (t) => (safeStorage.isEncryptionAvailable() ? 'ss:' + safeStorage.encryptString(t).toString('base64') : 'b64:' + Buffer.from(t, 'utf8').toString('base64')),
+    dec: (v) => {
+      try {
+        return v.startsWith('ss:') ? safeStorage.decryptString(Buffer.from(v.slice(3), 'base64')) : Buffer.from(v.slice(4), 'base64').toString('utf8');
+      } catch {
+        return '';
+      }
+    },
+  },
+  download,
+  sevenZipUrl: SEVENZIP_URL,
+  onProgress: (name) => win && !win.isDestroyed() && win.webContents.send('status', tr('Backup: ', 'Backup: ') + name),
+});
+
+ipcMain.handle('backup:getConfig', () => backup.getConfig());
+ipcMain.handle('backup:setConfig', (_e, cfg, secrets) => {
+  try {
+    return { ok: true, config: backup.setConfig(cfg || {}, secrets || {}) };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  }
+});
+ipcMain.handle('backup:run', async () => backup.runBackup({ source: 'manual' }));
+ipcMain.handle('backup:status', () => ({ running: backup.isRunning(), last: backup.lastStatus(), log: backup.tailLog(60), sevenZip: !!backup.find7z(), backupDir: backup.dirs.baseDir() }));
+ipcMain.handle('backup:ensure7z', async () => {
+  try {
+    const r = await backup.ensure7z();
+    return r.ok ? { ok: true, message: r.fresh ? tr('7-Zip ইনস্টল হয়েছে', '7-Zip installed') : tr('7-Zip আগেই আছে', '7-Zip is already available') } : { ok: false, message: r.message };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  }
+});
+ipcMain.handle('backup:chooseFolder', async () => {
+  const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
+  return r.canceled || !r.filePaths[0] ? '' : r.filePaths[0];
+});
+ipcMain.handle('backup:openLogs', () => shell.openPath(backup.dirs.logsDir()));
+
+// অ্যাপ খোলা থাকলে নির্ধারিত সময়ে নিজে backup (প্রতি ২০ সেকেন্ডে দেখে; একই দিনের একই সময়ে একবারই)
+let bkLastFire = '';
+setInterval(() => {
+  try {
+    const cfg = backup.getConfig();
+    if (!cfg.appEnabled || !cfg.times.length || backup.isRunning()) return;
+    const d = new Date();
+    const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()} ${hm}`;
+    if (!cfg.times.includes(hm) || bkLastFire === key) return;
+    bkLastFire = key;
+    backup.runBackup({ source: 'timer' }).then((r) => {
+      if (win && !win.isDestroyed()) win.webContents.send('status', (r.ok ? '' : '⚠ ') + r.message);
+    });
+  } catch {}
+}, 20000);
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   createWindow();

@@ -47,6 +47,7 @@ async function setLang(lang) {
   await refreshAll();
   loadSites();
   if (currentPage === 'tools') loadTools();
+  if (currentPage === 'backup') bkLoad();
 }
 $('langBtn').addEventListener('click', () => setLang(LANG === 'bn' ? 'en' : 'bn'));
 $('langSel').addEventListener('change', (e) => setLang(e.target.value));
@@ -108,6 +109,7 @@ const PAGES = {
   services: ['page.services', 'page.services.sub'],
   sites: ['page.sites', 'page.sites.sub'],
   tools: ['page.tools', 'page.tools.sub'],
+  backup: ['page.backup', 'page.backup.sub'],
   settings: ['page.settings', 'page.settings.sub'],
 };
 let currentPage = 'services';
@@ -121,6 +123,7 @@ document.querySelectorAll('.nav').forEach((btn) =>
     $('pageSub').textContent = t(PAGES[page][1]);
     if (page === 'sites') loadSites();
     if (page === 'tools') loadTools();
+    if (page === 'backup') bkLoad();
   })
 );
 
@@ -1294,6 +1297,193 @@ for (const c of [
     })
   );
 }
+
+// ---------- ব্যাকআপ ----------
+let bk = null; // বর্তমান কনফিগ (সেভ না করা বদলসহ)
+const bkBase = (p) => String(p).split(/[\\/]/).filter(Boolean).pop() || String(p);
+
+async function bkLoad() {
+  bk = await window.api.backupGetConfig();
+  bkFill();
+  bkStatus();
+}
+
+function bkFill() {
+  $('bkLocalOn').checked = bk.local.enabled;
+  $('bkLocalDir').textContent = bk.local.dir || '—';
+  $('bkShareOn').checked = bk.share.enabled;
+  $('bkShareUnc').value = bk.share.unc;
+  $('bkShareUser').value = bk.share.user;
+  $('bkShareSub').value = bk.share.subdir;
+  $('bkSharePw').value = '';
+  $('bkSharePw').placeholder = bk.hasSharePassword ? t('bk.pwSaved') : t('bk.share.pw');
+  $('bkAppTimer').checked = bk.appEnabled;
+  $('bkMysql').checked = bk.what.mysql;
+  $('bkPg').checked = bk.what.postgres;
+  $('bkWww').checked = bk.what.www;
+  $('bkCerts').checked = bk.what.certs;
+  $('bkZipPw').value = '';
+  $('bkZipPw').placeholder = bk.hasZipPassword ? t('bk.pwSaved') : t('bk.zipPw');
+  $('bkZipState').textContent = bk.hasZipPassword ? t('bk.zipPwSet') : t('bk.zipPwNone');
+  $('bkZipClear').hidden = !bk.hasZipPassword;
+  $('bkRetention').value = bk.retentionDays;
+  $('bkMinFree').value = bk.minFreeGb;
+  bkRenderTimes();
+  bkRenderExtra();
+}
+
+function bkRenderTimes() {
+  const box = $('bkTimes');
+  box.textContent = '';
+  if (!bk.times.length) return box.appendChild(el('span', { className: 'hint', textContent: t('bk.time.none') }));
+  for (const tm of bk.times) {
+    box.appendChild(
+      el('button', {
+        className: 'btn sm',
+        textContent: tm + '  ✕',
+        title: t('bk.remove'),
+        onclick: () => {
+          bk.times = bk.times.filter((x) => x !== tm);
+          bkRenderTimes();
+        },
+      })
+    );
+  }
+}
+
+function bkRenderExtra() {
+  const box = $('bkExtra');
+  box.textContent = '';
+  for (const it of bk.what.extra) {
+    box.appendChild(
+      el(
+        'div',
+        { className: 'row' },
+        el('span', { className: 'pathbox', textContent: it.path, style: 'flex:1; margin:0' }),
+        el('button', {
+          className: 'btn sm',
+          textContent: '✕',
+          title: t('bk.remove'),
+          onclick: () => {
+            bk.what.extra = bk.what.extra.filter((x) => x !== it);
+            bkRenderExtra();
+          },
+        })
+      )
+    );
+  }
+}
+
+// ফর্মের মান bk-তে তুলে নেওয়া
+function bkCollect() {
+  bk.local.enabled = $('bkLocalOn').checked;
+  bk.share = { enabled: $('bkShareOn').checked, unc: $('bkShareUnc').value.trim(), user: $('bkShareUser').value.trim(), subdir: $('bkShareSub').value.trim() };
+  bk.appEnabled = $('bkAppTimer').checked;
+  bk.what.mysql = $('bkMysql').checked;
+  bk.what.postgres = $('bkPg').checked;
+  bk.what.www = $('bkWww').checked;
+  bk.what.certs = $('bkCerts').checked;
+  const days = parseInt($('bkRetention').value, 10);
+  bk.retentionDays = Number.isInteger(days) && days >= 0 ? days : 14;
+  const gb = Number($('bkMinFree').value);
+  bk.minFreeGb = gb >= 0 ? gb : 0;
+}
+
+async function bkSave() {
+  bkCollect();
+  const secrets = {};
+  if ($('bkZipPw').value) secrets.zip = $('bkZipPw').value;
+  if ($('bkSharePw').value) secrets.share = $('bkSharePw').value;
+  const r = await window.api.backupSetConfig(bk, secrets);
+  if (!r.ok) {
+    setStatus(r.message);
+    return false;
+  }
+  bk = r.config;
+  bkFill();
+  return true;
+}
+
+async function bkStatus() {
+  if (!bk) return;
+  const s = await window.api.backupStatus();
+  $('bkSevenState').textContent = s.sevenZip ? t('bk.sevenOk') : t('bk.sevenNo');
+  $('bkSevenInstall').hidden = s.sevenZip;
+  const last = s.last;
+  if (s.running) $('bkLast').textContent = t('bk.running');
+  else if (!last) $('bkLast').textContent = t('bk.noLast');
+  else $('bkLast').textContent = (last.ok ? '✔ ' : '✖ ') + t('bk.last', last.stamp, last.source);
+  const pre = $('bkLog');
+  const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+  pre.textContent = s.log || '';
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
+}
+
+$('bkLocalPick').addEventListener('click', async () => {
+  const p = await window.api.backupChooseFolder();
+  if (p) {
+    bk.local.dir = p;
+    $('bkLocalDir').textContent = p;
+    $('bkLocalOn').checked = true;
+  }
+});
+$('bkExtraAdd').addEventListener('click', async () => {
+  const p = await window.api.backupChooseFolder();
+  if (p && !bk.what.extra.some((x) => x.path === p)) {
+    bk.what.extra.push({ path: p, label: bkBase(p) });
+    bkRenderExtra();
+  }
+});
+$('bkTimeAdd').addEventListener('click', () => {
+  const v = $('bkTimeInput').value;
+  if (v && !bk.times.includes(v)) {
+    bk.times = [...bk.times, v].sort();
+    bkRenderTimes();
+  }
+});
+$('bkSave').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    if (await bkSave()) setStatus(t('bk.saved'));
+  })
+);
+$('bkZipClear').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    if (!confirm(t('bk.zipPwClearConfirm'))) return;
+    bkCollect();
+    const r = await window.api.backupSetConfig(bk, { zip: '' });
+    if (r.ok) {
+      bk = r.config;
+      bkFill();
+      setStatus(t('bk.saved'));
+    } else setStatus(r.message);
+  })
+);
+$('bkSevenInstall').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    setStatus(t('bk.sevenInstalling'));
+    const r = await window.api.backupEnsure7z();
+    setStatus(r.message);
+    bkStatus();
+  })
+);
+$('bkRun').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    if (!(await bkSave())) return;
+    setStatus(t('bk.starting'));
+    const timer = setInterval(bkStatus, 1500);
+    try {
+      const r = await window.api.backupRun();
+      setStatus((r.ok ? '' : '⚠ ') + r.message);
+    } finally {
+      clearInterval(timer);
+      bkStatus();
+    }
+  })
+);
+$('bkOpenLogs').addEventListener('click', () => window.api.backupOpenLogs());
+setInterval(() => {
+  if (currentPage === 'backup') bkStatus();
+}, 4000);
 
 applyStatic();
 window.api.setLang(LANG); // মনে রাখা ভাষা main.js-কেও জানানো (বার্তা ও ডায়ালগের জন্য)

@@ -106,6 +106,15 @@ contextBridge.exposeInMainWorld('api', {
   cfgOpen: (id) => ipcRenderer.invoke('cfg:open', id),
   cfgFolder: (id) => ipcRenderer.invoke('cfg:folder', id),
 
+  // Backup
+  backupGetConfig: () => ipcRenderer.invoke('backup:getConfig'),
+  backupSetConfig: (cfg, secrets) => ipcRenderer.invoke('backup:setConfig', cfg, secrets),
+  backupRun: () => ipcRenderer.invoke('backup:run'),
+  backupStatus: () => ipcRenderer.invoke('backup:status'),
+  backupEnsure7z: () => ipcRenderer.invoke('backup:ensure7z'),
+  backupChooseFolder: () => ipcRenderer.invoke('backup:chooseFolder'),
+  backupOpenLogs: () => ipcRenderer.invoke('backup:openLogs'),
+
   // ভাষা
   getLang: () => ipcRenderer.invoke('lang:get'),
   setLang: (lang) => ipcRenderer.invoke('lang:set', lang),
