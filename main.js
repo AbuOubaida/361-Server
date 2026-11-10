@@ -423,7 +423,8 @@ function nodePortOf(domain) {
   return p;
 }
 
-function nginxNodeServer(domain, port, webPort, extra = []) {
+// asHost: LAN শেয়ার-পোর্টে অ্যাপকে সবসময় .test নামে দেখাই (Host ও Origin), নইলে Next/Vite dev সার্ভার অচেনা IP:পোর্ট origin আটকায়
+function nginxNodeServer(domain, port, webPort, extra = [], asHost = '') {
   return [
     '  server {',
     `    listen ${webPort};`,
@@ -432,7 +433,8 @@ function nginxNodeServer(domain, port, webPort, extra = []) {
     '    location / {',
     `      proxy_pass http://127.0.0.1:${port};`,
     '      proxy_http_version 1.1;',
-    '      proxy_set_header Host $http_host;',
+    asHost ? `      proxy_set_header Host ${asHost};` : '      proxy_set_header Host $http_host;',
+    ...(asHost ? [`      proxy_set_header Origin http://${asHost};`] : []),
     '      proxy_set_header X-Real-IP $remote_addr;',
     '      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
     '      proxy_set_header X-Forwarded-Proto $scheme;',
@@ -446,13 +448,14 @@ function nginxNodeServer(domain, port, webPort, extra = []) {
 }
 
 // Apache: mod_proxy_http (+ WebSocket-এর জন্য mod_proxy_wstunnel) থাকলে কাজ করে; না থাকলে IfModule-এ বাদ যায়, Apache চালু হতে বাধা পায় না
-function apacheNodeServer(domain, port, webPort, extra = []) {
+function apacheNodeServer(domain, port, webPort, extra = [], asHost = '') {
   const up = `http://127.0.0.1:${port}`;
   return [
     `<VirtualHost *:${webPort}>`,
     `  ServerName ${domain}`,
     '  <IfModule proxy_http_module>',
     '    ProxyPreserveHost On',
+    ...(asHost ? ['    <IfModule headers_module>', `      RequestHeader set Host "${asHost}"`, `      RequestHeader set Origin "http://${asHost}"`, '    </IfModule>'] : []),
     '    ProxyTimeout 3600',
     '    <IfModule proxy_wstunnel_module>',
     '      RewriteEngine On',
@@ -611,7 +614,11 @@ function nginxEntries(sites, webPort, upOf) {
     { file: '00-default.conf', extras: 'localhost', text: nginxServer('localhost', WWW_DIR, defUp, true, webPort, false, [...toolLocations(defUp), ...publicRedirects(sites, webPort, 'nginx', upOf), ...disabledBlocks(sites, 'nginx'), nginxExtraInclude('localhost')]) },
     ...sites
       .filter((s) => !s.disabled)
-      .map((s) => ({ file: `${s.domain}.conf`, extras: s.system ? '' : s.domain, text: s.node ? nginxNodeServer(s.domain, nodePortOf(s.domain), webPort, [nginxExtraInclude(s.domain)]) : nginxServer(s.domain, s.root, upOf(s), false, webPort, !!s.system, s.system ? [] : [nginxExtraInclude(s.domain)], s.system ? 0 : siteSessionMin(s.domain)) })),
+      .map((s) => {
+        const mk = (port, shared = false) => (s.node ? nginxNodeServer(s.domain, nodePortOf(s.domain), port, [nginxExtraInclude(s.domain)], shared ? s.domain : '') : nginxServer(s.domain, s.root, upOf(s), false, port, !!s.system, s.system ? [] : [nginxExtraInclude(s.domain)], s.system ? 0 : siteSessionMin(s.domain)));
+        // LAN শেয়ার চালু থাকলে একই সাইটের আরেকটা server ব্লক শেয়ার-পোর্টে
+        return { file: `${s.domain}.conf`, extras: s.system ? '' : s.domain, text: shareable(s) ? mk(webPort) + '\n' + mk(sharePortOf(s.domain), true) : mk(webPort) };
+      }),
   ];
 }
 
@@ -647,7 +654,10 @@ function apacheEntries(sites, webPort) {
     { file: '00-default.conf', extras: 'localhost', text: apacheServer('localhost', WWW_DIR, defVer, webPort, false, [...apacheAliasLines(), ...publicRedirects(sites, webPort, 'apache'), ...disabledBlocks(sites, 'apache'), apacheExtraInclude('localhost')]) },
     ...sites
       .filter((x) => !x.disabled)
-      .map((x) => ({ file: `${x.domain}.conf`, extras: x.system ? '' : x.domain, text: x.node ? apacheNodeServer(x.domain, nodePortOf(x.domain), webPort, [apacheExtraInclude(x.domain)]) : apacheServer(x.domain, x.root, phpOfSite(x), webPort, !!x.system, x.system ? [] : [apacheExtraInclude(x.domain)], x.system ? 0 : siteSessionMin(x.domain)) })),
+      .map((x) => {
+        const mk = (port, shared = false) => (x.node ? apacheNodeServer(x.domain, nodePortOf(x.domain), port, [apacheExtraInclude(x.domain)], shared ? x.domain : '') : apacheServer(x.domain, x.root, phpOfSite(x), port, !!x.system, x.system ? [] : [apacheExtraInclude(x.domain)], x.system ? 0 : siteSessionMin(x.domain)));
+        return { file: `${x.domain}.conf`, extras: x.system ? '' : x.domain, text: shareable(x) ? mk(webPort) + '\n' + mk(sharePortOf(x.domain), true) : mk(webPort) };
+      }),
   ];
 }
 
@@ -665,6 +675,7 @@ function writeApacheConf(svc, _phpPorts, sites, webPort) {
     ['proxy_module', 'mod_proxy.so', false],
     ['proxy_http_module', 'mod_proxy_http.so', false],
     ['proxy_wstunnel_module', 'mod_proxy_wstunnel.so', false],
+    ['headers_module', 'mod_headers.so', false],
     ['env_module', 'mod_env.so', false],
     ['authz_host_module', 'mod_authz_host.so', false],
     ['alias_module', 'mod_alias.so', false],
@@ -710,6 +721,8 @@ function writeApacheConf(svc, _phpPorts, sites, webPort) {
     'AddType application/x-httpd-php .php',
     `Action application/x-httpd-php "/server360-php-${phpSlug(defVer)}/php-cgi.exe"`,
     '',
+    // LAN-এ শেয়ার করা সাইটের পোর্ট
+    ...sharedPorts(sites).map((p) => `Listen ${p}`),
     // প্রতিটা সাইটের VirtualHost আলাদা ফাইলে: conf\sites-enabled\*.conf (00-default.conf আগে লোড হয়, তাই localhost ডিফল্ট)
     'IncludeOptional "${SRVROOT}/conf/sites-enabled/*.conf"',
   ];
@@ -1863,6 +1876,114 @@ ipcMain.handle('root:choose', async () => {
 
 // ---------- সাইট ----------
 const siteUrl = (domain) => `http://${domain}${getWebPort() === 80 ? '' : ':' + getWebPort()}`;
+
+// ---------- LAN-এ শেয়ার (অন্য পিসি/ফোন থেকে http://<LAN-IP>:<পোর্ট>) ----------
+// settings.siteShare = { '<domain>': { on: true|false, port: <n> } }
+// শেয়ার চালু থাকলে ওই সাইটের server ব্লক আরেকটা পোর্টেও শোনে (Nginx: নতুন server ব্লক, Apache: নতুন Listen + VirtualHost)।
+// Node সাইট একই reverse proxy দিয়ে যায়। Adminer/phpMyAdmin/localhost কখনো শেয়ার হয় না।
+const SHARE_BASE = 8100;
+const shareCfg = (d) => (settings.siteShare && settings.siteShare[d]) || null;
+const sharePortOf = (d) => {
+  const c = shareCfg(d);
+  return c && c.on && Number.isInteger(c.port) ? c.port : 0;
+};
+const shareable = (s) => !s.system && !s.disabled && sharePortOf(s.domain) > 0;
+const sharedPorts = (sites) => [...new Set(sites.filter(shareable).map((s) => sharePortOf(s.domain)))];
+function sharePortTaken(port, exceptDomain) {
+  if (port === getWebPort()) return true;
+  if (Object.keys(DATABASES).some((id) => getDbPort(id) === port)) return true;
+  if (Object.values(settings.nodeSites || {}).some((c) => c && c.port === port)) return true;
+  return Object.entries(settings.siteShare || {}).some(([d, c]) => d !== exceptDomain && c && c.port === port);
+}
+async function pickSharePort(domain) {
+  for (let p = SHARE_BASE; p < SHARE_BASE + 500; p++) {
+    if (!sharePortTaken(p, domain) && (await isPortFree(p))) return p;
+  }
+  throw new Error(tr('শেয়ারের জন্য খালি পোর্ট পাওয়া যায়নি', 'No free port found for sharing'));
+}
+// এই পিসির LAN IP (প্রাইভেট রেঞ্জ আগে; 169.254.* বাদ)
+function lanIps() {
+  const out = [];
+  for (const [name, list] of Object.entries(os.networkInterfaces())) {
+    for (const i of list || []) {
+      if (i.family === 'IPv4' && !i.internal && !i.address.startsWith('169.254.')) out.push({ name, ip: i.address });
+    }
+  }
+  const rank = (ip) => (ip.startsWith('192.168.') ? 0 : ip.startsWith('10.') ? 1 : /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ? 2 : 3);
+  return out.sort((a, b) => rank(a.ip) - rank(b.ip));
+}
+const fwRuleName = (exe) => `Server 360 - ${path.basename(exe)}`;
+const webExes = () => ['nginx', 'apache'].map((id) => SERVICES[id].exe).filter((e) => e && fs.existsSync(e));
+function fwRuleExists(name) {
+  return new Promise((resolve) => execFile('netsh', ['advfirewall', 'firewall', 'show', 'rule', `name=${name}`], { windowsHide: true, timeout: 10000 }, (err) => resolve(!err)));
+}
+async function fwState() {
+  const exes = webExes();
+  if (!exes.length) return { known: false, ok: false };
+  const all = await Promise.all(exes.map((e) => fwRuleExists(fwRuleName(e))));
+  return { known: true, ok: all.every(Boolean) };
+}
+
+ipcMain.handle('net:info', async () => ({ ips: lanIps().map((x) => x.ip), fw: await fwState() }));
+
+// Windows Firewall-এ Nginx/Apache-র জন্য ইনবাউন্ড নিয়ম (প্রাইভেট ও ডোমেইন নেটওয়ার্ক)। UAC লাগে; না হলে .cmd ফাইল হাতে চালাতে হয়।
+ipcMain.handle('fw:allow', async () => {
+  const exes = webExes();
+  if (!exes.length) return { ok: false, message: tr('আগে একটা ওয়েব সার্ভার একবার চালু করুন (নামাতে হবে)', 'Start a web server once first (it must be downloaded)') };
+  const cmdFile = path.join(TOOLS_DIR, 'allow-firewall.cmd');
+  const lines = [
+    '@echo off',
+    'net session >nul 2>&1',
+    'if errorlevel 1 ( echo Run this file as Administrator. & pause & exit /b 1 )',
+    ...exes.flatMap((e) => [`netsh advfirewall firewall delete rule name="${fwRuleName(e)}" >nul 2>&1`, `netsh advfirewall firewall add rule name="${fwRuleName(e)}" dir=in action=allow program="${e}" enable=yes profile=private,domain`]),
+    'echo Done.',
+  ];
+  fs.mkdirSync(TOOLS_DIR, { recursive: true });
+  fs.writeFileSync(cmdFile, lines.join('\r\n') + '\r\n');
+  await new Promise((resolve) =>
+    execFile('powershell.exe', ['-NoProfile', '-Command', `Start-Process -FilePath cmd.exe -ArgumentList '/c','"${cmdFile}"' -Verb RunAs -Wait`], { windowsHide: true, timeout: 120000 }, () => resolve())
+  );
+  const st = await fwState();
+  if (st.ok) return { ok: true, message: tr('Firewall-এ অনুমতি দেওয়া হয়েছে (প্রাইভেট/ডোমেইন নেটওয়ার্ক)', 'Firewall rule added (private/domain networks)') };
+  shell.showItemInFolder(cmdFile);
+  return { ok: false, message: tr(`Firewall নিয়ম বসানো যায়নি। Explorer-এ খোলা ${path.basename(cmdFile)} ফাইলে ডান ক্লিক করে "Run as administrator" দিন`, `Could not add the firewall rule. In the Explorer window, right-click ${path.basename(cmdFile)} and choose "Run as administrator"`) };
+});
+
+ipcMain.handle('site:setShare', async (_event, domain, on, portRaw) => {
+  if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+  const sites = withToolSites(scanSites());
+  const site = sites.find((s) => s.domain === domain);
+  if (!site || site.system) return { ok: false, message: tr('সমস্যা: সাইটটা পাওয়া যায়নি', 'Error: site not found') };
+  busy = true;
+  try {
+    const old = shareCfg(domain);
+    let port = old && Number.isInteger(old.port) ? old.port : 0;
+    const raw = String(portRaw === undefined || portRaw === null ? '' : portRaw).trim();
+    if (raw !== '') {
+      const n = /^\d+$/.test(raw) ? parseInt(raw, 10) : 0;
+      if (n < 1024 || n > 65535) throw new Error(tr('পোর্ট ১০২৪ থেকে ৬৫৫৩৫-এর মধ্যে হতে হবে', 'The port must be between 1024 and 65535'));
+      if (sharePortTaken(n, domain)) throw new Error(tr(`পোর্ট ${n} অন্য কাজে ব্যবহৃত (ওয়েব/ডাটাবেস/Node/অন্য শেয়ার)`, `Port ${n} is already used (web/database/Node/another share)`));
+      port = n;
+    }
+    if (on) {
+      const wasLive = old && old.on && old.port === port;
+      if (!port) port = await pickSharePort(domain);
+      else if (!wasLive && !(await isPortFree(port))) throw new Error(tr(`পোর্ট ${port} অন্য প্রোগ্রাম ব্যবহার করছে, আরেকটা দিন`, `Port ${port} is used by another program, choose another`));
+    }
+    settings.siteShare = { ...(settings.siteShare || {}), [domain]: { on: !!on, port } };
+    saveSettings(settings);
+    const live = await reloadRunning(withToolSites(scanSites()));
+    const ip = (lanIps()[0] || {}).ip || '<IP>';
+    let message = on ? tr(`${domain} শেয়ার চালু: http://${ip}:${port}`, `${domain} is shared: http://${ip}:${port}`) : tr(`${domain}-এর শেয়ার বন্ধ`, `Sharing of ${domain} is off`);
+    if (on && !live) message += tr(' (ওয়েব সার্ভার চালু করলে কাজ করবে)', ' (it will work once a web server is started)');
+    return { ok: true, message };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
 const publicSites = (sites) => [
   { name: 'localhost', domain: 'localhost', root: WWW_DIR, system: false, url: siteUrl('localhost'), php: defaultPhpVersion(), phpPinned: '', sessionMin: 0, enabled: true },
   ...sites.map(({ name, domain, root, system, disabled, node }) => ({
@@ -1876,6 +1997,7 @@ const publicSites = (sites) => [
     php: system ? defaultPhpVersion() : sitePhpVersion(domain),
     phpPinned: system ? '' : pinnedPhp(domain),
     sessionMin: system ? 0 : siteSessionMin(domain),
+    share: system ? { on: false, port: 0 } : { on: sharePortOf(domain) > 0, port: (shareCfg(domain) || {}).port || 0 },
   })),
 ];
 

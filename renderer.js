@@ -336,6 +336,73 @@ function sessionCell(s) {
   return el('td', {}, inp);
 }
 
+function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+  } catch {}
+  const ta = el('textarea', { value: text });
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  ta.remove();
+}
+
+// LAN-এ শেয়ার: সুইচ + পোর্ট; চালু থাকলে http://<IP>:<পোর্ট> ও Copy
+function netCell(s, net) {
+  if (s.system || s.name === 'localhost' || !s.enabled) return el('td', { className: 'php-text', textContent: '—' });
+  const cb = el('input', { type: 'checkbox', checked: !!s.share.on });
+  const port = el('input', { type: 'number', min: 1024, max: 65535, placeholder: t('share.auto') });
+  port.style.width = '78px';
+  if (s.share.port) port.value = s.share.port;
+  const save = () =>
+    work(cb, async () => {
+      const r = await window.api.setSiteShare(s.domain, cb.checked, port.value);
+      setStatus(r.message);
+      await loadSites();
+    });
+  cb.addEventListener('change', save);
+  port.addEventListener('change', save);
+  const kids = [el('label', { className: 'switch', title: t('share.tip') }, cb, el('i')), ' ', port];
+  if (s.share.on && s.share.port) {
+    const ip = net.ips[0];
+    if (ip) {
+      const url = `http://${ip}:${s.share.port}`;
+      const btn = el('button', { className: 'btn sm', textContent: t('share.copy') });
+      btn.addEventListener('click', async () => {
+        await copyText(url);
+        setStatus(t('share.copied', url));
+      });
+      kids.push(el('div', { className: 'hint', style: 'margin-top:4px; word-break:break-all;' }, url, ' ', btn));
+    } else {
+      kids.push(el('div', { className: 'hint', textContent: t('share.noip') }));
+    }
+  }
+  return el('td', {}, ...kids);
+}
+
+function renderShareBar(net) {
+  const bar = $('shareBar');
+  bar.textContent = '';
+  const ipText = net.ips.length ? net.ips.join(', ') : t('share.noip');
+  const row = el('div', { className: 'row first' }, el('b', { textContent: t('share.title') }), el('span', { className: 'hint', textContent: ' ' + t('share.ip') + ': ' + ipText }));
+  if (net.fw.known) {
+    row.appendChild(el('span', { className: 'badge ' + (net.fw.ok ? 'ok' : ''), textContent: net.fw.ok ? t('share.fw.ok') : t('share.fw.no') }));
+    if (!net.fw.ok) {
+      const b = el('button', { className: 'btn sm primary', textContent: t('share.fw.btn') });
+      b.addEventListener('click', () =>
+        work(b, async () => {
+          const r = await window.api.allowFirewall();
+          setStatus(r.message);
+          await loadSites();
+        })
+      );
+      row.appendChild(b);
+    }
+  }
+  bar.appendChild(row);
+  bar.appendChild(el('div', { className: 'hint', textContent: t('share.hint') }));
+}
+
 function folderCell(s) {
   const a = el('a', { className: 'link', textContent: s.root, title: t('sites.openFolder') });
   a.addEventListener('click', async () => {
@@ -435,6 +502,11 @@ async function renderSites(sites, php) {
   try {
     custom = new Set((await window.api.confState(selectedServer())).custom);
   } catch {}
+  let net = { ips: [], fw: { known: false, ok: false } };
+  try {
+    net = await window.api.netInfo();
+  } catch {}
+  renderShareBar(net);
   const body = $('sitesBody');
   body.textContent = '';
   $('siteCount').textContent = sites.filter((s) => !s.system).length;
@@ -449,13 +521,14 @@ async function renderSites(sites, php) {
       folderCell(s),
       phpCell(s, php),
       sessionCell(s),
+      netCell(s, net),
       confCell(s, custom)
     );
     if (!s.enabled) row.style.opacity = '0.55';
     body.appendChild(row);
   }
   if (sites.filter((s) => !s.system).length <= 1) {
-    body.appendChild(el('tr', {}, el('td', { className: 'empty', colSpan: 6, textContent: t('sites.empty') })));
+    body.appendChild(el('tr', {}, el('td', { className: 'empty', colSpan: 7, textContent: t('sites.empty') })));
   }
 }
 async function loadSites() {
