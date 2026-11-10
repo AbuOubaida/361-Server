@@ -6,6 +6,7 @@ const https = require('https');
 const net = require('net');
 const extract = require('extract-zip');
 const crypto = require('crypto');
+const os = require('os');
 
 // ====== এখানে আপনার লিংক বসান ======
 const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
@@ -937,8 +938,28 @@ function buildHostsContent(sites) {
 
 const normText = (t) => t.replace(/\r\n/g, '\n').trim();
 
+// PowerShell বন্ধ/ব্লক করা পিসি পরীক্ষার জন্য: S360_NO_POWERSHELL=1 npm start দিলে অ্যাপ ধরে নেয় PowerShell নেই
+const NO_PS = process.env.S360_NO_POWERSHELL === '1';
+let psBroken = NO_PS; // একবার ধরা পড়লে (দ্রুত ব্যর্থ) বাকি সময় PowerShell আর চেষ্টা করা হয় না
+let lastManualShown = '';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitHosts(next, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (normText(readHosts()) === normText(next)) return true;
+    await sleep(500);
+  }
+  return normText(readHosts()) === normText(next);
+}
+
 // hosts ফাইলে শুধু আমাদের ব্লকটা বদলানো। পড়তে অনুমতি লাগে না, লিখতে Administrator (UAC) লাগে।
-// বদল না থাকলে UAC পপআপ আসে না।
+// বদল না থাকলে UAC পপআপ আসে না। ধাপগুলো (একটা কাজ করলেই থামে):
+//   ১) সরাসরি লেখা (অ্যাপ Administrator হিসেবে চললে)
+//   ২) PowerShell দিয়ে Administrator অনুমতি
+//   ৩) PowerShell না থাকলে VBScript (wscript) দিয়ে cmd Administrator মোডে
+//   ৪) সবই ব্যর্থ হলে apply-hosts.cmd বানিয়ে দেওয়া (ডান-ক্লিক > Run as administrator) ও বার্তা
 async function syncHosts(sites) {
   const next = buildHostsContent(sites);
   if (normText(readHosts()) === normText(next)) return { ok: true, changed: false };
@@ -946,28 +967,91 @@ async function syncHosts(sites) {
   fs.mkdirSync(TOOLS_DIR, { recursive: true });
   const src = path.join(TOOLS_DIR, 'hosts.new');
   const ps1 = path.join(TOOLS_DIR, 'apply-hosts.ps1');
+  const vbs = path.join(TOOLS_DIR, 'apply-hosts.vbs');
+  const cmdFile = path.join(TOOLS_DIR, 'apply-hosts.cmd');
   const q = (t) => t.replace(/'/g, "''");
   fs.writeFileSync(src, next, 'utf8');
-  fs.writeFileSync(
-    ps1,
-    '\ufeff' + `Copy-Item -Force -LiteralPath '${q(src)}' -Destination '${q(HOSTS_PATH)}'\r\n`,
-    'utf8'
-  );
 
-  sendStatus(tr('hosts ফাইল আপডেটের জন্য Administrator অনুমতি লাগবে (Yes চাপুন)...', 'Administrator permission is needed to update the hosts file (click Yes)...'));
-  await new Promise((resolve) =>
-    execFile(
-      'powershell',
+  // ১) সরাসরি লেখা (পরীক্ষার জন্য S360_NO_DIRECT_HOSTS=1 দিলে এই ধাপ বাদ)
+  if (process.env.S360_NO_DIRECT_HOSTS !== '1') {
+    try {
+      fs.writeFileSync(HOSTS_PATH, next, 'utf8');
+    } catch {}
+  }
+  if (normText(readHosts()) === normText(next)) return { ok: true, changed: true, how: 'direct' };
+
+  // ২) PowerShell
+  if (!psBroken) {
+    fs.writeFileSync(ps1, '\ufeff' + `Copy-Item -Force -LiteralPath '${q(src)}' -Destination '${q(HOSTS_PATH)}'\r\n`, 'utf8');
+    sendStatus(tr('hosts ফাইল আপডেটের জন্য Administrator অনুমতি লাগবে (Yes চাপুন)...', 'Administrator permission is needed to update the hosts file (click Yes)...'));
+    const t0 = Date.now();
+    const psErr = await new Promise((resolve) =>
+      execFile(
+        'powershell',
+        ['-NoProfile', '-Command', `Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"${q(ps1)}\"'`],
+        { windowsHide: true },
+        (err) => resolve(err)
+      )
+    );
+    if (normText(readHosts()) === normText(next)) return { ok: true, changed: true, how: 'powershell' };
+    // দুই সেকেন্ডের আগেই ব্যর্থ = PowerShell নেই/ব্লক করা (ইউজার No চাপলে সাধারণত বেশি সময় লাগে, তখন আবার প্রশ্ন করি না)
+    if (psErr && Date.now() - t0 < 2000) psBroken = true;
+    else if (psErr) return failHosts(next, src, cmdFile);
+  }
+
+  // ৩) VBScript দিয়ে cmd (Administrator)
+  if (psBroken) {
+    const vq = (t) => t.replace(/"/g, '""');
+    fs.writeFileSync(
+      vbs,
+      `CreateObject("Shell.Application").ShellExecute "cmd.exe", "/c copy /y ""${vq(src)}"" ""${vq(HOSTS_PATH)}""", "", "runas", 0\r\n`,
+      'utf8'
+    );
+    sendStatus(tr('hosts ফাইল আপডেটের জন্য Administrator অনুমতি লাগবে (Yes চাপুন)...', 'Administrator permission is needed to update the hosts file (click Yes)...'));
+    await new Promise((resolve) => execFile('wscript', ['//nologo', vbs], { windowsHide: true }, () => resolve()));
+    if (await waitHosts(next, 30000)) return { ok: true, changed: true, how: 'vbscript' };
+  }
+
+  return failHosts(next, src, cmdFile);
+}
+
+// ৪) শেষ উপায়: apply-hosts.cmd বানিয়ে ফোল্ডার দেখানো, কী করতে হবে বার্তায় জানানো
+function failHosts(next, src, cmdFile) {
+  try {
+    const log = path.join(path.dirname(cmdFile), 'apply-hosts.log'); // জানালা চোখে না পড়লেও এই লগে দেখা যায় কী হয়েছিল
+    fs.writeFileSync(
+      cmdFile,
       [
-        '-NoProfile',
-        '-Command',
-        `Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','"${q(ps1)}"'`,
-      ],
-      () => resolve()
-    )
-  );
+        '@echo off',
+        'net session >nul 2>&1',
+        'if errorlevel 1 (',
+        '  echo Right-click this file and choose "Run as administrator".',
+        `  echo %date% %time% NOT-ADMIN>> "${log}"`,
+        '  pause',
+        '  exit /b 1',
+        ')',
+        `copy /y "${src}" "${HOSTS_PATH}" >nul && (echo Done: hosts file updated. & echo %date% %time% OK>> "${log}") || (echo Failed to update the hosts file. & echo %date% %time% FAILED>> "${log}")`,
+        'pause',
+        '',
+      ].join('\r\n'),
+      'utf8'
+    );
+    const key = crypto.createHash('md5').update(next).digest('hex');
+    if (key !== lastManualShown) {
+      lastManualShown = key;
+      shell.showItemInFolder(cmdFile);
+    }
+  } catch {}
+  return { ok: false, changed: true, manual: cmdFile };
+}
 
-  return { ok: normText(readHosts()) === normText(next), changed: true };
+// hosts আপডেট ব্যর্থ হলে বার্তার অংশ
+function hostsFailNote(h) {
+  const f = (h && h.manual) || 'apply-hosts.cmd';
+  return tr(
+    ` ⚠ hosts ফাইল আপডেট হয়নি, তাই শুধু localhost কাজ করবে। ${f} ফাইলে ডান-ক্লিক করে "Run as administrator" দিন, তারপর Sites পেজে Refresh চাপুন।`,
+    ` ⚠ The hosts file was not updated, so only localhost works. Right-click ${f} and choose "Run as administrator", then press Refresh on the Sites page.`
+  );
 }
 
 let win = null;
@@ -1018,15 +1102,77 @@ function killTree(pid) {
   exec(`taskkill /pid ${pid} /t /f`);
 }
 
+// ---- চালানো প্রসেসের PID তালিকা (tools\pids.json): PowerShell না থাকলে আটকে থাকা প্রসেস মারতে এটা কাজে লাগে ----
+// রিবুটের পর PID বদলে যায়, তাই বুট-সময় মিলিয়ে দেখা হয় (না মিললে তালিকা বাতিল)
+const bootMin = () => Math.round((Date.now() - os.uptime() * 1000) / 60000);
+const pidFile = () => path.join(TOOLS_DIR, 'pids.json');
+function readPidReg() {
+  try {
+    const j = JSON.parse(fs.readFileSync(pidFile(), 'utf8'));
+    if (j && j.pids && Math.abs((j.boot || 0) - bootMin()) <= 2) return j;
+  } catch {}
+  return { boot: bootMin(), pids: {} };
+}
+function writePidReg(reg) {
+  try {
+    fs.mkdirSync(TOOLS_DIR, { recursive: true });
+    fs.writeFileSync(pidFile(), JSON.stringify(reg));
+  } catch {}
+}
+// kind = প্রসেসের নাম (nginx, httpd, php-cgi, mysqld, postgres, node), image = আসল .exe-র নাম (যাচাইয়ের জন্য)
+function trackPid(proc, kind, image) {
+  if (!proc || !proc.pid) return;
+  const pid = String(proc.pid);
+  const reg = readPidReg();
+  reg.pids[pid] = { kind: kind.toLowerCase(), image: (image || kind + '.exe').toLowerCase() };
+  writePidReg(reg);
+  proc.once('exit', () => {
+    const r = readPidReg();
+    delete r.pids[pid];
+    writePidReg(r);
+  });
+}
+const exeKind = (exe) => path.basename(exe, '.exe').toLowerCase();
+
+function imageOfPid(pid) {
+  return new Promise((resolve) =>
+    exec(`tasklist /fi "PID eq ${pid}" /fo csv /nh`, { windowsHide: true }, (err, out) => {
+      const m = !err && String(out).match(/^"([^"]+)","(\d+)"/m);
+      resolve(m && m[2] === String(pid) ? m[1].toLowerCase() : null);
+    })
+  );
+}
+
+// PowerShell ছাড়া: তালিকার PID-গুলো (নাম মিললে) taskkill দিয়ে মারা
+async function killStaleByPid(names) {
+  const want = String(names).split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+  const reg = readPidReg();
+  for (const [pid, e] of Object.entries(reg.pids)) {
+    if (!want.includes(e.kind)) continue;
+    const img = await imageOfPid(pid); // PID অন্য প্রোগ্রাম নিয়ে নিলে (নাম না মিললে) মারা হয় না
+    if (img && img === e.image) await new Promise((r) => exec(`taskkill /pid ${pid} /t /f`, { windowsHide: true }, () => r()));
+    delete reg.pids[pid];
+  }
+  writePidReg(reg);
+  await sleep(500);
+}
+
 // আগের বার বন্ধ না হওয়া (লুকিয়ে চলা) nginx / php-cgi প্রসেস মেরে ফেলা।
 // শুধু আমাদের tools ফোল্ডারের প্রসেসই মারা হয়, অন্য প্রোগ্রামের নয়।
 // (Windows-এ দুটো nginx একই পোর্ট ৮০ নিতে পারে, তখন পুরনোটাই সাড়া দেয়)
+// প্রথমে PowerShell; সেটা না থাকলে/ব্লক করা থাকলে PID তালিকা ধরে taskkill।
 function killStale(names = 'nginx,php-cgi,httpd') {
+  if (psBroken) return killStaleByPid(names);
   const base = TOOLS_DIR.replace(/'/g, "''");
   const cmd =
     `powershell -NoProfile -Command "Get-Process ${names} -ErrorAction SilentlyContinue | ` +
     `Where-Object { $_.Path -like '${base}*' } | Stop-Process -Force"`;
-  return new Promise((resolve) => exec(cmd, () => setTimeout(resolve, 500)));
+  return new Promise((resolve) =>
+    exec(cmd, { windowsHide: true }, (err) => {
+      if (err) return killStaleByPid(names).then(resolve);
+      setTimeout(resolve, 500);
+    })
+  );
 }
 
 // ফাইল ডাউনলোড (রিডাইরেক্ট সহ)
@@ -1205,6 +1351,7 @@ function ensureWww() {
 function spawnChecked(exe, args, options) {
   return new Promise((resolve) => {
     const proc = spawn(exe, args, { windowsHide: true, ...options });
+    trackPid(proc, exeKind(exe));
     let output = '';
     proc.stdout.on('data', (d) => (output += d));
     proc.stderr.on('data', (d) => (output += d));
@@ -1376,6 +1523,7 @@ async function startDatabase(id) {
 
     sendStatus(tr(`${db.label} চালু হচ্ছে...`, `Starting ${db.label}...`));
     const proc = spawn(svc.exe, db.spawnArgs(svc, port), { cwd: svc.dir, windowsHide: true });
+    trackPid(proc, db.stale, path.basename(svc.exe));
     let out = '';
     const collect = (d) => (out = (out + d).slice(-2000));
     proc.stdout.on('data', collect);
@@ -1530,7 +1678,7 @@ async function startWebServer(id, keepBusy = false) {
       }
       sites = withToolSites(scanSites());
       const h = await syncHosts(sites);
-      if (!h.ok) hostsNote += tr(' ⚠ hosts ফাইল আপডেট হয়নি (Administrator অনুমতি দিন), তাই শুধু localhost কাজ করবে।', ' ⚠ The hosts file was not updated (allow Administrator access), so only localhost will work.');
+      if (!h.ok) hostsNote += hostsFailNote(h);
     }
     // Nginx-এর জন্য আগে দরকারি প্রতিটা PHP ভার্সনের php-cgi চালু করা (Apache নিজেই প্রতি রিকোয়েস্টে php-cgi চালায়)
     if (svc.usesPHP && !svc.phpViaCgi) await startPhpCgis(neededPhpVersions(sites), phpPorts, procs);
@@ -1717,7 +1865,7 @@ ipcMain.handle('sites:refresh', async () => {
     } else {
       message = tr(`${n}টা সাইট পাওয়া গেছে (ওয়েব সার্ভার চালু করলে কাজ করবে)`, `${n} site(s) found (they will work once a web server is started)`);
     }
-    if (!h.ok) message += tr(' ⚠ hosts আপডেট হয়নি (Administrator অনুমতি দিন)', ' ⚠ hosts file was not updated (allow Administrator access)');
+    if (!h.ok) message += hostsFailNote(h);
     return { sites: publicSites(sites), message };
   } catch (err) {
     return { sites: publicSites(withToolSites(scanSites())), message: tr('সমস্যা: ', 'Error: ') + err.message };
@@ -2085,7 +2233,7 @@ ipcMain.handle('site:create', async (_event, kind, rawName) => {
       message += kind === 'node-basic' ? tr('। নিচের Node.js কার্ডে ▶ চালু চাপুন', '. Click ▶ Start in the Node.js card below') : tr('। npm install চলবে, শেষ হলে ▶ চালু চাপুন', '. npm install will run, then click ▶ Start');
       if (!live) message += tr(' (.test ঠিকানার জন্য ওয়েব সার্ভারও চালু করুন)', ' (also start a web server for the .test address)');
     } else if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে কাজ করবে)', ' (it will work once a web server is started)');
-    if (!h.ok) message += tr(' ⚠ hosts আপডেট হয়নি (Administrator অনুমতি দিন)', ' ⚠ hosts file was not updated (allow Administrator access)');
+    if (!h.ok) message += hostsFailNote(h);
     if (kind === 'wordpress' || kind === 'laravel') message += tr('। ডাটাবেস: ' + name.replace(/-/g, '_') + ' (root, খালি পাসওয়ার্ড)', '. Database: ' + name.replace(/-/g, '_') + ' (root, empty password)');
     if (laravelInfo) {
       message += tr(`। Laravel .env-এ SESSION_LIFETIME=${laravelInfo.sessMin} মিনিট`, `. Laravel .env has SESSION_LIFETIME=${laravelInfo.sessMin} min`);
@@ -2135,7 +2283,7 @@ ipcMain.handle('site:setEnabled', async (_event, domain, on) => {
     const live = await reloadRunning(sites);
     let message = on ? tr(`${domain} চালু করা হয়েছে`, `${domain} enabled`) : tr(`${domain} বন্ধ করা হয়েছে`, `${domain} disabled`);
     if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে প্রযোজ্য হবে)', ' (applies when a web server is started)');
-    if (!h.ok) message += tr(' ⚠ hosts আপডেট হয়নি (Administrator অনুমতি দিন)', ' ⚠ hosts file was not updated (allow Administrator access)');
+    if (!h.ok) message += hostsFailNote(h);
     return { ok: true, message };
   } catch (err) {
     return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
@@ -2726,6 +2874,7 @@ function spawnNodeTask(domain, site, command, task, port, nodeEntry) {
   nodeLogPush(domain, `--- ${new Date().toLocaleTimeString()} ---`);
   nodeLogPush(domain, `> ${command}${task === 'run' ? `   (PORT=${port}, Node ${nodeEntry.version})` : `   (Node ${nodeEntry.version})`}`);
   const proc = spawn(command, { cwd: site.root, env: nodeEnv(port, nodeEntry.dir), shell: true, windowsHide: true });
+  trackPid(proc, 'node', 'cmd.exe');
   const run = { proc, task, port, version: nodeEntry.version };
   run.exit = new Promise((resolve) => {
     proc.once('exit', (code) => resolve(code));
