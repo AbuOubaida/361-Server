@@ -930,9 +930,38 @@ async function refreshAll() {
   try {
     applyWeb(await window.api.webStatus());
     await loadDbs();
+    if (currentPage === 'settings') await loadMysqlPw();
     if (currentPage === 'sites') await loadNodeSites(); // Node অ্যাপ চলছে/বন্ধ অবস্থা হালনাগাদ
   } catch {}
 }
+
+// ---------- MySQL root পাসওয়ার্ড ----------
+async function loadMysqlPw() {
+  try {
+    const r = await window.api.mysqlPwState();
+    $('mysqlPwState').textContent = (r.hasPw ? t('settings.pw.isSet') : t('settings.pw.isEmpty')) + ' · ' + (r.running ? t('settings.pw.running') : t('settings.pw.stopped'));
+  } catch {}
+}
+$('mysqlPwSet').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    const pw = $('mysqlPw').value;
+    if (!pw) return setStatus(t('settings.pw.enter'));
+    const r = await window.api.mysqlSetPassword(pw);
+    setStatus(r.message);
+    if (r.ok) $('mysqlPw').value = '';
+    await loadMysqlPw();
+    loadDbs();
+  })
+);
+$('mysqlPwClear').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    if (!confirm(t('settings.pw.confirmClear'))) return;
+    const r = await window.api.mysqlSetPassword('');
+    setStatus(r.message);
+    await loadMysqlPw();
+    loadDbs();
+  })
+);
 
 applyStatic();
 window.api.setLang(LANG); // মনে রাখা ভাষা main.js-কেও জানানো (বার্তা ও ডায়ালগের জন্য)
@@ -940,5 +969,6 @@ window.api.getWww().then((p) => ($('wwwPath').textContent = p));
 window.api.getRoot().then((p) => ($('rootPath').textContent = p));
 window.api.getPort().then((p) => (portInput.value = p));
 loadSites();
+loadMysqlPw();
 refreshAll();
 setInterval(refreshAll, 4000); // চলা/বন্ধ অবস্থা নিজে থেকে হালনাগাদ

@@ -84,6 +84,10 @@ contextBridge.exposeInMainWorld('api', {
   configNode: (domain, cfg) => ipcRenderer.invoke('node:config', domain, cfg),
   nodeLog: (domain) => ipcRenderer.invoke('node:log', domain),
 
+  // MySQL root পাসওয়ার্ড
+  mysqlPwState: () => ipcRenderer.invoke('mysql:pwState'),
+  mysqlSetPassword: (pw) => ipcRenderer.invoke('mysql:setPassword', pw),
+
   // ভাষা
   getLang: () => ipcRenderer.invoke('lang:get'),
   setLang: (lang) => ipcRenderer.invoke('lang:set', lang),

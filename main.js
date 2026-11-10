@@ -891,6 +891,16 @@ async function ensureAdminer() {
 const PMA_DOMAIN = `phpmyadmin.${TLD}`;
 const pmaInstalled = () => fs.existsSync(SERVICES.phpmyadmin.exe);
 
+// ---------- MySQL root পাসওয়ার্ড ----------
+// settings.mysqlRootPw = { '<MySQL ভার্সন>': 'পাসওয়ার্ড' } (প্রতি ভার্সনের ডাটা আলাদা, তাই পাসওয়ার্ডও আলাদা)।
+// settings.json-এ সাধারণ লেখায় থাকে (অ্যাপ নিজে WordPress/Laravel/phpMyAdmin সেট করতে ও ডাটাবেস বন্ধ করতে এটা লাগে)।
+const mysqlRootPw = () => (settings.mysqlRootPw && settings.mysqlRootPw[activeVersion('mysql').version]) || '';
+const mysqlEnv = (pw = mysqlRootPw()) => ({ ...process.env, ...(pw ? { MYSQL_PWD: pw } : {}) });
+const phpStr = (v) => `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+const sqlStr = (v) => `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+// Laravel .env-এর মান: সাধারণ অক্ষর হলে যেমন আছে, নইলে "..." দিয়ে (\\ " $ এড়িয়ে)
+const envVal = (v) => (v === '' || /^[A-Za-z0-9_.@:+-]+$/.test(v) ? v : `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$')}"`);
+
 // config.inc.php: root হিসেবে নিজে থেকে লগইন (পাসওয়ার্ড ফাঁকা)। পোর্ট বদলালে আবার লেখা হয়।
 function writePmaConfig() {
   const dir = SERVICES.phpmyadmin.dir;
@@ -909,8 +919,8 @@ function writePmaConfig() {
     `$cfg['Servers'][$i]['host'] = '127.0.0.1';`,
     `$cfg['Servers'][$i]['port'] = '${getDbPort('mysql')}';`,
     `$cfg['Servers'][$i]['user'] = 'root';`,
-    `$cfg['Servers'][$i]['password'] = '';`,
-    `$cfg['Servers'][$i]['AllowNoPassword'] = true;`,
+    `$cfg['Servers'][$i]['password'] = ${phpStr(mysqlRootPw())};`,
+    `$cfg['Servers'][$i]['AllowNoPassword'] = ${mysqlRootPw() ? 'false' : 'true'};`,
     `$cfg['VersionCheck'] = false;`,
     '',
   ].join('\n');
@@ -1468,7 +1478,7 @@ const DATABASES = {
       return mysqlDataDir();
     },
     get info() {
-      return tr('হোস্ট: 127.0.0.1 · ইউজার: root · পাসওয়ার্ড: ফাঁকা', 'Host: 127.0.0.1 · User: root · Password: empty');
+      return mysqlRootPw() ? tr('হোস্ট: 127.0.0.1 · ইউজার: root · পাসওয়ার্ড: সেট করা (Settings-এ বদলান)', 'Host: 127.0.0.1 · User: root · Password: set (change it in Settings)') : tr('হোস্ট: 127.0.0.1 · ইউজার: root · পাসওয়ার্ড: ফাঁকা', 'Host: 127.0.0.1 · User: root · Password: empty');
     },
     prepare: (svc, port) => writeMysqlIni(svc, port),
     isInitialized: () => fs.existsSync(path.join(mysqlDataDir(), 'mysql')),
@@ -1479,6 +1489,7 @@ const DATABASES = {
     shutdownCmd: (svc, port) => ({
       exe: path.join(svc.dir, 'bin', 'mysqladmin.exe'),
       args: ['--no-defaults', '-u', 'root', '--protocol=tcp', '-h', '127.0.0.1', `--port=${port}`, 'shutdown'],
+      env: mysqlEnv(),
     }),
   },
   postgres: {
@@ -1565,6 +1576,11 @@ async function startDatabase(id) {
         fs.rmSync(db.dataDir, { recursive: true, force: true }); // আধা-তৈরি ডাটা মুছে যাতে আবার চেষ্টা করা যায়
         throw new Error(tr(`${db.label} সেটআপ ব্যর্থ: ${err.message}`, `${db.label} setup failed: ${err.message}`));
       }
+      if (id === 'mysql' && settings.mysqlRootPw) {
+        // নতুন ডাটা ফোল্ডার = root পাসওয়ার্ড ফাঁকা; পুরনো সেভ করা পাসওয়ার্ড রাখলে অ্যাপ আর ঢুকতে পারবে না
+        delete settings.mysqlRootPw[activeVersion('mysql').version];
+        saveSettings(settings);
+      }
     }
 
     sendStatus(tr(`${db.label} চালু হচ্ছে...`, `Starting ${db.label}...`));
@@ -1604,7 +1620,7 @@ async function stopDatabase(id) {
   // আগে নিয়ম মেনে shutdown, না হলে (যেমন পাসওয়ার্ড দেওয়া থাকলে) জোর করে বন্ধ
   const cmd = db.shutdownCmd(svc, run.port);
   await new Promise((resolve) =>
-    execFile(cmd.exe, cmd.args, { timeout: 30000, windowsHide: true }, () => resolve())
+    execFile(cmd.exe, cmd.args, { timeout: 30000, windowsHide: true, env: cmd.env || process.env }, () => resolve())
   );
   await new Promise((resolve) => {
     if (run.proc.exitCode !== null) return resolve();
@@ -1877,6 +1893,79 @@ ipcMain.handle('root:choose', async () => {
 // ---------- সাইট ----------
 const siteUrl = (domain) => `http://${domain}${getWebPort() === 80 ? '' : ':' + getWebPort()}`;
 
+
+// ---------- MySQL root পাসওয়ার্ড বদলানো ----------
+// এই পাসওয়ার্ড বসে WordPress/Laravel (নতুন সাইট), phpMyAdmin ও MySQL বন্ধ করার কমান্ডে। পুরনো সাইটের wp-config.php/.env-ও নিজে ঠিক করে।
+function updateSitePasswords(newPw) {
+  let wp = 0;
+  let lv = 0;
+  for (const s of withToolSites(scanSites()).filter((x) => !x.system)) {
+    try {
+      const wpf = path.join(s.root, 'wp-config.php');
+      if (fs.existsSync(wpf)) {
+        const txt = fs.readFileSync(wpf, 'utf8');
+        if (/define\(\s*'DB_USER'\s*,\s*'root'\s*\)/.test(txt)) {
+          const next = txt.replace(/(define\(\s*'DB_PASSWORD'\s*,\s*)'(?:[^'\\]|\\.)*'(\s*\))/, (_m, a, b) => a + phpStr(newPw) + b);
+          if (next !== txt) {
+            fs.writeFileSync(wpf, next);
+            wp++;
+          }
+        }
+      }
+      const proj = laravelProjectOf(s);
+      if (proj) {
+        const envFile = path.join(proj, '.env');
+        const txt = fs.readFileSync(envFile, 'utf8');
+        if (/^DB_CONNECTION=mysql\s*$/m.test(txt) && /^DB_USERNAME=root\s*$/m.test(txt)) {
+          fs.writeFileSync(envFile, setEnvValues(txt, { DB_PASSWORD: envVal(newPw) }));
+          lv++;
+        }
+      }
+    } catch {}
+  }
+  return { wp, lv };
+}
+
+ipcMain.handle('mysql:pwState', () => ({ hasPw: !!mysqlRootPw(), running: !!dbRun.mysql }));
+
+ipcMain.handle('mysql:setPassword', async (_event, newPw) => {
+  const fail = (m) => ({ ok: false, message: m });
+  newPw = String(newPw === undefined || newPw === null ? '' : newPw);
+  if (newPw.length > 64 || /[\r\n\0]/.test(newPw)) return fail(tr('সমস্যা: পাসওয়ার্ড সর্বোচ্চ ৬৪ অক্ষর, নতুন লাইন চলবে না', 'Error: the password may have up to 64 characters and no line breaks'));
+  if (!dbRun.mysql) return fail(tr('আগে MySQL চালু করুন (সার্ভিস পেজ)', 'Start MySQL first (Services page)'));
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  busy = true;
+  try {
+    const mysqlExe = path.join(SERVICES.mysql.dir, 'bin', 'mysql.exe');
+    if (!fs.existsSync(mysqlExe)) throw new Error(tr('mysql.exe পাওয়া যায়নি', 'mysql.exe not found'));
+    const port = getDbPort('mysql');
+    // পাসওয়ার্ড কমান্ড-লাইনে না দিয়ে stdin দিয়ে পাঠাই
+    await new Promise((resolve, reject) => {
+      const ch = execFile(mysqlExe, ['--no-defaults', '-u', 'root', '-h', '127.0.0.1', '-P', String(port)], { env: mysqlEnv(), timeout: 30000, windowsHide: true }, (err, _o, stderr) => {
+        if (!err) return resolve();
+        const msg = String(stderr || err.message);
+        reject(new Error(/Access denied/i.test(msg) ? tr('MySQL-এর বর্তমান পাসওয়ার্ড অ্যাপে রাখা পাসওয়ার্ডের সাথে মেলেনি (বাইরে থেকে বদলানো হয়েছে?)', "MySQL's current password does not match the one the app has stored (changed outside the app?)") : msg.trim().slice(0, 200)));
+      });
+      ch.stdin.end(`ALTER USER 'root'@'localhost' IDENTIFIED BY ${sqlStr(newPw)};\n`);
+    });
+    const ver = activeVersion('mysql').version;
+    settings.mysqlRootPw = { ...(settings.mysqlRootPw || {}) };
+    if (newPw) settings.mysqlRootPw[ver] = newPw;
+    else delete settings.mysqlRootPw[ver];
+    saveSettings(settings);
+    if (pmaInstalled()) writePmaConfig();
+    const { wp, lv } = updateSitePasswords(newPw);
+    let message = newPw ? tr('MySQL root পাসওয়ার্ড বদলানো হয়েছে', 'MySQL root password changed') : tr('MySQL root পাসওয়ার্ড সরানো হয়েছে (ফাঁকা)', 'MySQL root password removed (empty)');
+    if (wp || lv) message += tr(` · সাইট ঠিক করা হয়েছে: WordPress ${wp}, Laravel ${lv}`, ` · sites updated: WordPress ${wp}, Laravel ${lv}`);
+    if (newPw) message += tr(' · Adminer-এ লগইনে এই পাসওয়ার্ড দিন', ' · enter this password when logging in to Adminer');
+    return { ok: true, message };
+  } catch (err) {
+    return fail(tr('সমস্যা: ', 'Error: ') + err.message);
+  } finally {
+    busy = false;
+  }
+});
+
 // ---------- LAN-এ শেয়ার (অন্য পিসি/ফোন থেকে http://<LAN-IP>:<পোর্ট>) ----------
 // settings.siteShare = { '<domain>': { on: true|false, port: <n> } }
 // শেয়ার চালু থাকলে ওই সাইটের server ব্লক আরেকটা পোর্টেও শোনে (Nginx: নতুন server ব্লক, Apache: নতুন Listen + VirtualHost)।
@@ -2057,8 +2146,9 @@ async function installWordPress(dest, dbName) {
   }
   const src = path.join(tmp, 'wordpress');
   if (!fs.existsSync(path.join(src, 'wp-config-sample.php'))) throw new Error(tr('WordPress zip ঠিক নেই', 'The WordPress zip looks wrong'));
-  fs.cpSync(src, dest, { recursive: true });
-  fs.rmSync(tmp, { recursive: true, force: true });
+  // async: হাজার হাজার ছোট ফাইল কপি/মোছার সময় sync কল পুরো উইন্ডো আটকে দিত ("Not Responding")
+  await fs.promises.cp(src, dest, { recursive: true });
+  await fs.promises.rm(tmp, { recursive: true, force: true });
   // ডাটাবেস বানানো (root, খালি পাসওয়ার্ড)
   sendStatus(tr('ডাটাবেস বানানো হচ্ছে...', 'Creating database...'));
   await createMysqlDb(mysqlExe, port, dbName);
@@ -2067,7 +2157,7 @@ async function installWordPress(dest, dbName) {
   cfg = cfg
     .replace('database_name_here', dbName)
     .replace('username_here', 'root')
-    .replace("'password_here'", "''")
+    .replace("'password_here'", () => phpStr(mysqlRootPw()))
     .replace("'localhost'", `'127.0.0.1:${port}'`)
     .replace(/define\(\s*'(AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|SECURE_AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT)',\s*'put your unique phrase here'\s*\);/g, (_m, k) => `define( '${k}', '${crypto.randomBytes(32).toString('hex')}' );`);
   fs.writeFileSync(path.join(dest, 'wp-config.php'), cfg);
@@ -2077,7 +2167,7 @@ async function installWordPress(dest, dbName) {
 // MySQL-এ ডাটাবেস বানানো (root, খালি পাসওয়ার্ড); WordPress ও Laravel দুটোই এটা ব্যবহার করে
 function createMysqlDb(mysqlExe, port, dbName) {
   return new Promise((resolve, reject) =>
-    execFile(mysqlExe, ['-u', 'root', '-h', '127.0.0.1', '-P', String(port), '-e', `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`], { timeout: 30000, windowsHide: true }, (err, _o, stderr) =>
+    execFile(mysqlExe, ['-u', 'root', '-h', '127.0.0.1', '-P', String(port), '-e', `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`], { timeout: 30000, windowsHide: true, env: mysqlEnv() }, (err, _o, stderr) =>
       err ? reject(new Error(tr('ডাটাবেস বানানো যায়নি: ', 'Could not create the database: ') + String(stderr || err.message).trim().slice(0, 200))) : resolve()
     )
   );
@@ -2094,7 +2184,7 @@ function setEnvValues(txt, values) {
   for (const [k, v] of Object.entries(values)) {
     const re = new RegExp(`^#?[ \\t]*${k}=.*$`, 'm');
     const line = `${k}=${v}`;
-    txt = re.test(txt) ? txt.replace(re, line) : txt.replace(/\s*$/, '\n') + line + '\n';
+    txt = re.test(txt) ? txt.replace(re, () => line) : txt.replace(/\s*$/, '\n') + line + '\n'; // () => line: পাসওয়ার্ডের $& / $' যেন বিশেষ চিহ্ন না হয়
   }
   return txt;
 }
@@ -2193,7 +2283,7 @@ async function installLaravel(dest, name, dbName) {
     DB_PORT: String(port),
     DB_DATABASE: dbName,
     DB_USERNAME: 'root',
-    DB_PASSWORD: '',
+    DB_PASSWORD: mysqlRootPw(),
   };
   fs.mkdirSync(env.COMPOSER_HOME, { recursive: true });
   const label = tr('Laravel বানানো হচ্ছে', 'Creating Laravel');
@@ -2215,7 +2305,7 @@ async function installLaravel(dest, name, dbName) {
       DB_PORT: port,
       DB_DATABASE: dbName,
       DB_USERNAME: 'root',
-      DB_PASSWORD: '',
+      DB_PASSWORD: envVal(mysqlRootPw()),
       SESSION_LIFETIME: sessMin,
     })
   );
@@ -2391,7 +2481,7 @@ ipcMain.handle('site:create', async (_event, kind, rawName) => {
       if (!live) message += tr(' (.test ঠিকানার জন্য ওয়েব সার্ভারও চালু করুন)', ' (also start a web server for the .test address)');
     } else if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে কাজ করবে)', ' (it will work once a web server is started)');
     if (!h.ok) message += hostsFailNote(h);
-    if (kind === 'wordpress' || kind === 'laravel') message += tr('। ডাটাবেস: ' + name.replace(/-/g, '_') + ' (root, খালি পাসওয়ার্ড)', '. Database: ' + name.replace(/-/g, '_') + ' (root, empty password)');
+    if (kind === 'wordpress' || kind === 'laravel') message += tr('। ডাটাবেস: ' + name.replace(/-/g, '_') + (mysqlRootPw() ? ' (root, সেট করা পাসওয়ার্ড)' : ' (root, খালি পাসওয়ার্ড)'), '. Database: ' + name.replace(/-/g, '_') + (mysqlRootPw() ? ' (root, the password you set)' : ' (root, empty password)'));
     if (laravelInfo) {
       message += tr(`। Laravel .env-এ SESSION_LIFETIME=${laravelInfo.sessMin} মিনিট`, `. Laravel .env has SESSION_LIFETIME=${laravelInfo.sessMin} min`);
       if (laravelInfo.turnedOn.length) message += tr(`। চালু করা হয়েছে: ${laravelInfo.turnedOn.join(', ')} (ওয়েব সার্ভার একবার বন্ধ করে চালু করুন)`, `. Turned on: ${laravelInfo.turnedOn.join(', ')} (stop and start the web server once)`);
@@ -2926,6 +3016,9 @@ ipcMain.handle('adminer:open', async (_event, kind) => {
   }
   await shell.openExternal(siteUrl(ADMINER_DOMAIN) + '/' + query);
   const warn = db && !dbRun[kind] ? tr(` (সতর্কতা: ${db.label} এখন চালু নেই, আগে Start করুন)`, ` (warning: ${db.label} is not running, start it first)`) : '';
+  if (kind === 'mysql' && mysqlRootPw()) {
+    return tr(`Adminer ব্রাউজারে খোলা হয়েছে${warn}। Username root, Password-এ আপনার সেট করা পাসওয়ার্ড দিন।`, `Adminer opened in the browser${warn}. Username root, and enter the password you set.`);
+  }
   return tr(`Adminer ব্রাউজারে খোলা হয়েছে${warn}। লগইন ফর্মে শুধু "Login" চাপুন।`, `Adminer opened in the browser${warn}. Just click "Login" on the form.`);
 });
 
@@ -3524,7 +3617,7 @@ app.on('before-quit', () => {
   for (const [id, run] of Object.entries(dbRun)) {
     const cmd = DATABASES[id].shutdownCmd(SERVICES[DATABASES[id].svcId], run.port);
     try {
-      execFileSync(cmd.exe, cmd.args, { timeout: 15000, windowsHide: true });
+      execFileSync(cmd.exe, cmd.args, { timeout: 15000, windowsHide: true, env: cmd.env || process.env });
     } catch {}
     killTree(run.proc.pid);
   }

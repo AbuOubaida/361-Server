@@ -459,6 +459,22 @@
             </div>
           </div>
 
+          <div class="section-title" data-i18n="settings.db.section">ডাটাবেস</div>
+          <div class="card">
+            <div class="row first">
+              <div>
+                <b data-i18n="settings.pw.title">MySQL root পাসওয়ার্ড</b>
+                <div class="hint" id="mysqlPwState"></div>
+              </div>
+            </div>
+            <div class="row">
+              <input id="mysqlPw" type="password" maxlength="64" autocomplete="new-password" data-i18n-ph="settings.pw.ph" placeholder="নতুন পাসওয়ার্ড" style="width:auto; flex:1; min-width:160px;">
+              <button id="mysqlPwSet" class="btn sm primary" data-i18n="settings.pw.set">পাসওয়ার্ড বসান</button>
+              <button id="mysqlPwClear" class="btn sm danger" data-i18n="settings.pw.clear">পাসওয়ার্ড সরান</button>
+            </div>
+            <div class="hint" data-i18n="settings.pw.hint">MySQL চালু থাকতে হবে। বসালে নতুন WordPress/Laravel সাইট, phpMyAdmin ও MySQL বন্ধ করা এই পাসওয়ার্ডে চলবে, আর পুরনো WordPress (wp-config.php) ও Laravel (.env) সাইটেরও পাসওয়ার্ড নিজে বদলে দেওয়া হবে। অন্য Node/হাতে বানানো প্রজেক্ট আপনাকে নিজে ঠিক করতে হবে। Adminer-এ লগইনে এই পাসওয়ার্ড দিন। পাসওয়ার্ড সেটিংস ফাইলে (settings.json) সাধারণ লেখায় থাকে। প্রতি MySQL ভার্সনের পাসওয়ার্ড আলাদা।</div>
+          </div>
+
           <div class="section-title" data-i18n="settings.lang.section">ভাষা</div>
           <div class="card">
             <div class="card-title" data-i18n="settings.lang.title">অ্যাপের ভাষা</div>
