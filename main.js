@@ -2307,23 +2307,37 @@ ipcMain.handle('site:setEnabled', async (_event, domain, on) => {
     return { ok: false, message: tr('সমস্যা: সাইটটা পাওয়া যায়নি', 'Error: site not found') };
   }
   busy = true;
+  let resume = false;
   try {
     settings.siteDisabled = { ...(settings.siteDisabled || {}) };
     if (on) delete settings.siteDisabled[domain];
     else settings.siteDisabled[domain] = true;
     saveSettings(settings);
-    if (!on && nodeRun[domain]) await stopNodeApp(domain); // বন্ধ করা Node সাইটের অ্যাপও থামানো
+    if (!on && nodeRun[domain]) {
+      if (nodeRun[domain].task === 'run') nodeResume.add(domain); // চলছিল, তাই চালু করলে আবার চালাব
+      await stopNodeApp(domain); // বন্ধ করা Node সাইটের অ্যাপও থামানো
+    }
     const sites = withToolSites(scanSites());
     const h = await syncHosts(sites);
     const live = await reloadRunning(sites);
     let message = on ? tr(`${domain} চালু করা হয়েছে`, `${domain} enabled`) : tr(`${domain} বন্ধ করা হয়েছে`, `${domain} disabled`);
     if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে প্রযোজ্য হবে)', ' (applies when a web server is started)');
     if (!h.ok) message += hostsFailNote(h);
+    if (on && nodeResume.delete(domain)) {
+      resume = true;
+      message += tr(' · অ্যাপ আবার চালু হচ্ছে...', ' · restarting its app...');
+    }
     return { ok: true, message };
   } catch (err) {
     return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
   } finally {
     busy = false;
+    // busy ছাড়ার পরে চালাই (startNodeApp/ensureNodeRuntime নিজেও busy ব্যবহার করে); UI আটকে না রেখে ব্যাকগ্রাউন্ডে
+    if (resume) {
+      startNodeApp(domain)
+        .then((r) => sendStatus(r.message))
+        .catch((e) => sendStatus(tr('অ্যাপ আবার চালু ব্যর্থ: ', 'Restarting the app failed: ') + e.message));
+    }
   }
 });
 
@@ -2818,6 +2832,7 @@ ipcMain.handle('open:url', (_event, url) => {
 // অ্যাপ নিজের পোর্টে চলে (PORT ভেরিয়েবলে পাঠানো হয়), <নাম>.test ঠিকানা Nginx/Apache-র reverse proxy দিয়ে সেখানে যায়।
 // Node অ্যাপ ওয়েব সার্ভারের সাথে নিজে থেকে চালু/বন্ধ হয় না; অ্যাপ বন্ধ করলে বা অ্যাপ কোয়িট করলে এগুলোও বন্ধ হয়।
 const nodeRun = {}; // domain -> { proc, task: 'run' | 'install', port, exit: Promise<code> }
+const nodeResume = new Set(); // যে সাইট বন্ধ করার সময় অ্যাপ চলছিল: আবার চালু (On) করলে অ্যাপও নিজে চালু হবে (শুধু এই রান, সেভ হয় না)
 const nodeLogs = {}; // domain -> [লাইন...] (প্রসেস বন্ধ হলেও লগ থাকে, যাতে এরর পড়া যায়)
 const NODE_LOG_MAX = 400;
 const nodeBusyMsg = () => tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...');
