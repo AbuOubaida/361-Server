@@ -7,6 +7,7 @@ const net = require('net');
 const extract = require('extract-zip');
 const crypto = require('crypto');
 const os = require('os');
+const dns = require('dns');
 
 // ====== এখানে আপনার লিংক বসান ======
 const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
@@ -323,6 +324,23 @@ const siteReadTimeout = (domain) => {
   if (ini.max_execution_time === undefined) return 300;
   const n = parseInt(ini.max_execution_time, 10);
   return n === 0 ? 3600 : Math.max(300, n + 30);
+};
+
+// ---------- পাবলিক ডোমেইন (সাইট ধরে, Step B1: শুধু server_name/ServerAlias; SSL পরের ধাপে) ----------
+// settings.sitePublic = { '<domain>': ['360.example.com', ...] }
+const PUBLIC_HOST_RE = /^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const PUBLIC_BAD_TLD = /\.(test|local|localhost|internal|lan|invalid|example)$/;
+const sitePublicNames = (domain) => {
+  const cur = settings.sitePublic && settings.sitePublic[domain];
+  return Array.isArray(cur) ? cur.filter((h) => typeof h === 'string' && PUBLIC_HOST_RE.test(h) && !PUBLIC_BAD_TLD.test(h)) : [];
+};
+// সাইটের মূল (শেয়ার নয় এমন) server ব্লকে পাবলিক নামগুলো যোগ করে
+const withPublicNames = (text, domain) => {
+  const names = sitePublicNames(domain);
+  if (!names.length) return text;
+  return text
+    .replace(`    server_name ${domain};`, `    server_name ${domain} ${names.join(' ')};`)
+    .replace(`  ServerName ${domain}\n`, `  ServerName ${domain}\n  ServerAlias ${names.join(' ')}\n`);
 };
 
 // upload_max_filesize / post_max_size / max_input_vars: PHP স্ক্রিপ্ট চলার আগেই পড়া হয়, তাই ini_set চলে না।
@@ -730,6 +748,8 @@ function disabledBlocks(sites, kind) {
   return out;
 }
 
+const pubN = (text, s) => (s.system ? text : withPublicNames(text, s.domain));
+
 function nginxEntries(sites, webPort, upOf) {
   const defUp = phpUpstream(defaultPhpVersion());
   return [
@@ -739,7 +759,7 @@ function nginxEntries(sites, webPort, upOf) {
       .map((s) => {
         const mk = (port, shared = false) => (s.node ? nginxNodeServer(s.domain, nodePortOf(s.domain), port, [nginxExtraInclude(s.domain)], shared ? s.domain : '') : nginxServer(s.domain, s.root, upOf(s), false, port, !!s.system, s.system ? [] : [nginxExtraInclude(s.domain)], s.system ? 0 : siteSessionMin(s.domain)));
         // LAN শেয়ার চালু থাকলে একই সাইটের আরেকটা server ব্লক শেয়ার-পোর্টে
-        return { file: `${s.domain}.conf`, extras: s.system ? '' : s.domain, text: shareable(s) ? mk(webPort) + '\n' + mk(sharePortOf(s.domain), true) : mk(webPort) };
+        return { file: `${s.domain}.conf`, extras: s.system ? '' : s.domain, text: shareable(s) ? pubN(mk(webPort), s) + '\n' + mk(sharePortOf(s.domain), true) : pubN(mk(webPort), s) };
       }),
   ];
 }
@@ -778,7 +798,7 @@ function apacheEntries(sites, webPort) {
       .filter((x) => !x.disabled)
       .map((x) => {
         const mk = (port, shared = false) => (x.node ? apacheNodeServer(x.domain, nodePortOf(x.domain), port, [apacheExtraInclude(x.domain)], shared ? x.domain : '') : apacheServer(x.domain, x.root, phpOfSite(x), port, !!x.system, x.system ? [] : [apacheExtraInclude(x.domain)], x.system ? 0 : siteSessionMin(x.domain)));
-        return { file: `${x.domain}.conf`, extras: x.system ? '' : x.domain, text: shareable(x) ? mk(webPort) + '\n' + mk(sharePortOf(x.domain), true) : mk(webPort) };
+        return { file: `${x.domain}.conf`, extras: x.system ? '' : x.domain, text: shareable(x) ? pubN(mk(webPort), x) + '\n' + mk(sharePortOf(x.domain), true) : pubN(mk(webPort), x) };
       }),
   ];
 }
@@ -2508,6 +2528,7 @@ const publicSites = (sites) => [
     phpPinned: system ? '' : pinnedPhp(domain),
     sessionMin: system ? 0 : siteSessionMin(domain),
     phpIni: system ? {} : { ...siteIni(domain), ...siteUserIni(domain) },
+    publicNames: system ? [] : sitePublicNames(domain),
     share: system ? { on: false, port: 0 } : { on: sharePortOf(domain) > 0, port: (shareCfg(domain) || {}).port || 0 },
   })),
 ];
@@ -3295,6 +3316,87 @@ ipcMain.handle('site:setPhpIni', async (_event, domain, cfg) => {
   } finally {
     busy = false;
   }
+});
+
+// ---------- পাবলিক ডোমেইন (Step B1) ----------
+// নামগুলো সাইটের server_name/ServerAlias-এ যোগ হয় (পোর্ট 80)। SSL/সার্টিফিকেট পরের ধাপে।
+ipcMain.handle('site:setPublic', async (_event, domain, text) => {
+  if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+  const sites = withToolSites(scanSites());
+  if (!sites.some((s) => s.domain === domain && !s.system)) {
+    return { ok: false, message: tr('সমস্যা: সাইটটা পাওয়া যায়নি', 'Error: site not found') };
+  }
+  const names = [...new Set(String(text || '').toLowerCase().split(/[\s,;]+/).map((x) => x.trim().replace(/\.$/, '')).filter(Boolean))];
+  if (names.length > 10) return { ok: false, message: tr('সমস্যা: একটা সাইটে সর্বোচ্চ ১০টা নাম', 'Error: at most 10 names per site') };
+  for (const h of names) {
+    if (!PUBLIC_HOST_RE.test(h) || PUBLIC_BAD_TLD.test(h)) {
+      return { ok: false, message: tr(`সমস্যা: "${h}" ঠিক ডোমেইন নাম নয় (যেমন app.example.com; .test/.local চলবে না, http:// বা পোর্ট লিখবেন না)`, `Error: "${h}" is not a valid public domain name (e.g. app.example.com; .test/.local are not allowed, no http:// or port)`) };
+    }
+    if (sites.some((s) => s.domain === h)) return { ok: false, message: tr(`সমস্যা: "${h}" নামে এই অ্যাপে আগে থেকেই একটা সাইট আছে`, `Error: a site named "${h}" already exists in this app`) };
+    const other = Object.entries(settings.sitePublic || {}).find(([d, list]) => d !== domain && Array.isArray(list) && list.includes(h));
+    if (other) return { ok: false, message: tr(`সমস্যা: "${h}" আগে থেকেই ${other[0]} সাইটে দেওয়া আছে`, `Error: "${h}" is already used by ${other[0]}`) };
+  }
+  busy = true;
+  try {
+    settings.sitePublic = { ...(settings.sitePublic || {}) };
+    if (names.length) settings.sitePublic[domain] = names;
+    else delete settings.sitePublic[domain];
+    saveSettings(settings);
+    const live = await reloadRunning(sites);
+    const label = names.length ? names.join(', ') : tr('কিছু নেই', 'none');
+    return {
+      ok: true,
+      message: live ? tr(`${domain}-এর পাবলিক নাম এখন: ${label}`, `${domain} public names are now: ${label}`) : tr(`${domain}-এর পাবলিক নাম (${label}) সেভ হয়েছে। সার্ভার চালু করলে কাজ করবে`, `Public names (${label}) saved for ${domain}. They apply when the server starts`),
+    };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
+// এই PC-র পাবলিক IP (দুটো সেবা, প্রথমটা না পেলে দ্বিতীয়টা)
+function fetchPublicIp() {
+  const get = (url) =>
+    new Promise((resolve) => {
+      const req = https.get(url, { timeout: 6000 }, (res) => {
+        let d = '';
+        res.on('data', (c) => (d += c));
+        res.on('end', () => resolve(/^\d{1,3}(\.\d{1,3}){3}$/.test(d.trim()) ? d.trim() : ''));
+      });
+      req.on('timeout', () => req.destroy());
+      req.on('error', () => resolve(''));
+    });
+  return get('https://api.ipify.org').then((ip) => ip || get('https://icanhazip.com'));
+}
+
+// DNS পরীক্ষা: নামগুলো 8.8.8.8 ও 1.1.1.1 দিয়ে খুঁজে এই PC-র পাবলিক IP-র সাথে মেলানো (কিছু বদলায় না)
+ipcMain.handle('site:checkPublic', async (_event, text) => {
+  const hosts = [...new Set(String(text || '').toLowerCase().split(/[\s,;]+/).map((x) => x.trim().replace(/\.$/, '')).filter(Boolean))].slice(0, 10);
+  if (!hosts.length) return { ok: false, message: tr('আগে নাম লিখুন', 'Enter a name first'), ip: '', hosts: [] };
+  const ip = await fetchPublicIp();
+  const resolvers = ['8.8.8.8', '1.1.1.1'].map((s) => {
+    const r = new dns.promises.Resolver({ timeout: 4000, tries: 1 });
+    r.setServers([s]);
+    return r;
+  });
+  const out = [];
+  for (const h of hosts) {
+    if (!PUBLIC_HOST_RE.test(h) || PUBLIC_BAD_TLD.test(h)) {
+      out.push({ host: h, status: 'invalid', ips: [] });
+      continue;
+    }
+    const found = new Set();
+    for (const r of resolvers) {
+      try {
+        for (const a of await r.resolve4(h)) found.add(a);
+      } catch {}
+    }
+    const ips = [...found];
+    const status = !ips.length ? 'none' : ip && ips.length === 1 && ips[0] === ip ? 'ok' : ip && ips.includes(ip) ? 'mixed' : ip ? 'wrong' : 'unknown';
+    out.push({ host: h, status, ips });
+  }
+  return { ok: true, ip, hosts: out, message: '' };
 });
 
 // সাইট ধরে সেশনের মেয়াদ (মিনিট; ফাঁকা/০ মানে ডিফল্ট)

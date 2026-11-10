@@ -395,6 +395,61 @@ function copyText(text) {
   ta.remove();
 }
 
+// পাবলিক ডোমেইন (Step B1): বাটন -> ডায়ালগ (নাম লেখা, DNS পরীক্ষা, সেভ)
+function publicBtn(s) {
+  const names = s.publicNames || [];
+  const btn = el('button', { className: 'btn sm', textContent: names.length ? t('pub.btnN', names.length) : t('pub.btn'), title: names.join('\n') });
+  btn.addEventListener('click', () => {
+    const dlg = el('dialog', { style: 'padding:18px; max-width:480px; border:1px solid rgba(128,128,128,.4); border-radius:10px;' });
+    const ta = el('textarea', { rows: 3, placeholder: 'app.example.com', value: names.join('\n') });
+    ta.style.width = '100%';
+    const res = el('div', { className: 'hint', style: 'margin-top:8px; word-break:break-all;' });
+    dlg.appendChild(el('b', { textContent: t('pub.title') + s.domain }));
+    dlg.appendChild(el('div', { className: 'hint', textContent: t('pub.hint') }));
+    dlg.appendChild(el('div', { style: 'margin:10px 0;' }, el('label', { style: 'display:block; font-weight:600; margin-bottom:3px;', textContent: t('pub.label') }), ta, res));
+    const check = el('button', { className: 'btn sm', textContent: t('pub.check') });
+    const save = el('button', { className: 'btn sm primary', textContent: t('pub.save') });
+    const cancel = el('button', { className: 'btn sm', textContent: t('pub.cancel') });
+    cancel.addEventListener('click', () => dlg.close());
+    check.addEventListener('click', () =>
+      work(check, async () => {
+        res.textContent = t('pub.checking');
+        const r = await window.api.checkSitePublic(ta.value);
+        res.textContent = '';
+        if (!r.ok) {
+          res.textContent = r.message;
+          return;
+        }
+        res.appendChild(el('div', { textContent: r.ip ? t('pub.myip', r.ip) : t('pub.noip') }));
+        for (const h of r.hosts) {
+          const ips = h.ips.join(', ');
+          const line = el('div', { textContent: t('pub.' + h.status, h.host, ips) });
+          line.style.color = h.status === 'ok' ? '#2e9d4f' : '#d1493f';
+          res.appendChild(line);
+        }
+      })
+    );
+    save.addEventListener('click', () =>
+      work(save, async () => {
+        const r = await window.api.setSitePublic(s.domain, ta.value);
+        setStatus(r.message);
+        if (r.ok) {
+          dlg.close();
+          await loadSites();
+        } else {
+          res.textContent = r.message;
+          res.style.color = '#d1493f';
+        }
+      })
+    );
+    dlg.appendChild(el('div', { style: 'display:flex; gap:8px; justify-content:flex-end; margin-top:12px;' }, check, cancel, save));
+    dlg.addEventListener('close', () => dlg.remove());
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  });
+  return btn;
+}
+
 // LAN-এ শেয়ার: সুইচ + পোর্ট; চালু থাকলে http://<IP>:<পোর্ট> ও Copy
 function netCell(s, net) {
   if (s.system || s.name === 'localhost' || !s.enabled) return el('td', { className: 'php-text', textContent: '—' });
@@ -425,6 +480,7 @@ function netCell(s, net) {
       kids.push(el('div', { className: 'hint', textContent: t('share.noip') }));
     }
   }
+  kids.push(el('div', { style: 'margin-top:6px;' }, publicBtn(s)));
   return el('td', {}, ...kids);
 }
 

@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld('api', {
   setSiteSession: (domain, minutes) => ipcRenderer.invoke('site:setSession', domain, minutes),
   setSitePhpIni: (domain, cfg) => ipcRenderer.invoke('site:setPhpIni', domain, cfg),
   setSiteShare: (domain, on, port) => ipcRenderer.invoke('site:setShare', domain, on, port),
+  setSitePublic: (domain, text) => ipcRenderer.invoke('site:setPublic', domain, text),
+  checkSitePublic: (text) => ipcRenderer.invoke('site:checkPublic', text),
   netInfo: () => ipcRenderer.invoke('net:info'),
   allowFirewall: () => ipcRenderer.invoke('fw:allow'),
   setSiteEnabled: (domain, on) => ipcRenderer.invoke('site:setEnabled', domain, on),
