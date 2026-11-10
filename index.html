@@ -408,7 +408,7 @@
           <div class="card" id="shareBar"></div>
           <div class="card" style="padding: 8px 8px 6px; overflow-x: auto;">
             <table>
-              <thead><tr><th style="width:56px" data-i18n="sites.colEnabled">চালু</th><th style="width:28%" data-i18n="sites.colAddr">ঠিকানা</th><th data-i18n="sites.colFolder">ফোল্ডার</th><th style="width:150px" data-i18n="sites.colPhp">PHP</th><th style="width:120px" data-i18n="sites.colSession">সেশন (মিনিট)</th><th style="width:230px" data-i18n="sites.colNet">নেটওয়ার্ক (LAN)</th><th style="width:330px" data-i18n="sites.colConf">কনফিগ</th></tr></thead>
+              <thead><tr><th style="width:56px" data-i18n="sites.colEnabled">চালু</th><th style="width:28%" data-i18n="sites.colAddr">ঠিকানা</th><th data-i18n="sites.colFolder">ফোল্ডার</th><th style="width:150px" data-i18n="sites.colPhp">PHP</th><th style="width:120px" data-i18n="sites.colSession">সেশন (মিনিট)</th><th style="width:120px" data-i18n="sites.colLimits">PHP সীমা</th><th style="width:230px" data-i18n="sites.colNet">নেটওয়ার্ক (LAN)</th><th style="width:330px" data-i18n="sites.colConf">কনফিগ</th></tr></thead>
               <tbody id="sitesBody"></tbody>
             </table>
           </div>
@@ -432,6 +432,13 @@
             </div>
             <div class="hint" data-i18n="ext.hint">একটা PHP ভার্সন বেছে তার extension চালু/বন্ধ করুন। এটা ওই ভার্সনের সব সাইটে একই থাকে। বদলের পর ওয়েব সার্ভার বন্ধ করে আবার চালু করতে হবে। mbstring, openssl, curl, mysqli, pdo_mysql, fileinfo বন্ধ করলে WordPress/Laravel চলবে না।</div>
             <div id="extGrid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:6px 12px; margin-top:12px;"></div>
+          </div>
+          <div class="card" id="cfgCard">
+            <div class="row first">
+              <b data-i18n="cfg.title">কনফিগ ফাইল (php.ini, my.ini ...)</b>
+            </div>
+            <div class="hint" data-i18n="cfg.hint">ফাইলগুলো Notepad-এ খোলে।</div>
+            <div id="cfgList"></div>
           </div>
         </section>
 
@@ -472,7 +479,35 @@
               <button id="mysqlPwSet" class="btn sm primary" data-i18n="settings.pw.set">পাসওয়ার্ড বসান</button>
               <button id="mysqlPwClear" class="btn sm danger" data-i18n="settings.pw.clear">পাসওয়ার্ড সরান</button>
             </div>
+            <div class="row">
+              <button id="mysqlPwShow" class="btn sm" data-i18n="settings.pw.show">👁 পাসওয়ার্ড দেখান</button>
+              <button id="mysqlPwCopy" class="btn sm" data-i18n="settings.pw.copy">কপি</button>
+              <button id="mysqlPwReset" class="btn sm" data-i18n="settings.pw.reset">ভুলে গেছেন? রিসেট</button>
+              <code id="mysqlPwVal" style="display:none; user-select:all;"></code>
+            </div>
+            <div class="hint" data-i18n="settings.pw.forgotMy">পাসওয়ার্ড ভুলে গেলে রিসেট করুন।</div>
             <div class="hint" data-i18n="settings.pw.hint">MySQL চালু থাকতে হবে। বসালে নতুন WordPress/Laravel সাইট, phpMyAdmin ও MySQL বন্ধ করা এই পাসওয়ার্ডে চলবে, আর পুরনো WordPress (wp-config.php) ও Laravel (.env) সাইটেরও পাসওয়ার্ড নিজে বদলে দেওয়া হবে। অন্য Node/হাতে বানানো প্রজেক্ট আপনাকে নিজে ঠিক করতে হবে। Adminer-এ লগইনে এই পাসওয়ার্ড দিন। পাসওয়ার্ড সেটিংস ফাইলে (settings.json) সাধারণ লেখায় থাকে। প্রতি MySQL ভার্সনের পাসওয়ার্ড আলাদা।</div>
+          </div>
+          <div class="card">
+            <div class="row first">
+              <div>
+                <b data-i18n="settings.pg.title">PostgreSQL পাসওয়ার্ড (ইউজার postgres)</b>
+                <div class="hint" id="pgPwState"></div>
+              </div>
+            </div>
+            <div class="row">
+              <input id="pgPw" type="password" maxlength="64" autocomplete="new-password" data-i18n-ph="settings.pw.ph" placeholder="নতুন পাসওয়ার্ড" style="width:auto; flex:1; min-width:160px;">
+              <button id="pgPwSet" class="btn sm primary" data-i18n="settings.pw.set">পাসওয়ার্ড বসান</button>
+              <button id="pgPwClear" class="btn sm danger" data-i18n="settings.pw.clear">পাসওয়ার্ড সরান</button>
+            </div>
+            <div class="row">
+              <button id="pgPwShow" class="btn sm" data-i18n="settings.pw.show">👁 পাসওয়ার্ড দেখান</button>
+              <button id="pgPwCopy" class="btn sm" data-i18n="settings.pw.copy">কপি</button>
+              <button id="pgPwReset" class="btn sm" data-i18n="settings.pw.reset">ভুলে গেছেন? রিসেট</button>
+              <code id="pgPwVal" style="display:none; user-select:all;"></code>
+            </div>
+            <div class="hint" data-i18n="settings.pw.forgotPg">পাসওয়ার্ড ভুলে গেলে রিসেট করুন।</div>
+            <div class="hint" data-i18n="settings.pg.hint">PostgreSQL চালু থাকতে হবে।</div>
           </div>
 
           <div class="section-title" data-i18n="settings.lang.section">ভাষা</div>

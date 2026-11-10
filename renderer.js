@@ -336,6 +336,54 @@ function sessionCell(s) {
   return el('td', {}, inp);
 }
 
+// সাইট ধরে PHP সীমা: বাটন চাপলে ছোট ডায়ালগ (max_execution_time, memory_limit, max_input_time, display_errors)
+function limitsCell(s) {
+  if (s.system || s.node || s.name === 'localhost') return el('td', { className: 'php-text', textContent: '—' });
+  const cur = s.phpIni || {};
+  const n = Object.keys(cur).length;
+  const btn = el('button', { className: 'btn sm', textContent: n ? t('limits.btnCustom') + ' (' + n + ')' : t('limits.btnDefault'), title: Object.entries(cur).map(([k, v]) => k + '=' + v).join('\n') });
+  btn.addEventListener('click', () => {
+    const dlg = el('dialog', { style: 'padding:18px; max-width:460px; border:1px solid rgba(128,128,128,.4); border-radius:10px;' });
+    const fields = [
+      ['max_execution_time', 'limits.maxExec', '600'],
+      ['memory_limit', 'limits.memory', '512M'],
+      ['max_input_time', 'limits.maxInput', '120'],
+      ['display_errors', 'limits.display', 'Off'],
+      ['upload_max_filesize', 'limits.upload', '512M'],
+      ['post_max_size', 'limits.post', '512M'],
+      ['max_input_vars', 'limits.vars', '5000'],
+    ];
+    const inputs = {};
+    dlg.appendChild(el('b', { textContent: t('limits.title') + s.domain }));
+    dlg.appendChild(el('div', { className: 'hint', textContent: t('limits.hint') }));
+    for (const [k, label, ph] of fields) {
+      inputs[k] = el('input', { type: 'text', placeholder: ph, value: cur[k] || '' });
+      inputs[k].style.width = '100%';
+      dlg.appendChild(el('div', { style: 'margin:10px 0;' }, el('label', { style: 'display:block; font-weight:600; margin-bottom:3px;', textContent: label.startsWith('limits.') ? t(label) : label }), inputs[k]));
+    }
+    const save = el('button', { className: 'btn sm primary', textContent: t('limits.save') });
+    const cancel = el('button', { className: 'btn sm', textContent: t('limits.cancel') });
+    cancel.addEventListener('click', () => dlg.close());
+    save.addEventListener('click', () =>
+      work(save, async () => {
+        const cfg = {};
+        for (const [k] of fields) cfg[k] = inputs[k].value.trim();
+        const r = await window.api.setSitePhpIni(s.domain, cfg);
+        setStatus(r.message);
+        if (r.ok) {
+          dlg.close();
+          await loadSites();
+        }
+      })
+    );
+    dlg.appendChild(el('div', { style: 'display:flex; gap:8px; justify-content:flex-end; margin-top:12px;' }, cancel, save));
+    dlg.addEventListener('close', () => dlg.remove());
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  });
+  return el('td', {}, btn);
+}
+
 function copyText(text) {
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
@@ -521,6 +569,7 @@ async function renderSites(sites, php) {
       folderCell(s),
       phpCell(s, php),
       sessionCell(s),
+      limitsCell(s),
       netCell(s, net),
       confCell(s, custom)
     );
@@ -528,7 +577,7 @@ async function renderSites(sites, php) {
     body.appendChild(row);
   }
   if (sites.filter((s) => !s.system).length <= 1) {
-    body.appendChild(el('tr', {}, el('td', { className: 'empty', colSpan: 7, textContent: t('sites.empty') })));
+    body.appendChild(el('tr', {}, el('td', { className: 'empty', colSpan: 8, textContent: t('sites.empty') })));
   }
 }
 async function loadSites() {
@@ -830,8 +879,44 @@ $('extVer').addEventListener('change', () => {
   loadExt();
 });
 
+// ---------- কনফিগ ফাইল কার্ড ----------
+async function loadCfg() {
+  const box = $('cfgList');
+  if (!box) return;
+  let list = [];
+  try {
+    list = await window.api.cfgList();
+  } catch {
+    return;
+  }
+  box.textContent = '';
+  for (const c of list) {
+    const open = el('button', { className: 'btn sm accent', textContent: t('cfg.open') });
+    open.disabled = !c.canOpen;
+    open.addEventListener('click', () =>
+      work(open, async () => {
+        const r = await window.api.cfgOpen(c.id);
+        setStatus(r.message);
+      })
+    );
+    const folder = el('button', { className: 'btn sm', textContent: '📁', title: t('cfg.folder') });
+    folder.addEventListener('click', () => window.api.cfgFolder(c.id));
+    const badgeCls = c.kind === 'yours' ? ' on' : c.kind === 'auto' ? ' custom' : ' tool';
+    box.appendChild(
+      el(
+        'div',
+        { style: 'padding:10px 0; border-top:1px solid rgba(128,128,128,.25);' },
+        el('div', { style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, el('b', { textContent: c.label }), el('span', { className: 'badge' + badgeCls, textContent: t('cfg.kind.' + c.kind) }), el('span', { style: 'flex:1' }), open, folder),
+        el('div', { style: 'word-break:break-all; font-size:12px; margin-top:4px; opacity:.8;', textContent: c.file + (c.exists ? '' : ' ' + t('cfg.notYet')) }),
+        el('div', { className: 'hint', textContent: c.note })
+      )
+    );
+  }
+}
+
 function renderTools(tools) {
   loadExt();
+  loadCfg();
   const box = $('toolsList');
   box.textContent = '';
   for (const tl of tools) {
@@ -930,7 +1015,10 @@ async function refreshAll() {
   try {
     applyWeb(await window.api.webStatus());
     await loadDbs();
-    if (currentPage === 'settings') await loadMysqlPw();
+    if (currentPage === 'settings') {
+      await loadMysqlPw();
+      await loadPgPw();
+    }
     if (currentPage === 'sites') await loadNodeSites(); // Node অ্যাপ চলছে/বন্ধ অবস্থা হালনাগাদ
   } catch {}
 }
@@ -942,6 +1030,32 @@ async function loadMysqlPw() {
     $('mysqlPwState').textContent = (r.hasPw ? t('settings.pw.isSet') : t('settings.pw.isEmpty')) + ' · ' + (r.running ? t('settings.pw.running') : t('settings.pw.stopped'));
   } catch {}
 }
+async function loadPgPw() {
+  try {
+    const r = await window.api.pgPwState();
+    $('pgPwState').textContent = (r.hasPw ? t('settings.pw.isSet') : t('settings.pw.isEmpty')) + ' · ' + (r.running ? t('settings.pg.running') : t('settings.pg.stopped'));
+  } catch {}
+}
+$('pgPwSet').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    const pw = $('pgPw').value;
+    if (!pw) return setStatus(t('settings.pw.enter'));
+    const r = await window.api.pgSetPassword(pw);
+    setStatus(r.message);
+    if (r.ok) $('pgPw').value = '';
+    await loadPgPw();
+    loadDbs();
+  })
+);
+$('pgPwClear').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    if (!confirm(t('settings.pg.confirmClear'))) return;
+    const r = await window.api.pgSetPassword('');
+    setStatus(r.message);
+    await loadPgPw();
+    loadDbs();
+  })
+);
 $('mysqlPwSet').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
     const pw = $('mysqlPw').value;
@@ -963,6 +1077,52 @@ $('mysqlPwClear').addEventListener('click', (e) =>
   })
 );
 
+// ---------- পাসওয়ার্ড দেখান / কপি / ভুলে গেলে রিসেট (MySQL ও PostgreSQL) ----------
+for (const c of [
+  { p: 'mysql', kind: 'mysql', reset: (pw) => window.api.mysqlResetPassword(pw), confirmKey: 'settings.pw.resetConfirmMy', reload: () => loadMysqlPw() },
+  { p: 'pg', kind: 'postgres', reset: (pw) => window.api.pgSetPassword(pw, true), confirmKey: 'settings.pw.resetConfirmPg', reload: () => loadPgPw() },
+]) {
+  const val = $(c.p + 'PwVal');
+  const showBtn = $(c.p + 'PwShow');
+  let hideTimer;
+  const hide = () => {
+    clearTimeout(hideTimer);
+    val.style.display = 'none';
+    val.textContent = '';
+    showBtn.textContent = t('settings.pw.show');
+  };
+  showBtn.addEventListener('click', () =>
+    work(showBtn, async () => {
+      if (val.style.display !== 'none') return hide();
+      const pw = await window.api.getDbPw(c.kind);
+      if (!pw) return setStatus(t('settings.pw.none'));
+      val.textContent = pw;
+      val.style.display = '';
+      showBtn.textContent = t('settings.pw.hide');
+      hideTimer = setTimeout(hide, 15000); // ১৫ সেকেন্ড পরে নিজে লুকিয়ে যায়
+    })
+  );
+  $(c.p + 'PwCopy').addEventListener('click', (e) =>
+    work(e.currentTarget, async () => {
+      const pw = await window.api.getDbPw(c.kind);
+      if (!pw) return setStatus(t('settings.pw.none'));
+      await copyText(pw);
+      setStatus(t('settings.pw.copied'));
+    })
+  );
+  $(c.p + 'PwReset').addEventListener('click', (e) =>
+    work(e.currentTarget, async () => {
+      const pw = $(c.p + 'Pw').value;
+      if (!confirm(t(c.confirmKey) + (pw ? '' : '\n\n' + t('settings.pw.resetEmpty')))) return;
+      const r = await c.reset(pw);
+      setStatus(r.message);
+      if (r.ok) $(c.p + 'Pw').value = '';
+      await c.reload();
+      loadDbs();
+    })
+  );
+}
+
 applyStatic();
 window.api.setLang(LANG); // মনে রাখা ভাষা main.js-কেও জানানো (বার্তা ও ডায়ালগের জন্য)
 window.api.getWww().then((p) => ($('wwwPath').textContent = p));
@@ -970,5 +1130,6 @@ window.api.getRoot().then((p) => ($('rootPath').textContent = p));
 window.api.getPort().then((p) => (portInput.value = p));
 loadSites();
 loadMysqlPw();
+loadPgPw();
 refreshAll();
 setInterval(refreshAll, 4000); // চলা/বন্ধ অবস্থা নিজে থেকে হালনাগাদ

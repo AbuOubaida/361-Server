@@ -142,6 +142,33 @@ const mysqlIni = () => {
   const v = activeVersion('mysql');
   return path.join(ROOT_DIR, 'data', v.isDefault ? 'my.ini' : `my-${v.version}.ini`);
 };
+// আপনার নিজের MySQL সেটিং: my.ini প্রতিবার নতুন লেখা হয়, কিন্তু এই ফাইল অ্যাপ কখনো বদলায় না (my.ini এটাকে !include করে)
+const mysqlExtraIni = () => {
+  const v = activeVersion('mysql');
+  return path.join(ROOT_DIR, 'data', v.isDefault ? 'my-extra.ini' : `my-extra-${v.version}.ini`);
+};
+function ensureMysqlExtra() {
+  const f = mysqlExtraIni();
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  if (!fs.existsSync(f)) {
+    fs.writeFileSync(
+      f,
+      [
+        '# Server 360 - your own MySQL settings. The app never changes this file.',
+        '# (my.ini is rewritten on every MySQL start and includes this file at the end.)',
+        '# Write options under [mysqld], save, then restart MySQL.',
+        '# A mistake here (or changing datadir/port) can stop MySQL from starting.',
+        '[mysqld]',
+        '# max_connections=200',
+        '# max_allowed_packet=256M',
+        '# innodb_buffer_pool_size=512M',
+        '# sql_mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION',
+        '',
+      ].join('\n')
+    );
+  }
+  return f;
+}
 
 function makeService(id, label, url, folder, exeRelPath, opts = {}) {
   TOOL_DEFAULTS[id] = { version: opts.version || '', folder, url };
@@ -193,6 +220,7 @@ function enableExtensions(txt) {
   setIni('upload_tmp_dir', tmpBase + '/upload');
   setIni('sys_temp_dir', tmpBase);
   setIni('auto_prepend_file', ensureSitePrepend(tmpBase));
+  setIni('user_ini.cache_ttl', '5');
   // একই extension দুইবার লোড হওয়া এড়াতে ডুপ্লিকেট লাইন বাদ
   const seen = new Set();
   return txt
@@ -269,6 +297,84 @@ const siteSessionMin = (domain) => {
   const n = parseInt(settings.siteSession && settings.siteSession[domain], 10);
   return Number.isInteger(n) && n >= 1 ? n : 0;
 };
+// সাইট ধরে PHP সীমা: settings.sitePhpIni = { '<domain>': { max_execution_time, max_input_time, memory_limit, display_errors } }
+// শুধু যেগুলো ini_set দিয়ে বদলানো যায় (upload_max_filesize/post_max_size এখানে নেই, ওগুলো PHP স্ক্রিপ্ট চলার আগেই পড়া হয়)।
+const PHP_INI_KEYS = {
+  max_execution_time: /^\d{1,6}$/,
+  max_input_time: /^(-1|\d{1,6})$/,
+  memory_limit: /^(-1|\d{1,5}[KMGkmg])$/,
+  display_errors: /^(On|Off)$/,
+};
+const siteIni = (domain) => {
+  const cur = (settings.sitePhpIni && settings.sitePhpIni[domain]) || {};
+  const out = {};
+  for (const [k, re] of Object.entries(PHP_INI_KEYS)) {
+    if (cur[k] !== undefined && re.test(String(cur[k]))) out[k] = String(cur[k]);
+  }
+  return out;
+};
+const siteIniEnv = (domain) =>
+  Object.entries(siteIni(domain))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(';');
+// Nginx-এর fastcgi_read_timeout যেন max_execution_time-এর আগে অনুরোধ না কাটে
+const siteReadTimeout = (domain) => {
+  const ini = siteIni(domain);
+  if (ini.max_execution_time === undefined) return 300;
+  const n = parseInt(ini.max_execution_time, 10);
+  return n === 0 ? 3600 : Math.max(300, n + 30);
+};
+
+// upload_max_filesize / post_max_size / max_input_vars: PHP স্ক্রিপ্ট চলার আগেই পড়া হয়, তাই ini_set চলে না।
+// সাইটের public ফোল্ডারে অ্যাপের চিহ্নিত .user.ini লেখা হয় (php-cgi এটা পড়ে; php.ini-তে user_ini.cache_ttl = 5)।
+// নিজের .user.ini থাকলে (চিহ্ন ছাড়া) অ্যাপ সেটা ছোঁয় না।
+const PHP_USER_INI_KEYS = {
+  upload_max_filesize: /^(0|\d{1,6}[KMGkmg]?)$/,
+  post_max_size: /^(0|\d{1,6}[KMGkmg]?)$/,
+  max_input_vars: /^\d{1,6}$/,
+};
+const USER_INI_MARK = '; Server 360 managed file';
+const siteUserIni = (domain) => {
+  const cur = (settings.sitePhpIni && settings.sitePhpIni[domain]) || {};
+  const out = {};
+  for (const [k, re] of Object.entries(PHP_USER_INI_KEYS)) {
+    if (cur[k] !== undefined && re.test(String(cur[k]))) out[k] = String(cur[k]);
+  }
+  return out;
+};
+const sizeBytes = (v) => {
+  const m = /^(\d+)([KMGkmg]?)$/.exec(String(v));
+  if (!m) return NaN;
+  return Number(m[1]) * ({ '': 1, k: 1024, m: 1048576, g: 1073741824 }[m[2].toLowerCase()]);
+};
+// Nginx-এর client_max_body_size: সাইটে post_max_size বসানো থাকলে সেটাই (php location-এ)
+const siteBodyLimit = (domain) => siteUserIni(domain).post_max_size || '';
+function userIniText(ini) {
+  return [USER_INI_MARK + ' (do not edit; change it on the Sites page, PHP limits)', ...Object.entries(ini).map(([k, v]) => `${k} = ${v}`), ''].join('\r\n');
+}
+// প্রতিটা সাইটের root-এ .user.ini মিলিয়ে রাখা (বসানো/বদলানো/মুছে ফেলা)। নিজের (চিহ্নহীন) ফাইল ছোঁয়া হয় না।
+function syncUserIni(sites) {
+  const conflicts = [];
+  for (const x of sites) {
+    if (x.system || x.node || x.disabled || !x.root) continue;
+    try {
+      const f = path.join(x.root, '.user.ini');
+      const want = siteUserIni(x.domain);
+      let cur = null;
+      try {
+        cur = fs.readFileSync(f, 'utf8');
+      } catch {}
+      const ours = cur !== null && cur.startsWith(USER_INI_MARK);
+      if (Object.keys(want).length) {
+        if (cur !== null && !ours) conflicts.push(x.domain);
+        else if (cur !== userIniText(want)) fs.writeFileSync(f, userIniText(want));
+      } else if (ours) {
+        fs.rmSync(f, { force: true });
+      }
+    } catch {}
+  }
+  return conflicts;
+}
 // সাইট ধরে সেশন সময়: php-cgi PHP_VALUE মানে না (ওটা শুধু php-fpm-এর), তাই প্রতিটা রিকোয়েস্টের শুরুতে একটা ছোট
 // auto_prepend_file স্ক্রিপ্ট চলে। সার্ভার (Nginx fastcgi_param / Apache SetEnv) S360_SESSION (সেকেন্ড) পাঠায়, স্ক্রিপ্ট ini_set করে।
 // সাইটের নিজের sessions সাবফোল্ডার ব্যবহার হয়, নইলে অন্য সাইটের GC বেশি মেয়াদি সেশন মুছে ফেলত।
@@ -288,6 +394,12 @@ function ensureSitePrepend(tmpBase) {
     "        if (is_dir($d)) { ini_set('session.save_path', $d); }",
     "        ini_set('session.gc_maxlifetime', (string)$s);",
     "        ini_set('session.cookie_lifetime', (string)$s);",
+    '    }',
+    '}',
+    "if (!empty($_SERVER['S360_INI'])) {",
+    "    foreach (explode(';', (string)$_SERVER['S360_INI']) as $kv) {",
+    "        $p = explode('=', $kv, 2);",
+    "        if (count($p) === 2 && in_array($p[0], ['max_execution_time', 'max_input_time', 'memory_limit', 'display_errors'], true) && preg_match('/^[A-Za-z0-9-]+$/', $p[1])) { @ini_set($p[0], $p[1]); }",
     '    }',
     '}',
     '',
@@ -337,13 +449,16 @@ function nginxServer(serverName, root, phpUp, isDefault, webPort, localOnly = fa
       ? '    location / { try_files $uri $uri/ =404; }'
       : '    location / { try_files $uri $uri/ /index.php?$query_string; }',
     ...extra,
+    '    location = /.user.ini { return 404; }',
     '    location ~ \\.php$ {',
     `      fastcgi_pass ${phpUp};`,
     '      fastcgi_index index.php;',
     '      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;',
     '      include fastcgi_params;',
-    '      fastcgi_read_timeout 300;',
+    `      fastcgi_read_timeout ${siteReadTimeout(serverName)};`,
+    ...(siteBodyLimit(serverName) ? [`      client_max_body_size ${siteBodyLimit(serverName)};`] : []),
     ...(sessionMin ? [`      fastcgi_param S360_SESSION ${sessionMin * 60};`] : []),
+    ...(siteIniEnv(serverName) ? [`      fastcgi_param S360_INI "${siteIniEnv(serverName)}";`] : []),
     '    }',
     '  }',
   ].join('\n');
@@ -396,12 +511,16 @@ function apacheServer(serverName, root, phpVer, webPort, localOnly = false, extr
     // এই সাইটের নিজের PHP ভার্সন (php-cgi ও php.ini আলাদা)
     `  SetEnv PHPRC "${phpDirOf(phpVer).replace(/\\/g, '/')}"`,
     ...(sessionMin ? [`  SetEnv S360_SESSION ${sessionMin * 60}`] : []),
+    ...(siteIniEnv(serverName) ? [`  SetEnv S360_INI "${siteIniEnv(serverName)}"`] : []),
     `  Action application/x-httpd-php "/server360-php-${phpSlug(phpVer)}/php-cgi.exe"`,
     `  <Directory "${r}">`,
     '    Options Indexes FollowSymLinks',
     '    AllowOverride All',
     `    ${localOnly ? 'Require local' : 'Require all granted'}`,
     '  </Directory>',
+    '  <Files ".user.ini">',
+    '    Require all denied',
+    '  </Files>',
     ...extra,
     '</VirtualHost>',
     '',
@@ -485,6 +604,7 @@ const nginxExtraInclude = (domain) => `    include sites-enabled/${domain}.d/*.c
 const apacheExtraInclude = (domain) => '  IncludeOptional "${SRVROOT}/conf/sites-enabled/' + domain + '.d/*.conf"';
 
 function writeSiteFiles(svc, entries, sites) {
+  syncUserIni(sites);
   const dir = sitesEnabledDir(svc);
   fs.mkdirSync(dir, { recursive: true });
   const keep = new Set(entries.map((e) => e.file));
@@ -549,8 +669,10 @@ function publicRedirects(sites, webPort, kind, upOf) {
         `      fastcgi_pass ${up};`,
         '      include fastcgi_params;',
         `      fastcgi_param DOCUMENT_ROOT "${pub}";`,
-        '      fastcgi_read_timeout 300;',
+        `      fastcgi_read_timeout ${siteReadTimeout(x.domain)};`,
+        ...(siteBodyLimit(x.domain) ? [`      client_max_body_size ${siteBodyLimit(x.domain)};`] : []),
         ...(sess ? [`      fastcgi_param S360_SESSION ${sess * 60};`] : []),
+        ...(siteIniEnv(x.domain) ? [`      fastcgi_param S360_INI "${siteIniEnv(x.domain)}";`] : []),
       ];
       out.push(
         `    location = /${folder} {`,
@@ -894,9 +1016,15 @@ const pmaInstalled = () => fs.existsSync(SERVICES.phpmyadmin.exe);
 // ---------- MySQL root পাসওয়ার্ড ----------
 // settings.mysqlRootPw = { '<MySQL ভার্সন>': 'পাসওয়ার্ড' } (প্রতি ভার্সনের ডাটা আলাদা, তাই পাসওয়ার্ডও আলাদা)।
 // settings.json-এ সাধারণ লেখায় থাকে (অ্যাপ নিজে WordPress/Laravel/phpMyAdmin সেট করতে ও ডাটাবেস বন্ধ করতে এটা লাগে)।
+let mysqlReset = null; // { ver, pw, file, result } — শুধু রিসেটের সময় মেমরিতে থাকে
 const mysqlRootPw = () => (settings.mysqlRootPw && settings.mysqlRootPw[activeVersion('mysql').version]) || '';
 const mysqlEnv = (pw = mysqlRootPw()) => ({ ...process.env, ...(pw ? { MYSQL_PWD: pw } : {}) });
 const phpStr = (v) => `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+// PostgreSQL postgres পাসওয়ার্ড: settings.pgPw = { '<PostgreSQL ভার্সন>': 'পাসওয়ার্ড' }
+const pgPw = () => (settings.pgPw && settings.pgPw[activeVersion('postgres').version]) || '';
+const pgEnv = (pw = pgPw()) => ({ ...process.env, ...(pw ? { PGPASSWORD: pw } : {}) });
+// PostgreSQL-এ (standard_conforming_strings চালু) শুধু ' দ্বিগুণ করতে হয়, \ সাধারণ অক্ষর
+const pgStr = (v) => `'${String(v).replace(/'/g, "''")}'`;
 const sqlStr = (v) => `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 // Laravel .env-এর মান: সাধারণ অক্ষর হলে যেমন আছে, নইলে "..." দিয়ে (\\ " $ এড়িয়ে)
 const envVal = (v) => (v === '' || /^[A-Za-z0-9_.@:+-]+$/.test(v) ? v : `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$')}"`);
@@ -1437,6 +1565,8 @@ function writeMysqlIni(svc, port) {
     '[client]',
     `port=${port}`,
     '',
+    '!include ' + f(ensureMysqlExtra()),
+    '',
   ].join('\n');
   fs.writeFileSync(mysqlIni(), ini);
 }
@@ -1484,7 +1614,12 @@ const DATABASES = {
     isInitialized: () => fs.existsSync(path.join(mysqlDataDir(), 'mysql')),
     // root-এর পাসওয়ার্ড ফাঁকা (Laragon-এর মতো)
     init: (svc) => runTool(svc.exe, [`--defaults-file=${mysqlIni()}`, '--initialize-insecure', '--console'], svc.dir),
-    spawnArgs: () => [`--defaults-file=${mysqlIni()}`, '--console'],
+    spawnArgs: () => [
+      `--defaults-file=${mysqlIni()}`,
+      '--console',
+      // পাসওয়ার্ড রিসেটের সময় শুধু একবার: শুরুতে ALTER USER চালায় (বর্তমান পাসওয়ার্ড লাগে না)
+      ...(mysqlReset && fs.existsSync(mysqlReset.file) ? [`--init-file=${mysqlReset.file.replace(/\\/g, '/')}`] : []),
+    ],
     check: (svc, port) => tcpCheck(port),
     shutdownCmd: (svc, port) => ({
       exe: path.join(svc.dir, 'bin', 'mysqladmin.exe'),
@@ -1504,7 +1639,7 @@ const DATABASES = {
       return pgDataDir();
     },
     get info() {
-      return tr('হোস্ট: 127.0.0.1 · ইউজার: postgres · পাসওয়ার্ড: ফাঁকা', 'Host: 127.0.0.1 · User: postgres · Password: empty');
+      return pgPw() ? tr('হোস্ট: 127.0.0.1 · ইউজার: postgres · পাসওয়ার্ড: সেট করা (Settings-এ বদলান)', 'Host: 127.0.0.1 · User: postgres · Password: set (change it in Settings)') : tr('হোস্ট: 127.0.0.1 · ইউজার: postgres · পাসওয়ার্ড: ফাঁকা', 'Host: 127.0.0.1 · User: postgres · Password: empty');
     },
     prepare: () => fs.mkdirSync(path.dirname(pgDataDir()), { recursive: true }),
     isInitialized: () => fs.existsSync(path.join(pgDataDir(), 'PG_VERSION')),
@@ -1576,6 +1711,11 @@ async function startDatabase(id) {
         fs.rmSync(db.dataDir, { recursive: true, force: true }); // আধা-তৈরি ডাটা মুছে যাতে আবার চেষ্টা করা যায়
         throw new Error(tr(`${db.label} সেটআপ ব্যর্থ: ${err.message}`, `${db.label} setup failed: ${err.message}`));
       }
+      if (id === 'postgres' && settings.pgPw) {
+        // নতুন ডাটা ফোল্ডার = trust, পাসওয়ার্ড ফাঁকা; পুরনো সেভ করা পাসওয়ার্ড রাখলে অ্যাপ আর ঢুকতে পারবে না
+        delete settings.pgPw[activeVersion('postgres').version];
+        saveSettings(settings);
+      }
       if (id === 'mysql' && settings.mysqlRootPw) {
         // নতুন ডাটা ফোল্ডার = root পাসওয়ার্ড ফাঁকা; পুরনো সেভ করা পাসওয়ার্ড রাখলে অ্যাপ আর ঢুকতে পারবে না
         delete settings.mysqlRootPw[activeVersion('mysql').version];
@@ -1602,7 +1742,9 @@ async function startDatabase(id) {
     proc.on('exit', () => {
       if (dbRun[id] && dbRun[id].proc === proc) delete dbRun[id];
     });
-    return tr(`${db.label} চালু হয়েছে (পোর্ট ${port})। ${db.info}`, `${db.label} started (port ${port}). ${db.info}`);
+    let extra = '';
+    if (id === 'mysql' && mysqlReset) extra = await finishMysqlReset(port);
+    return tr(`${db.label} চালু হয়েছে (পোর্ট ${port})। ${db.info}${extra}`, `${db.label} started (port ${port}). ${db.info}${extra}`);
   } catch (err) {
     return tr('সমস্যা: ', 'Error: ') + err.message;
   } finally {
@@ -1966,6 +2108,285 @@ ipcMain.handle('mysql:setPassword', async (_event, newPw) => {
   }
 });
 
+// ---------- MySQL root পাসওয়ার্ড রিসেট (ভুলে গেলে) ও পাসওয়ার্ড দেখা ----------
+// MySQL বন্ধ থাকলে: একটা ছোট SQL ফাইল (ALTER USER) বানিয়ে mysqld-কে --init-file দিয়ে চালু করি; সার্ভার চালুর সময় এটা চালায়, বর্তমান পাসওয়ার্ড লাগে না।
+// তারপর নতুন পাসওয়ার্ডে ঢুকে যাচাই করি, সেটিংস/phpMyAdmin/সাইট ঠিক করি, আর SQL ফাইল মুছে দিই।
+function mysqlRun(sql, pw, port) {
+  return new Promise((resolve, reject) => {
+    const exe = path.join(SERVICES.mysql.dir, 'bin', 'mysql.exe');
+    const ch = execFile(exe, ['--no-defaults', '-u', 'root', '-h', '127.0.0.1', '-P', String(port)], { env: mysqlEnv(pw), timeout: 30000, windowsHide: true }, (err, _o, stderr) => (err ? reject(new Error(String(stderr || err.message).trim().slice(0, 200))) : resolve()));
+    ch.stdin.end(sql);
+  });
+}
+
+async function finishMysqlReset(port) {
+  const rs = mysqlReset;
+  mysqlReset = null;
+  try {
+    let ok = false;
+    let lastErr = '';
+    for (let i = 0; i < 8 && !ok; i++) {
+      try {
+        await mysqlRun('SELECT 1;\n', rs.pw, port);
+        ok = true;
+      } catch (e) {
+        lastErr = e.message;
+        await sleep(1000);
+      }
+    }
+    if (!ok) throw new Error(lastErr);
+    settings.mysqlRootPw = { ...(settings.mysqlRootPw || {}) };
+    if (rs.pw) settings.mysqlRootPw[rs.ver] = rs.pw;
+    else delete settings.mysqlRootPw[rs.ver];
+    saveSettings(settings);
+    if (pmaInstalled()) writePmaConfig();
+    const { wp, lv } = updateSitePasswords(rs.pw);
+    rs.result = { ok: true };
+    return tr(` · root পাসওয়ার্ড রিসেট হয়েছে (সাইট ঠিক করা হয়েছে: WordPress ${wp}, Laravel ${lv})`, ` · root password reset (sites updated: WordPress ${wp}, Laravel ${lv})`);
+  } catch (e) {
+    rs.result = { ok: false };
+    return tr(' · সতর্কতা: পাসওয়ার্ড রিসেট যাচাই করা যায়নি: ', ' · warning: could not verify the password reset: ') + e.message;
+  }
+}
+
+ipcMain.handle('mysql:resetPassword', async (_event, newPw) => {
+  const fail = (m) => ({ ok: false, message: m });
+  newPw = String(newPw === undefined || newPw === null ? '' : newPw);
+  if (newPw.length > 64 || /[\r\n\0]/.test(newPw)) return fail(tr('সমস্যা: পাসওয়ার্ড সর্বোচ্চ ৬৪ অক্ষর, নতুন লাইন চলবে না', 'Error: the password may have up to 64 characters and no line breaks'));
+  if (dbRun.mysql) return fail(tr('আগে MySQL বন্ধ করুন (সার্ভিস পেজ), রিসেটের জন্য MySQL-কে নতুন করে চালু করতে হয়', 'Stop MySQL first (Services page), the reset needs a fresh start of MySQL'));
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  if (!fs.existsSync(SERVICES.mysql.exe) || !DATABASES.mysql.isInitialized()) return fail(tr('MySQL-এর ডাটা এখনো তৈরি হয়নি, রিসেট করার কিছু নেই (আগে MySQL একবার চালান)', 'MySQL data has not been created yet, nothing to reset (start MySQL once first)'));
+  const ver = activeVersion('mysql').version;
+  const file = path.join(ROOT_DIR, 'data', `mysql-reset-${ver}.sql`);
+  const rs = { ver, pw: newPw, file, result: null };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `ALTER USER 'root'@'localhost' IDENTIFIED BY ${sqlStr(newPw)};\n`);
+    mysqlReset = rs;
+    const msg = await startDatabase('mysql');
+    return { ok: !!(rs.result && rs.result.ok), message: msg };
+  } catch (err) {
+    return fail(tr('সমস্যা: ', 'Error: ') + err.message);
+  } finally {
+    mysqlReset = null;
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {}
+  }
+});
+
+// অ্যাপে সেভ করা পাসওয়ার্ড দেখা/কপির জন্য (ফাঁকা হলে '')
+ipcMain.handle('db:getPw', (_event, kind) => (kind === 'postgres' ? pgPw() : kind === 'mysql' ? mysqlRootPw() : ''));
+
+// ---------- কনফিগ ফাইল (php.ini, my.ini, postgresql.conf ...) ----------
+// renderer শুধু id পাঠায়; পথ এখানে ঠিক করা হয়।
+function cfgResolve(id) {
+  id = String(id || '');
+  if (id.startsWith('php:')) {
+    const v = phpVersionList().find((x) => x.version === id.slice(4) && x.installed);
+    return v ? { file: path.join(v.dir, 'php.ini'), kind: 'php' } : null;
+  }
+  if (id === 'mysql:ini') return { file: mysqlIni(), kind: 'mysqlini' };
+  if (id === 'mysql:extra') return { file: mysqlExtraIni(), kind: 'mysqlextra' };
+  if (id === 'pg:conf') return { file: path.join(pgDataDir(), 'postgresql.conf'), kind: 'pgconf' };
+  if (id === 'pg:hba') return { file: path.join(pgDataDir(), 'pg_hba.conf'), kind: 'pghba' };
+  return null;
+}
+
+ipcMain.handle('cfg:list', () => {
+  const out = [];
+  const add = (id, label, kind, note) => {
+    const r = cfgResolve(id);
+    if (!r) return;
+    out.push({ id, label, kind, note, file: r.file, exists: fs.existsSync(r.file), canOpen: fs.existsSync(r.file) || id === 'mysql:extra' });
+  };
+  for (const v of phpVersionList().filter((x) => x.installed)) {
+    add('php:' + v.version, `php.ini (PHP ${v.version})`, 'mixed', tr('প্রতি Start-এ রিসেট হয়: extension টগল, upload_max_filesize/post_max_size (128M), session.save_path, upload_tmp_dir, sys_temp_dir, auto_prepend_file। বাকি (memory_limit, max_execution_time, display_errors, opcache ...) আপনার। বদলের পর ওয়েব সার্ভার Stop/Start করুন।', 'Reset on every start: extension toggles, upload_max_filesize/post_max_size (128M), session.save_path, upload_tmp_dir, sys_temp_dir, auto_prepend_file. The rest (memory_limit, max_execution_time, display_errors, opcache ...) is yours. Stop/Start the web server after a change.'));
+  }
+  const my = activeVersion('mysql').version;
+  add('mysql:ini', `my.ini (MySQL ${my})`, 'auto', tr('প্রতিবার MySQL চালুর সময় পুরো ফাইল নতুন করে লেখা হয়, এখানে বদল রাখলে হারাবে। নিজের সেটিং নিচের my-extra.ini-তে লিখুন।', 'The whole file is rewritten every time MySQL starts, edits here are lost. Put your own settings in my-extra.ini below.'));
+  add('mysql:extra', `my-extra.ini (MySQL ${my})`, 'yours', tr('আপনার ফাইল, অ্যাপ বদলায় না; my.ini এটা শেষে include করে। [mysqld] এর নিচে লিখুন, সেভ করে MySQL Restart করুন। ভুল লিখলে MySQL চালু নাও হতে পারে।', 'Your file, the app never changes it; my.ini includes it at the end. Write under [mysqld], save and restart MySQL. A mistake can stop MySQL from starting.'));
+  const pg = activeVersion('postgres').version;
+  add('pg:conf', `postgresql.conf (PostgreSQL ${pg})`, 'yours', tr('আপনার ফাইল, অ্যাপ এটা ছোঁয় না। বদলের পর PostgreSQL Restart করুন।', 'Your file, the app does not touch it. Restart PostgreSQL after a change.'));
+  add('pg:hba', `pg_hba.conf (PostgreSQL ${pg})`, 'mixed', tr('পাসওয়ার্ড বসালে/সরালে অ্যাপ শুধু শেষ কলামের trust ↔ scram-sha-256 বদলায়, বাকি লাইন আপনার। ভুল করলে ঢোকা যাবে না, আসল কপি pg_hba.conf.server360-bak।', 'When you set/remove the password the app only swaps trust ↔ scram-sha-256 in the last column, other lines are yours. A mistake can lock you out, the original copy is pg_hba.conf.server360-bak.'));
+  return out;
+});
+
+ipcMain.handle('cfg:open', (_event, id) => {
+  const r = cfgResolve(id);
+  if (!r) return { ok: false, message: tr('সমস্যা: ফাইলটা পাওয়া যায়নি', 'Error: file not found') };
+  try {
+    if (r.kind === 'mysqlextra') ensureMysqlExtra();
+    if (!fs.existsSync(r.file)) {
+      return { ok: false, message: tr(`${r.file} এখনো তৈরি হয়নি (সংশ্লিষ্ট প্রোগ্রাম একবার চালালে তৈরি হবে)`, `${r.file} does not exist yet (it is created the first time the program runs)`) };
+    }
+    const child = spawn('notepad.exe', [r.file], { detached: true, stdio: 'ignore' });
+    child.on('error', () => shell.showItemInFolder(r.file));
+    child.unref();
+    const warn = r.kind === 'mysqlini' ? tr(' · সাবধান: এটা প্রতিবার নতুন লেখা হয়, নিজের সেটিং my-extra.ini-তে দিন', ' · note: this file is rewritten every start, put your own settings in my-extra.ini') : '';
+    return { ok: true, message: tr(`${r.file} খোলা হয়েছে${warn}`, `${r.file} opened${warn}`) };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  }
+});
+
+ipcMain.handle('cfg:folder', (_event, id) => {
+  const r = cfgResolve(id);
+  if (!r) return;
+  if (fs.existsSync(r.file)) shell.showItemInFolder(r.file);
+  else if (fs.existsSync(path.dirname(r.file))) shell.openPath(path.dirname(r.file));
+});
+
+// ---------- PostgreSQL postgres পাসওয়ার্ড বদলানো ----------
+// initdb -A trust মানে pg_hba.conf-এ সব লাইন trust। পাসওয়ার্ড বসালে role-এ পাসওয়ার্ড দিই এবং pg_hba.conf-এর trust -> scram-sha-256 করে
+// pg_ctl reload দিই; সরালে উল্টোটা। pg_hba.conf-এর প্রথম ব্যাকআপ থাকে pg_hba.conf.server360-bak নামে।
+// পাসওয়ার্ড সংশোধন psql-এ stdin দিয়ে যায় (কমান্ড-লাইনে নয়), বর্তমান পাসওয়ার্ড PGPASSWORD env-এ।
+function pgHbaSwap(txt, to) {
+  const from = to === 'trust' ? 'scram-sha-256' : 'trust';
+  const eol = txt.includes('\r\n') ? '\r\n' : '\n';
+  let swapped = 0;
+  let already = 0;
+  const out = txt.split(/\r?\n/).map((line) => {
+    const code = line.replace(/#.*$/, '');
+    const toks = [...code.matchAll(/\S+/g)];
+    if (!toks.length) return line;
+    const idx = toks[0][0] === 'local' ? 3 : /^host/.test(toks[0][0]) ? 4 : -1;
+    if (idx < 0 || !toks[idx]) return line;
+    const cur = toks[idx][0];
+    if (cur === to) already++;
+    if (cur !== from) return line;
+    swapped++;
+    return line.slice(0, toks[idx].index) + to + line.slice(toks[idx].index + cur.length);
+  });
+  return { text: out.join(eol), swapped, already };
+}
+
+const pgBin = (n) => path.join(SERVICES.postgres.dir, 'bin', n);
+function runPsql(input, pw) {
+  return new Promise((resolve, reject) => {
+    const args = ['-X', '-q', '-w', '-v', 'ON_ERROR_STOP=1', '-h', '127.0.0.1', '-p', String(getDbPort('postgres')), '-U', 'postgres', '-d', 'postgres'];
+    const ch = execFile(pgBin('psql.exe'), args, { env: pgEnv(pw), timeout: 30000, windowsHide: true }, (err, _o, stderr) => (err ? reject(new Error(String(stderr || err.message).trim().slice(0, 300))) : resolve()));
+    ch.stdin.end(input);
+  });
+}
+function pgReload() {
+  return new Promise((resolve, reject) =>
+    execFile(pgBin('pg_ctl.exe'), ['reload', '-D', pgDataDir()], { timeout: 15000, windowsHide: true }, (err, _o, stderr) => (err ? reject(new Error(String(stderr || err.message).trim().slice(0, 300))) : resolve()))
+  );
+}
+// pg_hba.conf লিখে reload করা; ফেরত: false হলে আগের অবস্থা ফিরিয়ে দেওয়ার জন্য মূল লেখা আছে
+async function pgSetAuth(to) {
+  const f = path.join(pgDataDir(), 'pg_hba.conf');
+  const before = fs.readFileSync(f, 'utf8');
+  const r = pgHbaSwap(before, to);
+  if (!r.swapped && !r.already) throw new Error(tr('pg_hba.conf-এর লাইন চেনা গেল না (হাতে বদলানো?), অ্যাপ এটা বদলাতে পারছে না', 'Could not recognize the lines in pg_hba.conf (edited by hand?), the app cannot change it'));
+  const bak = f + '.server360-bak';
+  if (!fs.existsSync(bak)) fs.copyFileSync(f, bak);
+  if (r.swapped) fs.writeFileSync(f, r.text);
+  await pgReload();
+  return { f, before };
+}
+const pgRevert = async (st) => {
+  try {
+    if (st) {
+      fs.writeFileSync(st.f, st.before);
+      await pgReload();
+    }
+  } catch {}
+};
+const pgAuthErr = (m) => /password|authentication|no password supplied/i.test(m);
+
+ipcMain.handle('pg:pwState', () => ({ hasPw: !!pgPw(), running: !!dbRun.postgres }));
+
+ipcMain.handle('pg:setPassword', async (_event, newPw, reset) => {
+  const fail = (m) => ({ ok: false, message: m });
+  newPw = String(newPw === undefined || newPw === null ? '' : newPw);
+  if (newPw.length > 64 || /[\r\n\0]/.test(newPw)) return fail(tr('সমস্যা: পাসওয়ার্ড সর্বোচ্চ ৬৪ অক্ষর, নতুন লাইন চলবে না', 'Error: the password may have up to 64 characters and no line breaks'));
+  if (!dbRun.postgres) return fail(tr('আগে PostgreSQL চালু করুন (সার্ভিস পেজ)', 'Start PostgreSQL first (Services page)'));
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  busy = true;
+  let hba = null; // প্রথম বদলানোর আগের pg_hba.conf (ব্যর্থ হলে ফেরানোর জন্য)
+  const waitOpen = async () => {
+    for (let i = 0; i < 10; i++) {
+      await sleep(500);
+      try {
+        await runPsql('SELECT 1;\n', '');
+        return true;
+      } catch {}
+    }
+    return false;
+  };
+  try {
+    if (!fs.existsSync(pgBin('psql.exe'))) throw new Error(tr('psql.exe পাওয়া যায়নি', 'psql.exe not found'));
+    if (!fs.existsSync(path.join(pgDataDir(), 'pg_hba.conf'))) throw new Error(tr('pg_hba.conf পাওয়া যায়নি', 'pg_hba.conf not found'));
+    const ver = activeVersion('postgres').version;
+    const oldPw = pgPw();
+    const save = () => {
+      settings.pgPw = { ...(settings.pgPw || {}) };
+      if (newPw) settings.pgPw[ver] = newPw;
+      else delete settings.pgPw[ver];
+      saveSettings(settings);
+    };
+    const mismatch = () => new Error(tr('PostgreSQL-এর বর্তমান পাসওয়ার্ড অ্যাপে রাখা পাসওয়ার্ডের সাথে মেলেনি (বাইরে থেকে বদলানো হয়েছে?)। "ভুলে গেছেন? রিসেট" ব্যবহার করুন', "PostgreSQL's current password does not match the one the app has stored (changed outside the app?). Use \"Forgot? Reset\""));
+    let warn = '';
+
+    // trust করে নিয়ে ঢোকা (সরানো ও রিসেটের জন্য: বর্তমান পাসওয়ার্ড না জানলেও কাজ করে)
+    const openUp = async () => {
+      const st = await pgSetAuth('trust');
+      hba = hba || st;
+      if (!(await waitOpen())) throw new Error(tr('pg_hba.conf reload হয়নি, PostgreSQL একবার Restart করে আবার চেষ্টা করুন', 'pg_hba.conf was not reloaded, restart PostgreSQL once and try again'));
+    };
+
+    if (newPw) {
+      // ১) role-এ পাসওয়ার্ড: রিসেট হলে আগে trust করে (পুরনো পাসওয়ার্ড লাগে না), নইলে এখনকার অবস্থায় ঢুকে
+      if (reset) {
+        await openUp();
+        await runPsql(`ALTER ROLE postgres WITH PASSWORD ${pgStr(newPw)};\n`, '');
+      } else {
+        try {
+          await runPsql(`ALTER ROLE postgres WITH PASSWORD ${pgStr(newPw)};\n`, oldPw);
+        } catch (e) {
+          throw pgAuthErr(e.message) ? mismatch() : e;
+        }
+      }
+      save();
+      // ২) pg_hba.conf: trust -> scram-sha-256 + reload
+      const st2 = await pgSetAuth('scram-sha-256');
+      hba = hba || st2;
+      // ৩) যাচাই: ভুল পাসওয়ার্ড ফিরে যাবে, ঠিকটা ঢুকবে
+      let enforced = false;
+      for (let i = 0; i < 10 && !enforced; i++) {
+        await sleep(500);
+        try {
+          await runPsql('SELECT 1;\n', newPw + '_wrong');
+        } catch {
+          enforced = true;
+        }
+      }
+      try {
+        await runPsql('SELECT 1;\n', newPw);
+      } catch (e) {
+        await pgRevert(hba);
+        throw new Error(tr('নতুন পাসওয়ার্ডে ঢোকা গেল না, pg_hba.conf আগের অবস্থায় ফেরানো হয়েছে: ', 'Could not log in with the new password, pg_hba.conf was restored: ') + e.message);
+      }
+      if (!enforced) warn = tr(' · সতর্কতা: পাসওয়ার্ড এখনো বাধ্যতামূলক হয়নি মনে হচ্ছে, PostgreSQL একবার Restart করুন', ' · warning: the password does not seem to be enforced yet, restart PostgreSQL once');
+    } else {
+      // সরানো: আগে trust, তারপর role-এর পাসওয়ার্ড মুছি (সেভ করা পাসওয়ার্ড না মিললেও কাজ হয়)
+      await openUp();
+      await runPsql('ALTER ROLE postgres WITH PASSWORD NULL;\n', '');
+      save();
+    }
+    const done = newPw ? (reset ? tr('PostgreSQL পাসওয়ার্ড রিসেট হয়েছে (ইউজার postgres)', 'PostgreSQL password reset (user postgres)') : tr('PostgreSQL পাসওয়ার্ড বদলানো হয়েছে (ইউজার postgres)', 'PostgreSQL password changed (user postgres)')) : tr('PostgreSQL পাসওয়ার্ড সরানো হয়েছে (ফাঁকা)', 'PostgreSQL password removed (empty)');
+    return { ok: true, message: done + (newPw ? tr(' · Adminer-এ লগইনে এই পাসওয়ার্ড দিন', ' · enter this password when logging in to Adminer') : '') + warn };
+  } catch (err) {
+    // সরানো বা রিসেট মাঝপথে থামলে pg_hba.conf আগের অবস্থায় (সাধারণত scram) ফেরানো
+    if (hba && (!newPw || reset)) await pgRevert(hba);
+    return fail(tr('সমস্যা: ', 'Error: ') + err.message);
+  } finally {
+    busy = false;
+  }
+});
+
 // ---------- LAN-এ শেয়ার (অন্য পিসি/ফোন থেকে http://<LAN-IP>:<পোর্ট>) ----------
 // settings.siteShare = { '<domain>': { on: true|false, port: <n> } }
 // শেয়ার চালু থাকলে ওই সাইটের server ব্লক আরেকটা পোর্টেও শোনে (Nginx: নতুন server ব্লক, Apache: নতুন Listen + VirtualHost)।
@@ -2074,7 +2495,7 @@ ipcMain.handle('site:setShare', async (_event, domain, on, portRaw) => {
 });
 
 const publicSites = (sites) => [
-  { name: 'localhost', domain: 'localhost', root: WWW_DIR, system: false, url: siteUrl('localhost'), php: defaultPhpVersion(), phpPinned: '', sessionMin: 0, enabled: true },
+  { name: 'localhost', domain: 'localhost', root: WWW_DIR, system: false, url: siteUrl('localhost'), php: defaultPhpVersion(), phpPinned: '', sessionMin: 0, phpIni: {}, enabled: true },
   ...sites.map(({ name, domain, root, system, disabled, node }) => ({
     name,
     node: !!node,
@@ -2086,6 +2507,7 @@ const publicSites = (sites) => [
     php: system ? defaultPhpVersion() : sitePhpVersion(domain),
     phpPinned: system ? '' : pinnedPhp(domain),
     sessionMin: system ? 0 : siteSessionMin(domain),
+    phpIni: system ? {} : { ...siteIni(domain), ...siteUserIni(domain) },
     share: system ? { on: false, port: 0 } : { on: sharePortOf(domain) > 0, port: (shareCfg(domain) || {}).port || 0 },
   })),
 ];
@@ -2821,6 +3243,60 @@ ipcMain.handle('site:setPhp', async (_event, domain, version) => {
 });
 
 
+// সাইট ধরে PHP সীমা (max_execution_time, memory_limit, max_input_time, display_errors); ফাঁকা ঘর = ডিফল্ট
+ipcMain.handle('site:setPhpIni', async (_event, domain, cfg) => {
+  if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+  const sites = withToolSites(scanSites());
+  if (!sites.some((s) => s.domain === domain && !s.system && !s.node)) {
+    return { ok: false, message: tr('সমস্যা: সাইটটা পাওয়া যায়নি', 'Error: site not found') };
+  }
+  const clean = {};
+  for (const [k, re] of Object.entries({ ...PHP_INI_KEYS, ...PHP_USER_INI_KEYS })) {
+    const raw = cfg && cfg[k] !== undefined && cfg[k] !== null ? String(cfg[k]).trim() : '';
+    if (raw === '') continue;
+    const v = k === 'display_errors' ? (raw.toLowerCase() === 'on' ? 'On' : raw.toLowerCase() === 'off' ? 'Off' : raw) : raw;
+    if (!re.test(v)) return { ok: false, message: tr(`সমস্যা: ${k}-এর মান ঠিক নয় (${raw})`, `Error: invalid value for ${k} (${raw})`) };
+    clean[k] = v;
+  }
+  // আপলোড/পোস্ট সাইজ জোড়ায় দিতে হয় এবং post_max_size >= upload_max_filesize হতে হবে (নইলে বড় আপলোড আটকে যায়)
+  if (clean.upload_max_filesize && !clean.post_max_size) {
+    return { ok: false, message: tr('সমস্যা: upload_max_filesize দিলে post_max_size-ও দিন (একই বা বড় মান)', 'Error: when you set upload_max_filesize, set post_max_size too (same or larger)') };
+  }
+  if (clean.upload_max_filesize && clean.post_max_size && clean.post_max_size !== '0' && (clean.upload_max_filesize === '0' || sizeBytes(clean.post_max_size) < sizeBytes(clean.upload_max_filesize))) {
+    return { ok: false, message: tr('সমস্যা: post_max_size, upload_max_filesize-এর সমান বা বড় হতে হবে', 'Error: post_max_size must be the same as or larger than upload_max_filesize') };
+  }
+  if (Object.keys(clean).some((k) => k in PHP_USER_INI_KEYS)) {
+    const site = sites.find((s) => s.domain === domain);
+    const f = site && path.join(site.root, '.user.ini');
+    let cur = null;
+    try {
+      cur = fs.readFileSync(f, 'utf8');
+    } catch {}
+    if (cur !== null && !cur.startsWith(USER_INI_MARK)) {
+      return { ok: false, message: tr(`সমস্যা: ${f} নামে আপনার নিজের ফাইল আছে। সেটা সরান বা নিজে এডিট করুন, অ্যাপ ওটা ছোঁবে না`, `Error: you already have your own ${f}. Remove it or edit it yourself, the app will not touch it`) };
+    }
+  }
+  busy = true;
+  try {
+    settings.sitePhpIni = { ...(settings.sitePhpIni || {}) };
+    if (Object.keys(clean).length) settings.sitePhpIni[domain] = clean;
+    else delete settings.sitePhpIni[domain];
+    saveSettings(settings);
+    syncUserIni(sites);
+    ensureSitePrepend(path.join(ROOT_DIR, 'data', 'php-tmp').replace(/\\/g, '/')); // প্রতি রিকোয়েস্টে পড়া হয়, php-cgi রিস্টার্ট লাগে না
+    const live = await reloadRunning(sites);
+    const label = Object.keys(clean).length ? Object.entries(clean).map(([k, v]) => `${k}=${v}`).join(', ') : tr('ডিফল্ট', 'default');
+    return {
+      ok: true,
+      message: live ? tr(`${domain}-এর PHP সীমা এখন: ${label}`, `${domain} PHP limits are now: ${label}`) : tr(`${domain}-এর PHP সীমা (${label}) সেভ হয়েছে। সার্ভার চালু করলে কাজ করবে`, `PHP limits (${label}) saved for ${domain}. They apply when the server starts`),
+    };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
 // সাইট ধরে সেশনের মেয়াদ (মিনিট; ফাঁকা/০ মানে ডিফল্ট)
 ipcMain.handle('site:setSession', async (_event, domain, minutes) => {
   if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
@@ -3016,6 +3492,9 @@ ipcMain.handle('adminer:open', async (_event, kind) => {
   }
   await shell.openExternal(siteUrl(ADMINER_DOMAIN) + '/' + query);
   const warn = db && !dbRun[kind] ? tr(` (সতর্কতা: ${db.label} এখন চালু নেই, আগে Start করুন)`, ` (warning: ${db.label} is not running, start it first)`) : '';
+  if (kind === 'postgres' && pgPw()) {
+    return tr(`Adminer ব্রাউজারে খোলা হয়েছে${warn}। Username postgres, Password-এ আপনার সেট করা পাসওয়ার্ড দিন।`, `Adminer opened in the browser${warn}. Username postgres, and enter the password you set.`);
+  }
   if (kind === 'mysql' && mysqlRootPw()) {
     return tr(`Adminer ব্রাউজারে খোলা হয়েছে${warn}। Username root, Password-এ আপনার সেট করা পাসওয়ার্ড দিন।`, `Adminer opened in the browser${warn}. Username root, and enter the password you set.`);
   }

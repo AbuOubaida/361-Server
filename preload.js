@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('api', {
   refreshSites: () => ipcRenderer.invoke('sites:refresh'),
   createSite: (kind, name) => ipcRenderer.invoke('site:create', kind, name),
   setSiteSession: (domain, minutes) => ipcRenderer.invoke('site:setSession', domain, minutes),
+  setSitePhpIni: (domain, cfg) => ipcRenderer.invoke('site:setPhpIni', domain, cfg),
   setSiteShare: (domain, on, port) => ipcRenderer.invoke('site:setShare', domain, on, port),
   netInfo: () => ipcRenderer.invoke('net:info'),
   allowFirewall: () => ipcRenderer.invoke('fw:allow'),
@@ -87,6 +88,15 @@ contextBridge.exposeInMainWorld('api', {
   // MySQL root পাসওয়ার্ড
   mysqlPwState: () => ipcRenderer.invoke('mysql:pwState'),
   mysqlSetPassword: (pw) => ipcRenderer.invoke('mysql:setPassword', pw),
+  pgPwState: () => ipcRenderer.invoke('pg:pwState'),
+  pgSetPassword: (pw, reset) => ipcRenderer.invoke('pg:setPassword', pw, reset),
+  mysqlResetPassword: (pw) => ipcRenderer.invoke('mysql:resetPassword', pw),
+  getDbPw: (kind) => ipcRenderer.invoke('db:getPw', kind),
+
+  // কনফিগ ফাইল (php.ini, my.ini, postgresql.conf ...)
+  cfgList: () => ipcRenderer.invoke('cfg:list'),
+  cfgOpen: (id) => ipcRenderer.invoke('cfg:open', id),
+  cfgFolder: (id) => ipcRenderer.invoke('cfg:folder', id),
 
   // ভাষা
   getLang: () => ipcRenderer.invoke('lang:get'),
