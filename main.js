@@ -3,6 +3,7 @@ const { spawn, exec, execFile, execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
+const http = require('http');
 const net = require('net');
 const extract = require('extract-zip');
 const crypto = require('crypto');
@@ -28,6 +29,9 @@ const PMA_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/p
 
 // Node.js (LTS): nodejs.org/dist থেকে node-v24.x.y-win-x64.zip নামিয়ে Release-এ আপলোড করুন
 const NODE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/node-v24.22.2-win-x64.zip';
+
+// win-acme (Let's Encrypt সার্টিফিকেট, Step B2): win-acme.v2.2.9.1701.x64.pluggable.zip Release-এ আপলোড করা আছে
+const WINACME_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/win-acme.v2.2.9.1701.x64.pluggable.zip';
 
 // Microsoft-এর স্থির লিংক: সর্বশেষ সাপোর্টেড VC++ Redistributable (x64)
 const VCREDIST_URL = 'https://aka.ms/vc14/vc_redist.x64.exe';
@@ -334,14 +338,69 @@ const sitePublicNames = (domain) => {
   const cur = settings.sitePublic && settings.sitePublic[domain];
   return Array.isArray(cur) ? cur.filter((h) => typeof h === 'string' && PUBLIC_HOST_RE.test(h) && !PUBLIC_BAD_TLD.test(h)) : [];
 };
-// সাইটের মূল (শেয়ার নয় এমন) server ব্লকে পাবলিক নামগুলো যোগ করে
+// ---------- Let's Encrypt / win-acme (Step B2) ----------
+// http-01 যাচাই: Let's Encrypt http://<নাম>/.well-known/acme-challenge/<token> খোলে। সব পাবলিক সাইটের পোর্ট-৮০ ব্লকে
+// ওই পথটা একটা অভিন্ন ফোল্ডার (data\acme-webroot) থেকে দেওয়া হয়; win-acme সেখানে token ফাইল লেখে।
+const fwdSlash = (p) => p.replace(/\\/g, '/');
+const winAcmeDir = () => path.join(TOOLS_DIR, 'win-acme');
+const winAcmeExe = () => path.join(winAcmeDir(), 'wacs.exe');
+const acmeWebroot = () => path.join(ROOT_DIR, 'data', 'acme-webroot');
+const certsDir = () => path.join(ROOT_DIR, 'data', 'certs');
+const ACME_TASK = 'Server 360 - win-acme renew';
+const EMAIL_RE = /^[^\s@,;<>"'\\]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,63}$/;
+
+// সাইটের মূল (শেয়ার নয় এমন) server ব্লকে পাবলিক নামগুলো যোগ করে (সাথে ACME challenge পথ)
 const withPublicNames = (text, domain) => {
   const names = sitePublicNames(domain);
   if (!names.length) return text;
+  const web = fwdSlash(acmeWebroot());
+  const ngChallenge = `    location ^~ /.well-known/acme-challenge/ { root "${web}"; default_type text/plain; try_files $uri =404; }`;
+  const apChallenge = [
+    '  <IfModule proxy_module>',
+    '    ProxyPass /.well-known/acme-challenge/ !',
+    '  </IfModule>',
+    `  Alias /.well-known/acme-challenge/ "${web}/.well-known/acme-challenge/"`,
+    `  <Directory "${web}/.well-known/acme-challenge">`,
+    '    AllowOverride None',
+    '    Options None',
+    '    Require all granted',
+    '    ForceType text/plain',
+    '  </Directory>',
+  ].join('\n');
   return text
-    .replace(`    server_name ${domain};`, `    server_name ${domain} ${names.join(' ')};`)
-    .replace(`  ServerName ${domain}\n`, `  ServerName ${domain}\n  ServerAlias ${names.join(' ')}\n`);
+    .replace(`    server_name ${domain};`, () => `    server_name ${domain} ${names.join(' ')};\n${ngChallenge}`)
+    .replace(`  ServerName ${domain}\n`, () => `  ServerName ${domain}\n  ServerAlias ${names.join(' ')}\n${apChallenge}\n`);
 };
+
+// সার্টিফিকেট ফোল্ডারের *-crt.pem ফাইল পড়ে (নাম win-acme-র ওপর নির্ভর না করে ভেতরের SAN/মেয়াদ দেখে)
+function certScan() {
+  let files = [];
+  try {
+    files = fs.readdirSync(certsDir()).filter((f) => /-crt\.pem$/i.test(f));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const f of files) {
+    try {
+      const x = new crypto.X509Certificate(fs.readFileSync(path.join(certsDir(), f)));
+      const names = String(x.subjectAltName || '').split(/,\s*/).map((v) => v.replace(/^DNS:/i, '').trim().toLowerCase()).filter(Boolean);
+      const end = new Date(x.validTo);
+      if (isNaN(end.getTime())) continue;
+      const issuer = String(x.issuer || '').replace(/\s*\n\s*/g, ', ');
+      out.push({ file: f, names, end, issuer, staging: /staging|fake/i.test(issuer) });
+    } catch {}
+  }
+  return out;
+}
+function certFor(host) {
+  let best = null;
+  for (const c of certScan()) if (c.names.includes(host) && (!best || c.end > best.end)) best = c;
+  return best;
+}
+function acmeTaskExists() {
+  return new Promise((resolve) => execFile('schtasks.exe', ['/Query', '/TN', ACME_TASK], { windowsHide: true, timeout: 15000 }, (err) => resolve(!err)));
+}
 
 // upload_max_filesize / post_max_size / max_input_vars: PHP স্ক্রিপ্ট চলার আগেই পড়া হয়, তাই ini_set চলে না।
 // সাইটের public ফোল্ডারে অ্যাপের চিহ্নিত .user.ini লেখা হয় (php-cgi এটা পড়ে; php.ini-তে user_ini.cache_ttl = 5)।
@@ -3397,6 +3456,154 @@ ipcMain.handle('site:checkPublic', async (_event, text) => {
     out.push({ host: h, status, ips });
   }
   return { ok: true, ip, hosts: out, message: '' };
+});
+
+// ---------- Let's Encrypt সার্টিফিকেট (Step B2) ----------
+// win-acme নন-ইন্টারঅ্যাক্টিভভাবে চালানো: http-01 (filesystem), PEM ফাইল data\certs-এ। এখনো https server ব্লক বানানো হয় না (Step B3)।
+async function ensureWinAcme() {
+  if (fs.existsSync(winAcmeExe())) return false;
+  await installInto({ label: 'win-acme', exeRel: 'wacs.exe' }, winAcmeDir(), { url: WINACME_URL });
+  return true;
+}
+
+ipcMain.handle('acme:status', async (_event, domain) => {
+  const names = domain ? sitePublicNames(domain) : [];
+  const now = Date.now();
+  return {
+    installed: fs.existsSync(winAcmeExe()),
+    email: String(settings.acmeEmail || ''),
+    task: await acmeTaskExists(),
+    certsDir: certsDir(),
+    serverRunning: !!running,
+    port80: getWebPort() === 80,
+    certs: names.map((h) => {
+      const c = certFor(h);
+      if (!c) return { host: h, status: 'none' };
+      const days = Math.floor((c.end.getTime() - now) / 86400000);
+      return { host: h, status: days < 0 ? 'expired' : days <= 14 ? 'soon' : 'ok', expires: c.end.toISOString().slice(0, 10), days, staging: c.staging };
+    }),
+  };
+});
+
+ipcMain.handle('acme:install', async () => {
+  if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+  busy = true;
+  try {
+    const fresh = await ensureWinAcme();
+    return { ok: true, message: fresh ? tr('win-acme ইনস্টল হয়েছে', 'win-acme installed') : tr('win-acme আগেই ইনস্টল করা আছে', 'win-acme is already installed') };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
+ipcMain.handle('acme:folder', () => {
+  fs.mkdirSync(certsDir(), { recursive: true });
+  return shell.openPath(certsDir());
+});
+
+// আমাদের ওয়েব সার্ভার challenge ফোল্ডারটা সত্যিই দিচ্ছে কিনা নিজে যাচাই (Host হেডার দিয়ে, 127.0.0.1:80-তে)
+function selfCheckChallenge(host) {
+  return new Promise((resolve) => {
+    const dir = path.join(acmeWebroot(), '.well-known', 'acme-challenge');
+    const file = path.join(dir, 's360-selfcheck');
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file, 'server360-ok');
+    } catch (e) {
+      return resolve({ ok: false, why: e.message });
+    }
+    const req = http.get({ host: '127.0.0.1', port: 80, path: '/.well-known/acme-challenge/s360-selfcheck', headers: { Host: host }, timeout: 6000 }, (res) => {
+      let d = '';
+      res.on('data', (c) => (d += c));
+      res.on('end', () => {
+        fs.rmSync(file, { force: true });
+        resolve(res.statusCode === 200 && d.trim() === 'server360-ok' ? { ok: true } : { ok: false, why: 'HTTP ' + res.statusCode });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', (e) => {
+      fs.rmSync(file, { force: true });
+      resolve({ ok: false, why: e.message });
+    });
+  });
+}
+
+ipcMain.handle('acme:issue', async (_event, domain, emailRaw, staging) => {
+  if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+  const sites = withToolSites(scanSites());
+  if (!sites.some((s) => s.domain === domain && !s.system)) return { ok: false, message: tr('সমস্যা: সাইটটা পাওয়া যায়নি', 'Error: site not found') };
+  const names = sitePublicNames(domain);
+  if (!names.length) return { ok: false, message: tr('আগে পাবলিক ডোমেইন নাম সেভ করুন, তারপর সার্টিফিকেট নিন', 'Save a public domain name first, then get the certificate') };
+  const email = String(emailRaw === undefined || emailRaw === null || emailRaw === '' ? settings.acmeEmail || '' : emailRaw).trim();
+  if (!EMAIL_RE.test(email)) return { ok: false, message: tr("সমস্যা: একটা ঠিক ইমেইল দিন (Let's Encrypt জরুরি নোটিশ পাঠায়)", "Error: enter a valid email address (Let's Encrypt sends important notices there)") };
+  if (!running) return { ok: false, message: tr('আগে ওয়েব সার্ভার চালু করুন (Nginx বা Apache), তারপর সার্টিফিকেট নিন', 'Start the web server (Nginx or Apache) first, then get the certificate') };
+  if (getWebPort() !== 80) return { ok: false, message: tr('সার্টিফিকেটের জন্য ওয়েব সার্ভারের পোর্ট ৮০ হতে হবে (এখন ' + getWebPort() + ')', 'The web server port must be 80 for certificates (now ' + getWebPort() + ')') };
+  busy = true;
+  try {
+    settings.acmeEmail = email;
+    saveSettings(settings);
+    fs.mkdirSync(certsDir(), { recursive: true });
+    fs.mkdirSync(path.join(acmeWebroot(), '.well-known', 'acme-challenge'), { recursive: true });
+    // কনফিগ নতুন করে লিখে নেওয়া (পুরনো সেভ করা নামে challenge পথ না থাকলে বসে যাবে)
+    await reloadRunning(sites);
+    sendStatus(tr('ওয়েব সার্ভারের challenge পথ পরীক্ষা হচ্ছে...', 'Checking the web server challenge path...'));
+    const chk = await selfCheckChallenge(names[0]);
+    if (!chk.ok) {
+      return { ok: false, message: tr(`সমস্যা: ওয়েব সার্ভার /.well-known/acme-challenge/ দিচ্ছে না (${chk.why})। সাইটের কনফিগ ফাইল নিজের হাতে বদলানো (Custom) থাকলে "Reset to auto" দিন`, `Error: the web server does not serve /.well-known/acme-challenge/ (${chk.why}). If the site's config file is Custom (edited by you), use "Reset to auto"`) };
+    }
+    const fresh = await ensureWinAcme();
+    if (fresh) sendStatus(tr('win-acme ইনস্টল হয়েছে', 'win-acme installed'));
+    // সার্টিফিকেট পাওয়া/নবায়নের পর Nginx রিলোড (Apache-র SSL পরের ধাপে)। ব্যর্থ হলেও যেন নবায়ন ব্যর্থ না ধরা হয়
+    const bat = path.join(certsDir(), 'reload-web.bat');
+    const ng = SERVICES.nginx;
+    fs.writeFileSync(bat, ['@echo off', ...(fs.existsSync(ng.exe) ? [`"${ng.exe}" -p "${fwdSlash(ng.dir)}/" -s reload >nul 2>&1`] : []), 'exit /b 0', ''].join('\r\n'));
+    const args = [
+      '--source', 'manual', '--host', names.join(','), '--commonname', names[0],
+      '--validation', 'filesystem', '--webroot', acmeWebroot(),
+      '--store', 'pemfiles', '--pemfilespath', certsDir(),
+      '--installation', 'script', '--script', bat,
+      '--accepttos', '--emailaddress', email, '--notaskscheduler',
+      ...(staging ? ['--test'] : []),
+    ];
+    sendStatus(tr(`${names.join(', ')}-এর সার্টিফিকেট নেওয়া হচ্ছে (১-২ মিনিট লাগতে পারে)...`, `Getting the certificate for ${names.join(', ')} (may take 1-2 minutes)...`));
+    const run = await new Promise((resolve) =>
+      execFile(winAcmeExe(), args, { cwd: winAcmeDir(), timeout: 5 * 60 * 1000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => resolve({ err, out: String(stdout || '') + String(stderr || '') }))
+    );
+    const tail = run.out.replace(/\x1b\[[0-9;]*m/g, '').trim().split(/\r?\n/).slice(-70).join('\n').slice(-5000);
+    const got = certFor(names[0]);
+    const allIn = got && names.every((h) => got.names.includes(h));
+    if (!run.err && allIn) {
+      return { ok: true, message: tr(`সার্টিফিকেট পাওয়া গেছে (মেয়াদ ${got.end.toISOString().slice(0, 10)} পর্যন্ত${got.staging ? ', টেস্ট/staging, ব্রাউজার বিশ্বাস করবে না' : ''})`, `Certificate issued (valid until ${got.end.toISOString().slice(0, 10)}${got.staging ? ', test/staging, browsers will not trust it' : ''})`), output: tail };
+    }
+    return { ok: false, message: tr('সার্টিফিকেট পাওয়া যায়নি। নিচের লগ দেখুন (DNS, রাউটার ফরওয়ার্ড ৮০ আর ফায়ারওয়াল আগে ঠিক করুন)', 'The certificate was not issued. See the log below (check DNS, the router forward for port 80 and the firewall first)'), output: tail || (run.err && run.err.message) || '' };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  } finally {
+    busy = false;
+  }
+});
+
+// নবায়ন নিজে থেকে: Windows Task Scheduler-এ রোজ win-acme --renew (UAC লাগে)। অ্যাপ বন্ধ থাকলেও চলে।
+ipcMain.handle('acme:autoRenew', async () => {
+  if (!fs.existsSync(winAcmeExe())) return { ok: false, message: tr('আগে win-acme ইনস্টল করুন', 'Install win-acme first') };
+  const cmdFile = path.join(TOOLS_DIR, 'acme-renew-task.cmd');
+  const lines = [
+    '@echo off',
+    'net session >nul 2>&1',
+    'if errorlevel 1 ( echo Run this file as Administrator. & pause & exit /b 1 )',
+    `schtasks /Create /TN "${ACME_TASK}" /TR "\\"${winAcmeExe()}\\" --renew" /SC DAILY /ST 09:00 /RU SYSTEM /RL HIGHEST /F`,
+    'echo Done.',
+  ];
+  fs.mkdirSync(TOOLS_DIR, { recursive: true });
+  fs.writeFileSync(cmdFile, lines.join('\r\n') + '\r\n');
+  await new Promise((resolve) =>
+    execFile('powershell.exe', ['-NoProfile', '-Command', `Start-Process -FilePath cmd.exe -ArgumentList '/c','"${cmdFile}"' -Verb RunAs -Wait`], { windowsHide: true, timeout: 120000 }, () => resolve())
+  );
+  if (await acmeTaskExists()) return { ok: true, message: tr('অটো-নবায়ন চালু হয়েছে (রোজ সকাল ৯টায়, Task Scheduler-এ)', 'Auto-renewal is on (daily at 09:00, in Task Scheduler)') };
+  shell.showItemInFolder(cmdFile);
+  return { ok: false, message: tr(`অটো-নবায়ন বসানো যায়নি। Explorer-এ খোলা ${path.basename(cmdFile)} ফাইলে ডান ক্লিক করে "Run as administrator" দিন`, `Could not set up auto-renewal. In the Explorer window, right-click ${path.basename(cmdFile)} and choose "Run as administrator"`) };
 });
 
 // সাইট ধরে সেশনের মেয়াদ (মিনিট; ফাঁকা/০ মানে ডিফল্ট)

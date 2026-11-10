@@ -395,12 +395,12 @@ function copyText(text) {
   ta.remove();
 }
 
-// পাবলিক ডোমেইন (Step B1): বাটন -> ডায়ালগ (নাম লেখা, DNS পরীক্ষা, সেভ)
+// পাবলিক ডোমেইন (Step B1 + B2): বাটন -> ডায়ালগ (নাম লেখা, DNS পরীক্ষা, সেভ, সার্টিফিকেট)
 function publicBtn(s) {
   const names = s.publicNames || [];
   const btn = el('button', { className: 'btn sm', textContent: names.length ? t('pub.btnN', names.length) : t('pub.btn'), title: names.join('\n') });
   btn.addEventListener('click', () => {
-    const dlg = el('dialog', { style: 'padding:18px; max-width:480px; border:1px solid rgba(128,128,128,.4); border-radius:10px;' });
+    const dlg = el('dialog', { style: 'padding:18px; max-width:520px; border:1px solid rgba(128,128,128,.4); border-radius:10px;' });
     const ta = el('textarea', { rows: 3, placeholder: 'app.example.com', value: names.join('\n') });
     ta.style.width = '100%';
     const res = el('div', { className: 'hint', style: 'margin-top:8px; word-break:break-all;' });
@@ -443,11 +443,108 @@ function publicBtn(s) {
       })
     );
     dlg.appendChild(el('div', { style: 'display:flex; gap:8px; justify-content:flex-end; margin-top:12px;' }, check, cancel, save));
+
+    // ---- সার্টিফিকেট অংশ (Step B2) ----
+    const certLines = el('div', { style: 'margin:6px 0; font-size:13px; word-break:break-all;' });
+    const certNote = el('div', { className: 'hint', style: 'color:#d1493f;' });
+    const certLog = el('pre', { style: 'display:none; max-height:260px; overflow:auto; font-size:11px; white-space:pre-wrap; word-break:break-all; background:rgba(128,128,128,.12); padding:6px; border-radius:6px; margin:6px 0 0;' });
+    const email = el('input', { type: 'text', placeholder: 'you@example.com' });
+    email.style.width = '100%';
+    const stg = el('input', { type: 'checkbox' });
+    const get = el('button', { className: 'btn sm accent', textContent: t('cert.get') });
+    const refreshCert = async () => {
+      let st;
+      try {
+        st = await window.api.acmeStatus(s.domain);
+      } catch {
+        return;
+      }
+      if (!email.value) email.value = st.email || '';
+      certLines.textContent = '';
+      if (!names.length) certLines.appendChild(el('div', { textContent: t('cert.noNames') }));
+      for (const c of st.certs) {
+        const line = el('div', { textContent: t('cert.' + c.status, c.host, c.expires, c.days) + (c.staging ? t('cert.staging') : '') });
+        line.style.color = c.status === 'ok' ? '#2e9d4f' : c.status === 'none' ? '' : '#d1493f';
+        certLines.appendChild(line);
+      }
+      const notes = [];
+      if (!st.installed) notes.push(t('cert.notinst'));
+      if (!st.serverRunning) notes.push(t('cert.srvStopped'));
+      else if (!st.port80) notes.push(t('cert.port'));
+      certNote.textContent = notes.join(' ');
+    };
+    get.addEventListener('click', () =>
+      work(get, async () => {
+        const typed = ta.value.toLowerCase().split(/[\s,;]+/).filter(Boolean).sort().join(' ');
+        if (typed !== [...names].sort().join(' ')) {
+          certNote.textContent = t('cert.unsaved');
+          return;
+        }
+        certLog.style.display = 'none';
+        const r = await window.api.acmeIssue(s.domain, email.value.trim(), stg.checked);
+        setStatus(r.message);
+        certNote.textContent = r.ok ? '' : r.message;
+        if (r.output) {
+          certLog.textContent = r.output;
+          certLog.style.display = 'block';
+        }
+        await refreshCert();
+      })
+    );
+    dlg.appendChild(
+      el(
+        'div',
+        { style: 'margin-top:14px; padding-top:10px; border-top:1px solid rgba(128,128,128,.3);' },
+        el('b', { textContent: t('cert.title') }),
+        el('div', { className: 'hint', textContent: t('cert.hint') }),
+        certLines,
+        el('label', { style: 'display:block; font-weight:600; margin:8px 0 3px;', textContent: t('cert.email') }),
+        email,
+        el('label', { style: 'display:flex; gap:6px; align-items:center; margin:8px 0; font-size:13px;' }, stg, el('span', { textContent: t('cert.test') })),
+        el('div', { style: 'display:flex; justify-content:flex-end;' }, get),
+        certNote,
+        certLog
+      )
+    );
+    refreshCert();
     dlg.addEventListener('close', () => dlg.remove());
     document.body.appendChild(dlg);
     dlg.showModal();
   });
   return btn;
+}
+
+// Tools পেজের win-acme কার্ড (Step B2): ইনস্টল অবস্থা, সার্টিফিকেট ফোল্ডার, অটো-নবায়ন
+async function loadAcme() {
+  const box = $('acmeBox');
+  if (!box) return;
+  let st;
+  try {
+    st = await window.api.acmeStatus();
+  } catch {
+    return;
+  }
+  box.textContent = '';
+  const install = el('button', { className: 'btn sm accent', textContent: t('acme.install') });
+  install.addEventListener('click', () =>
+    work(install, async () => {
+      const r = await window.api.acmeInstall();
+      setStatus(r.message);
+      await loadAcme();
+    })
+  );
+  const folder = el('button', { className: 'btn sm', textContent: t('acme.folder') });
+  folder.addEventListener('click', () => window.api.acmeFolder());
+  const renew = el('button', { className: 'btn sm', textContent: t('acme.taskSet') });
+  renew.addEventListener('click', () =>
+    work(renew, async () => {
+      const r = await window.api.acmeAutoRenew();
+      setStatus(r.message);
+      await loadAcme();
+    })
+  );
+  box.appendChild(el('div', { style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px;' }, el('b', { textContent: st.installed ? t('acme.installed') : t('acme.missing') }), el('span', { style: 'flex:1' }), ...(st.installed ? [] : [install]), folder));
+  box.appendChild(el('div', { style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;' }, el('span', { textContent: st.task ? t('acme.taskOn') : t('acme.taskOff') }), el('span', { style: 'flex:1' }), ...(st.installed && !st.task ? [renew] : [])));
 }
 
 // LAN-এ শেয়ার: সুইচ + পোর্ট; চালু থাকলে http://<IP>:<পোর্ট> ও Copy
@@ -973,6 +1070,7 @@ async function loadCfg() {
 function renderTools(tools) {
   loadExt();
   loadCfg();
+  loadAcme();
   const box = $('toolsList');
   box.textContent = '';
   for (const tl of tools) {
