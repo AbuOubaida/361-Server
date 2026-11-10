@@ -1129,8 +1129,41 @@ function trackPid(proc, kind, image) {
   proc.once('exit', () => {
     const r = readPidReg();
     delete r.pids[pid];
+    for (const [k, e] of Object.entries(r.pids)) if (e.owner === pid) delete r.pids[k];
     writePidReg(r);
   });
+}
+
+// পোর্টে আসলে কে শুনছে (LISTENING) তার PID। nginx/mysqld-এর ক্ষেত্রে চালানো প্রসেসের PID আর আসল শ্রোতার PID আলাদা হতে পারে
+// (পরীক্ষায় তাই হয়েছিল), তাই সার্ভার তৈরি হলে এই PID-ও তালিকায় রাখি
+function listenerPid(port) {
+  return new Promise((resolve) =>
+    exec('netstat -ano -p tcp', { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+      if (err) return resolve(null);
+      for (const line of String(out).split(/\r?\n/)) {
+        const m = line.match(/^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)/);
+        if (m && Number(m[1]) === Number(port) && m[2] !== '0') return resolve(m[2]);
+      }
+      resolve(null);
+    })
+  );
+}
+async function trackListener(owner, port, kind, image) {
+  try {
+    for (let i = 0; i < 6; i++) {
+      const pid = await listenerPid(port);
+      if (pid) {
+        const img = (await imageOfPid(pid)) || String(image).toLowerCase();
+        const reg = readPidReg();
+        if (!reg.pids[pid]) {
+          reg.pids[pid] = { kind: String(kind).toLowerCase(), image: img, owner: owner && owner.pid ? String(owner.pid) : undefined };
+          writePidReg(reg);
+        }
+        return;
+      }
+      await sleep(500);
+    }
+  } catch {}
 }
 const exeKind = (exe) => path.basename(exe, '.exe').toLowerCase();
 
@@ -1535,6 +1568,7 @@ async function startDatabase(id) {
       return tr(`সমস্যা: ${db.label} চালু হয়নি, ${r.reason}. ${out.trim().slice(-300)}`, `Error: ${db.label} failed to start, ${r.reason}. ${out.trim().slice(-300)}`);
     }
 
+    await trackListener(proc, port, db.stale, path.basename(svc.exe));
     dbRun[id] = { proc, port };
     proc.on('exit', () => {
       if (dbRun[id] && dbRun[id].proc === proc) delete dbRun[id];
@@ -1691,6 +1725,7 @@ async function startWebServer(id, keepBusy = false) {
       return tr(`সমস্যা: ${svc.label} চালু হয়নি, ${r.failed}. ${r.output.trim().slice(0, 200)} লগ: ${logPath}`, `Error: ${svc.label} failed to start, ${r.failed}. ${r.output.trim().slice(0, 200)} Log: ${logPath}`);
     }
     procs.push(r.proc);
+    await trackListener(r.proc, webPort, exeKind(svc.exe), path.basename(svc.exe));
 
     running = { id, procs, phpPorts, webPort };
     r.proc.on('exit', () => {
@@ -2964,6 +2999,7 @@ async function startNodeApp(domain) {
     }
     await new Promise((r) => setTimeout(r, 400));
   }
+  if (listening) await trackListener(run.proc, port, 'node', 'node.exe');
   if (nodeRun[domain] !== run) {
     const tail = nodeTail(domain);
     return nodeFail(tr(`অ্যাপ চালু হয়ে বন্ধ হয়ে গেছে। ${tail}`, `the app started and then stopped. ${tail}`));
