@@ -1365,7 +1365,7 @@ function bkRenderExtra() {
         { className: 'row' },
         el('span', { className: 'pathbox', textContent: it.path, style: 'flex:1; margin:0' }),
         bkModeSelect(it),
-        ...(it.mode === 'copy' ? [bkCleanInput(it)] : []),
+        ...(it.mode === 'copy' ? [bkCleanInput(it), bkKeepInput(it)] : []),
         el('button', {
           className: 'btn sm',
           textContent: '✕',
@@ -1386,7 +1386,7 @@ function bkModeSelect(it) {
   sel.value = it.mode === 'copy' ? 'copy' : 'archive';
   sel.addEventListener('change', () => {
     it.mode = sel.value;
-    if (it.mode !== 'copy') it.cleanDays = 0;
+    if (it.mode !== 'copy') { it.cleanDays = 0; it.keepDays = 0; }
     bkRenderExtra(); // Incremental কপি হলে "N দিন পর মোছা" ঘরটা দেখানো/লুকানো
   });
   return sel;
@@ -1401,6 +1401,17 @@ function bkCleanInput(it) {
     inp.value = String(it.cleanDays);
   });
   return el('label', { className: 'hint', style: 'margin:0; display:flex; align-items:center; gap:6px; white-space:nowrap' }, t('bk.extra.clean'), inp);
+}
+
+// Incremental কপির জন্য: বদলানো/মোছা ফাইলের পুরনো version N দিন রাখা (০ = রাখবে না, ডিস্কে বেশি জায়গা লাগে)
+function bkKeepInput(it) {
+  const inp = el('input', { type: 'number', min: '0', max: '3650', value: String(it.keepDays || 0), title: t('bk.extra.keepTip'), style: 'width:80px' });
+  inp.addEventListener('change', () => {
+    const v = parseInt(inp.value, 10);
+    it.keepDays = v > 0 ? Math.min(v, 3650) : 0;
+    inp.value = String(it.keepDays);
+  });
+  return el('label', { className: 'hint', style: 'margin:0; display:flex; align-items:center; gap:6px; white-space:nowrap' }, t('bk.extra.keep'), inp);
 }
 
 // www থেকে বাদ দেওয়া ফোল্ডারের তালিকা (www-র সাপেক্ষে পথ)

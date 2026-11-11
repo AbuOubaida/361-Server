@@ -18,6 +18,82 @@ const SYSTEM_MYSQL_DBS = new Set(['information_schema', 'performance_schema', 's
 // vendor ইচ্ছে করে বাদ দেওয়া হয়নি (composer অফলাইনে না-ও চলতে পারে)। path-সহ প্যাটার্ন (storage\\logs) 7-Zip-এর -xr! দিয়ে মেলে।
 const WWW_EXCLUDES = ['node_modules', '.git', '.next', 'storage\\logs', 'storage\\framework\\cache', 'storage\\framework\\sessions', 'storage\\framework\\views'];
 
+// ---- পুরনো version রাখা (copy ফোল্ডার, ঐচ্ছিক) ----
+// robocopy বদলানো ফাইল ওভাররাইট করে, তাই কপির আগে Node-এ তুলনা করে (size বা mtime আলাদা, 2 সেকেন্ড সহনশীলতা - robocopy-র মতোই)
+// যে ফাইলগুলো ওভাররাইট হবে তাদের পুরনোটা <dst>\.versions\<stamp>\<relative path>-এ সরিয়ে রাখি (একই ড্রাইভে rename, সস্তা)।
+const VERSIONS_DIR = '.versions';
+function moveToVersions(dst, rel, vdir) {
+  const from = path.join(dst, rel);
+  const to = path.join(vdir, rel);
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  try {
+    fs.renameSync(from, to);
+  } catch {
+    fs.copyFileSync(from, to);
+    fs.rmSync(from, { force: true });
+  }
+}
+async function snapshotChanged(src, dst, vdir) {
+  const fsp = fs.promises;
+  const res = { kept: 0, checked: 0, errors: 0, sample: [] };
+  const walk = async (rel) => {
+    let ents;
+    try {
+      ents = await fsp.readdir(path.join(src, rel), { withFileTypes: true });
+    } catch {
+      res.errors++;
+      return;
+    }
+    const jobs = [];
+    for (const e of ents) {
+      const r = rel ? rel + path.sep + e.name : e.name;
+      if (e.isSymbolicLink()) continue; // robocopy /XJ-এর মতো junction/symlink এড়াই
+      if (e.isDirectory()) {
+        await walk(r);
+      } else if (e.isFile()) {
+        jobs.push(r);
+      }
+    }
+    for (let i = 0; i < jobs.length; i += 64) {
+      await Promise.all(
+        jobs.slice(i, i + 64).map(async (r) => {
+          res.checked++;
+          try {
+            const [a, b] = await Promise.all([fsp.lstat(path.join(src, r)), fsp.lstat(path.join(dst, r)).catch((e) => (e.code === 'ENOENT' || e.code === 'ENOTDIR' ? null : Promise.reject(e)))]);
+            if (!b || !b.isFile()) return; // নতুন ফাইল: রাখার মতো পুরনো কিছু নেই
+            if (a.size !== b.size || Math.abs(a.mtimeMs - b.mtimeMs) > 2000) {
+              moveToVersions(dst, r, vdir);
+              res.kept++;
+              if (res.sample.length < 3) res.sample.push(r);
+            }
+          } catch {
+            res.errors++;
+          }
+        })
+      );
+    }
+  };
+  await walk('');
+  return res;
+}
+// .versions\<stamp> ফোল্ডার N দিনের পুরনো হলে মোছা (দিন ধরে, applyRetention-এর মতো)
+function pruneVersions(dst, days) {
+  const root = path.join(dst, VERSIONS_DIR);
+  let removed = 0;
+  if (!(days > 0) || !fs.existsSync(root)) return removed;
+  const limit = Date.now() - days * 86400000;
+  for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!e.isDirectory() || !STAMP_RE.test(e.name)) continue;
+    const d = new Date(Number(e.name.slice(0, 4)), Number(e.name.slice(4, 6)) - 1, Number(e.name.slice(6, 8))).getTime();
+    if (d < limit) {
+      fs.rmSync(path.join(root, e.name), { recursive: true, force: true });
+      removed++;
+    }
+  }
+  if (!fs.readdirSync(root).length) fs.rmdirSync(root);
+  return removed;
+}
+
 function run(exe, args, opts = {}) {
   return new Promise((resolve) => {
     const ch = execFile(
@@ -97,7 +173,8 @@ function createBackup(ctx) {
       .map((x) => {
         const mode = x.mode === 'copy' ? 'copy' : 'archive';
         const cd = parseInt(x.cleanDays, 10);
-        return { path: String(x.path), label: String(x.label || path.basename(String(x.path))), mode, cleanDays: mode === 'copy' && cd > 0 ? Math.min(cd, 3650) : 0 };
+        const kd = parseInt(x.keepDays, 10);
+        return { path: String(x.path), label: String(x.label || path.basename(String(x.path))), mode, cleanDays: mode === 'copy' && cd > 0 ? Math.min(cd, 3650) : 0, keepDays: mode === 'copy' && kd > 0 ? Math.min(kd, 3650) : 0 };
       })
       .slice(0, 20);
 
@@ -442,7 +519,7 @@ function createBackup(ctx) {
   // robocopy /COPY:DAT মূল ফাইলের তারিখই রাখে, তাই "হারানোর দিন" আলাদা state ফাইলে (.s360-state.json) লিখে রাখি।
   // নিরাপত্তা: মূল ফোল্ডার না পড়া গেলে/খালি হলে, বা কপির অর্ধেকের বেশি ফাইল "হারানো" দেখালে (ড্রাইভ খুলে যাওয়ার লক্ষণ) কিছুই মোছা হয় না।
   const STATE_NAME = '.s360-state.json';
-  async function cleanGone(src, dst, days) {
+  async function cleanGone(src, dst, days, vdir) {
     const fsp = fs.promises;
     let srcEntries;
     try {
@@ -490,7 +567,8 @@ function createBackup(ctx) {
       if (!firstIso) marked++;
       if (now - first >= days * 86400000) {
         try {
-          await fsp.rm(path.join(dst, r), { force: true });
+          if (vdir) moveToVersions(dst, r, vdir); // পুরনো version রাখা চালু থাকলে মোছার বদলে .versions-এ সরানো
+          else await fsp.rm(path.join(dst, r), { force: true });
           removed++;
           if (sample.length < 5) sample.push(r);
           continue;
@@ -704,6 +782,14 @@ function createBackup(ctx) {
                 failed = true;
                 continue;
               }
+              const vdir = it.keepDays > 0 ? path.join(to, VERSIONS_DIR, stamp) : null;
+              // পুরনো version রাখা: robocopy ওভাররাইট করার আগে বদলানো ফাইলের পুরনোটা সরিয়ে রাখি (ব্যর্থ হলে WARN, কপি তবু চলে)
+              if (vdir && fs.existsSync(to)) {
+                const sn = await snapshotChanged(it.path, to, vdir).catch((e) => ({ error: e.message }));
+                const vn = `Versions ${it.label} on ${label}`;
+                if (sn.error) step(vn, 'warn', 'could not keep old versions: ' + sn.error);
+                else step(vn, sn.errors ? 'warn' : true, `${sn.kept} changed file(s) kept as old version, ${sn.checked} checked` + (sn.errors ? `, ${sn.errors} could not be checked` : '') + (sn.sample.length ? `; e.g. ${sn.sample.join(', ')}` : ''));
+              }
               const t1 = Date.now();
               log(`  copying ${it.path} -> ${to} (incremental, plain files) ...`);
               const cr = await copyFolderIncremental(it.path, to);
@@ -711,10 +797,18 @@ function createBackup(ctx) {
                 step(nm, true, `${to} (${Math.round((Date.now() - t1) / 1000)} s, plain files, NOT encrypted)`);
                 // ফোল্ডারের জন্য "N দিন পর মোছা" চালু থাকলে (শুধু কপি সফল হলে)
                 if (it.cleanDays > 0) {
-                  const cl = await cleanGone(it.path, to, it.cleanDays).catch((e) => ({ warn: true, message: 'cleanup error: ' + e.message }));
+                  const cl = await cleanGone(it.path, to, it.cleanDays, vdir).catch((e) => ({ warn: true, message: 'cleanup error: ' + e.message }));
                   const cn = `Clean ${it.label} on ${label}`;
                   if (cl.warn) step(cn, 'warn', cl.message);
                   else step(cn, true, `${cl.removed} file(s) removed, ${cl.pending} missing from the source and waiting (limit ${it.cleanDays} days), ${cl.marked} newly noticed, ${cl.total} checked` + (cl.sample.length ? `; removed e.g. ${cl.sample.join(', ')}` : ''));
+                }
+                if (it.keepDays > 0) {
+                  try {
+                    const pv = pruneVersions(to, it.keepDays);
+                    if (pv) step(`Versions ${it.label} on ${label}`, true, `${pv} old version folder(s) removed (older than ${it.keepDays} days)`);
+                  } catch (e) {
+                    step(`Versions ${it.label} on ${label}`, 'warn', 'cleanup error: ' + e.message);
+                  }
                 }
               } else {
                 step(nm, false, cr.message);
@@ -770,4 +864,4 @@ function createBackup(ctx) {
   return { getConfig, setConfig, runBackup, isRunning, lastStatus, tailLog, find7z, ensure7z, dirs: { baseDir, logsDir } };
 }
 
-module.exports = { createBackup, stampOf, STAMP_RE };
+module.exports = { createBackup, stampOf, STAMP_RE, snapshotChanged, pruneVersions, moveToVersions };
