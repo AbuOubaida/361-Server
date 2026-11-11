@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, Tray, nativeImage } = require('electron');
 const { spawn, exec, execFile, execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -7,6 +7,7 @@ const http = require('http');
 const net = require('net');
 const extract = require('extract-zip');
 const crypto = require('crypto');
+const { EventEmitter } = require('events');
 const os = require('os');
 const dns = require('dns');
 
@@ -1322,6 +1323,10 @@ function hostsFailNote(h) {
 }
 
 let win = null;
+let tray = null; // সিস্টেম ট্রে আইকন (উইন্ডো বন্ধ করলে অ্যাপ ও সার্ভার এখানে চলতে থাকে)
+let quitting = false; // true হলে উইন্ডো বন্ধ মানে সত্যিই বেরিয়ে যাওয়া (ট্রের Quit, Windows শাটডাউন)
+const START_HIDDEN = process.argv.includes('--hidden'); // Windows লগইনে অ্যাপ উইন্ডো ছাড়া ট্রেতে চালু হয়
+const keepRunningOn = () => settings.keepRunning !== false; // ডিফল্ট চালু
 let running = null; // { id, procs: [...] } — একসময়ে একটাই সার্ভার চলবে (পোর্ট ৮০)
 let busy = false;
 
@@ -1333,10 +1338,33 @@ function createWindow() {
     minHeight: 480,
     title: 'Server 360',
     backgroundColor: '#0f172a',
-    webPreferences: { preload: path.join(__dirname, 'preload.js') },
+    // লগইনে --hidden দিয়ে চালু হলে (আর ফোল্ডার আগে ঠিক করা থাকলে) উইন্ডো দেখানো হয় না, শুধু ট্রে
+    show: !(START_HIDDEN && keepRunningOn() && settings.wwwDir),
+    // উইন্ডো লুকানো থাকলেও পেজের টাইমার (অটো-স্টার্ট, স্ট্যাটাস) যেন ধীর না হয়
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), backgroundThrottling: false },
   });
   win.setMenuBarVisibility(false);
   win.loadFile('index.html');
+  // Windows বন্ধ/লগ-অফ হলে ট্রেতে লুকানো উইন্ডো যেন শাটডাউন আটকে না রাখে ('session-end' BrowserWindow-এর ইভেন্ট)
+  win.on('session-end', () => {
+    quitting = true;
+  });
+  // X চাপলে অ্যাপ বন্ধ না করে ট্রেতে লুকিয়ে যায় (সেটিং বন্ধ থাকলে, বা ট্রে বানানো না গেলে, আগের মতো বন্ধ হয়)
+  win.on('close', (e) => {
+    if (quitting || !keepRunningOn() || !tray || tray.isDestroyed()) return;
+    e.preventDefault();
+    win.hide();
+    if (!settings.trayHintShown) {
+      settings.trayHintShown = true;
+      saveSettings(settings);
+      try {
+        tray.displayBalloon({
+          title: 'Server 360',
+          content: tr('অ্যাপ ট্রেতে চলছে, সার্ভারগুলো চালু আছে। পুরো বন্ধ করতে ট্রে আইকনে ডান-ক্লিক করে Quit দিন।', 'The app keeps running in the tray and your servers stay on. To quit completely, right-click the tray icon and choose Quit.'),
+        });
+      } catch {}
+    }
+  });
   // ডায়াগনস্টিক: পেজ ক্র্যাশ/ঝুলে গেলে userData\\crash.log-এ লেখা, ক্র্যাশ হলে পেজ নিজে থেকে আবার লোড; F12 বা Ctrl+Shift+I = DevTools
   const crashLog = (what, extra) => {
     try {
@@ -1362,8 +1390,69 @@ function createWindow() {
 }
 
 function sendStatus(msg) {
-  if (win) win.webContents.send('status', msg);
+  if (win && !win.isDestroyed()) win.webContents.send('status', msg);
 }
+
+// ---------- ট্রে আইকন ----------
+// ৩২x৩২ আইকন সরাসরি কোডে (আলাদা ফাইল লাগে না)
+const TRAY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAASklEQVR42mNgGAVoQDX59X9a4sHrAFpbTNAhow4YdQA+xeSC4eeAAY+CUQeM5oIBcwCpeNQBw88Bo7lgtD0w6oBh1T8Y/F2zEQcAB87wUsIIlngAAAAASUVORK5CYII=';
+function showMainWindow() {
+  if (!win || win.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+function buildTray() {
+  try {
+    if (!tray || tray.isDestroyed()) {
+      tray = new Tray(nativeImage.createFromBuffer(Buffer.from(TRAY_PNG, 'base64')));
+      tray.on('click', showMainWindow);
+      tray.on('double-click', showMainWindow);
+    }
+    tray.setToolTip('Server 360');
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: tr('Server 360 খুলুন', 'Open Server 360'), click: showMainWindow },
+        { type: 'separator' },
+        {
+          label: tr('বন্ধ করুন (সব সার্ভার বন্ধ হবে)', 'Quit (stops all servers)'),
+          click: () => {
+            quitting = true;
+            app.quit();
+          },
+        },
+      ])
+    );
+  } catch (err) {
+    tray = null; // ট্রে না থাকলে X চাপলে অ্যাপ আগের মতো বন্ধ হবে, যেন অ্যাপ হারিয়ে না যায়
+  }
+}
+function applyLoginItem() {
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: !!settings.openAtLogin,
+      path: process.execPath,
+      args: app.isPackaged ? ['--hidden'] : [app.getAppPath(), '--hidden'],
+    });
+  } catch {}
+}
+ipcMain.handle('app:getBehavior', () => ({
+  keepRunning: keepRunningOn(),
+  openAtLogin: !!settings.openAtLogin,
+  startAllOnLaunch: !!settings.startAllOnLaunch,
+}));
+ipcMain.handle('app:setBehavior', (_e, b) => {
+  b = b || {};
+  settings.keepRunning = !!b.keepRunning;
+  settings.openAtLogin = !!b.openAtLogin;
+  settings.startAllOnLaunch = !!b.startAllOnLaunch;
+  saveSettings(settings);
+  applyLoginItem();
+  return { keepRunning: keepRunningOn(), openAtLogin: !!settings.openAtLogin, startAllOnLaunch: !!settings.startAllOnLaunch };
+});
 
 function killTree(pid) {
   exec(`taskkill /pid ${pid} /t /f`);
@@ -1800,6 +1889,74 @@ async function waitDbReady(db, svc, port, proc, timeoutMs = 90000) {
   return { ok: false, reason: tr('সময় শেষ হয়ে গেছে', 'timed out') };
 }
 
+// PostgreSQL: postgres.exe পূর্ণ admin token-এ চালালে নিজে চলতে রাজি হয় না ("Execution of PostgreSQL by a user with
+// administrative permissions is not permitted"); Task Scheduler-এর backup এই অবস্থায় পড়ে। pg_ctl Windows-এ নিজেই
+// restricted token বানিয়ে postgres চালায়, তাই ওই ভুলে পড়লে `pg_ctl start` দিয়ে আবার চেষ্টা করি।
+// pg_ctl-এর চালানো প্রসেস আমাদের child নয়, তাই postmaster.pid থেকে PID নিয়ে একটা "নকল proc" (pid + exit ইভেন্ট) বানাই,
+// যাতে stopDatabase / before-quit / waitDbReady আগের মতোই কাজ করে।
+const PG_ADMIN_ERR = /administrative permissions|unprivileged user|root privileges/i;
+function pidProxy(pid) {
+  const proc = new EventEmitter();
+  proc.pid = pid;
+  proc.exitCode = null;
+  const timer = setInterval(() => {
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      alive = e.code === 'EPERM';
+    }
+    if (!alive) {
+      clearInterval(timer);
+      proc.exitCode = 0;
+      proc.emit('exit', 0);
+    }
+  }, 1000);
+  timer.unref();
+  return proc;
+}
+async function startPostgresViaPgCtl(svc, port) {
+  const dataDir = pgDataDir();
+  const logFile = path.join(path.dirname(dataDir), 'pg_ctl-start.log');
+  const lastLog = () => {
+    try {
+      return fs.readFileSync(logFile, 'utf8').trim().slice(-300);
+    } catch {
+      return '';
+    }
+  };
+  // execFile নয়: চালু হওয়া postgres.exe stdout/stderr pipe ধরে রাখে, তখন execFile-এর callback timeout পর্যন্ত (৯০ সেকেন্ড) আটকে থাকে
+  // (14:14 রানে প্রমাণিত)। stdio 'ignore' দিয়ে spawn করলে pg_ctl শেষ হওয়া মাত্রই ফেরে।
+  const res = await new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => {
+      if (!done) {
+        done = true;
+        clearTimeout(timer);
+        resolve(v);
+      }
+    };
+    const child = spawn(
+      path.join(svc.dir, 'bin', 'pg_ctl.exe'),
+      ['start', '-w', '-t', '60', '-D', dataDir, '-l', logFile, '-o', `-p ${port} -c listen_addresses=127.0.0.1`],
+      { stdio: 'ignore', windowsHide: true }
+    );
+    const timer = setTimeout(() => {
+      killTree(child.pid);
+      finish({ err: tr('pg_ctl সময়মতো শেষ হয়নি', 'pg_ctl did not finish in time') });
+    }, 90000);
+    child.on('error', (e) => finish({ err: e.message }));
+    child.on('exit', (code) => finish(code === 0 ? {} : { err: `exit code ${code}` }));
+  });
+  if (res.err) return { ok: false, reason: `pg_ctl: ${res.err.slice(-200)} ${lastLog()}`.trim() };
+  let pid = 0;
+  try {
+    pid = parseInt(fs.readFileSync(path.join(dataDir, 'postmaster.pid'), 'utf8').split(/\r?\n/)[0], 10) || 0;
+  } catch {}
+  if (!pid) return { ok: false, reason: tr('postmaster.pid পাওয়া যায়নি', 'postmaster.pid not found') + ' ' + lastLog() };
+  return { ok: true, proc: pidProxy(pid) };
+}
+
 async function startDatabase(id) {
   const db = DATABASES[id];
   if (!db) return tr('সমস্যা: অজানা ডাটাবেস', 'Error: unknown database');
@@ -1847,16 +2004,29 @@ async function startDatabase(id) {
     proc.stdout.on('data', collect);
     proc.stderr.on('data', collect);
 
-    const r = await waitDbReady(db, svc, port, proc);
+    let r = await waitDbReady(db, svc, port, proc);
+    let runProc = proc;
+    if (!r.ok && id === 'postgres' && PG_ADMIN_ERR.test(out)) {
+      // admin token সমস্যা: pg_ctl দিয়ে restricted token-এ আবার চেষ্টা
+      sendStatus(tr('PostgreSQL admin অধিকারে চলতে চায় না, pg_ctl দিয়ে আবার চেষ্টা হচ্ছে...', 'PostgreSQL refuses to run with admin rights, retrying through pg_ctl...'));
+      const pr = await startPostgresViaPgCtl(svc, port);
+      if (pr.ok) {
+        runProc = pr.proc;
+        trackPid(runProc, db.stale, path.basename(svc.exe));
+        r = { ok: true };
+      } else {
+        out = (out + ' | ' + pr.reason).slice(-600);
+      }
+    }
     if (!r.ok) {
       killTree(proc.pid);
       return tr(`সমস্যা: ${db.label} চালু হয়নি, ${r.reason}. ${out.trim().slice(-300)}`, `Error: ${db.label} failed to start, ${r.reason}. ${out.trim().slice(-300)}`);
     }
 
-    await trackListener(proc, port, db.stale, path.basename(svc.exe));
-    dbRun[id] = { proc, port };
-    proc.on('exit', () => {
-      if (dbRun[id] && dbRun[id].proc === proc) delete dbRun[id];
+    await trackListener(runProc, port, db.stale, path.basename(svc.exe));
+    dbRun[id] = { proc: runProc, port };
+    runProc.on('exit', () => {
+      if (dbRun[id] && dbRun[id].proc === runProc) delete dbRun[id];
     });
     let extra = '';
     if (id === 'mysql' && mysqlReset) extra = await finishMysqlReset(port);
@@ -3747,6 +3917,7 @@ ipcMain.handle('lang:get', () => (settings.lang === 'en' ? 'en' : 'bn'));
 ipcMain.handle('lang:set', (_event, lang) => {
   settings.lang = lang === 'en' ? 'en' : 'bn';
   saveSettings(settings);
+  if (tray && !tray.isDestroyed()) buildTray(); // ট্রে মেনুর ভাষাও বদলাবে
   return settings.lang;
 });
 
@@ -4457,6 +4628,11 @@ async function askWwwFolderFirstRun() {
 // মূল কাজ backup.js-এ; এখানে শুধু ctx জোগান ও IPC। পাসওয়ার্ড settings.json-এ সাধারণ লেখায় নয়: Electron safeStorage (DPAPI) দিয়ে মোড়া।
 const { safeStorage } = require('electron');
 const { createBackup } = require('./backup.js');
+const BACKUP_CLI = process.argv.includes('--backup'); // Task Scheduler এটা দিয়ে চালায়: কোনো উইন্ডো ছাড়া একবার backup নিয়ে বেরিয়ে যায়
+// একসাথে একটাই অ্যাপ: দ্বিতীয়বার খুললে আগেরটার উইন্ডো সামনে আসে (--backup চালানো আলাদা, তাতে লক নেই)
+const GOT_LOCK = BACKUP_CLI ? true : app.requestSingleInstanceLock();
+if (!GOT_LOCK) app.quit();
+app.on('second-instance', () => showMainWindow());
 const SEVENZIP_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/7z2606-x64.exe';
 const backup = createBackup({
   tr,
@@ -4485,6 +4661,14 @@ const backup = createBackup({
   },
   download,
   sevenZipUrl: SEVENZIP_URL,
+  // ডাটাবেস বন্ধ থাকলে backup-এর জন্য সাময়িক চালু/বন্ধ (startDatabase নিজে ensureService, পোর্ট পরীক্ষা ইত্যাদি করে)
+  startDb: async (id) => {
+    const message = await startDatabase(id);
+    return { ok: !!dbRun[id], message };
+  },
+  stopDb: async (id) => {
+    await stopDatabase(id);
+  },
   onProgress: (name) => win && !win.isDestroyed() && win.webContents.send('status', tr('Backup: ', 'Backup: ') + name),
 });
 
@@ -4512,16 +4696,84 @@ ipcMain.handle('backup:chooseFolder', async () => {
 });
 ipcMain.handle('backup:openLogs', () => shell.openPath(backup.dirs.logsDir()));
 
+// ---------- Backup: Windows Task Scheduler (অ্যাপ বন্ধ থাকলেও) ----------
+// প্রতিটা সময়ের জন্য একটা task: "Server 360 - Backup HHMM", রোজ চলে, ইউজারের Windows পাসওয়ার্ড দিয়ে (লগআউট থাকলেও)।
+// পাসওয়ার্ড আমরা কোথাও রাখি না, শুধু schtasks-কে একবার দিই (Windows নিজে সংরক্ষণ করে)। Task চালায় run-backup.cmd -> `electron . --backup`।
+const BK_TASK_PREFIX = 'Server 360 - Backup ';
+let bkTaskTimes = new Set();
+const bkDefaultUser = () => (process.env.USERDOMAIN ? process.env.USERDOMAIN + '\\' : '') + (process.env.USERNAME || '');
+
+function bkSchtasks(args) {
+  return new Promise((resolve) =>
+    execFile('schtasks.exe', args, { windowsHide: true, timeout: 60000 }, (err, stdout, stderr) =>
+      resolve({ ok: !err, out: String(stdout || '') + String(stderr || '') })
+    )
+  );
+}
+async function bkTaskList() {
+  if (process.platform !== 'win32') return [];
+  const r = await bkSchtasks(['/Query', '/FO', 'CSV', '/NH']);
+  const list = [];
+  for (const line of r.out.split(/\r?\n/)) {
+    const mm = /^"\\Server 360 - Backup (\d{2})(\d{2})"/.exec(line.trim());
+    if (mm) list.push(`${mm[1]}:${mm[2]}`);
+  }
+  return list.sort();
+}
+async function bkTaskRefresh() {
+  const list = await bkTaskList();
+  bkTaskTimes = new Set(list);
+  return list;
+}
+
+ipcMain.handle('backup:taskState', async () => ({ times: await bkTaskRefresh(), user: bkDefaultUser() }));
+
+ipcMain.handle('backup:taskInstall', async (_e, user, password) => {
+  if (process.platform !== 'win32') return { ok: false, message: tr('এটা শুধু Windows-এ চলে', 'Windows only') };
+  const cfg = backup.getConfig();
+  if (!cfg.times.length) return { ok: false, message: tr('আগে অন্তত একটা সময় যোগ করে সেভ করুন', 'Add at least one time and save first') };
+  if (!(cfg.local.enabled && cfg.local.dir) && !(cfg.share.enabled && cfg.share.unc)) return { ok: false, message: tr('আগে একটা গন্তব্য (লোকাল বা নেটওয়ার্ক শেয়ার) চালু করে সেভ করুন', 'Enable a destination (local or network share) and save first') };
+  user = String(user || '').trim() || bkDefaultUser();
+  password = String(password || '');
+  if (!password) return { ok: false, message: tr('ইউজারের Windows পাসওয়ার্ড দিন (ফাঁকা পাসওয়ার্ডে লগআউট অবস্থায় চালানো যায় না)', 'Enter the Windows password of that user (a blank password cannot run while logged out)') };
+  try {
+    // ছোট runner ফাইল: পথে স্পেস থাকলেও schtasks-এর /TR ঠিক থাকে
+    const cmdFile = path.join(backup.dirs.baseDir(), 'run-backup.cmd');
+    fs.mkdirSync(backup.dirs.baseDir(), { recursive: true });
+    const appArg = app.isPackaged ? '' : `"${app.getAppPath()}" `;
+    // Task Scheduler আসল প্রোগ্রামকে কম (below-normal) priority-তে চালায়, তাই www প্যাক ধীর হয়েছিল (৫ মিনিট, হাতে ১২ সেকেন্ড); `start /normal` দিয়ে সাধারণ priority চাওয়া
+    fs.writeFileSync(cmdFile, ['@echo off', `start "" /wait /normal /b "${process.execPath}" ${appArg}--backup`, 'exit /b %errorlevel%', ''].join('\r\n'));
+    for (const tm of await bkTaskList()) await bkSchtasks(['/Delete', '/TN', BK_TASK_PREFIX + tm.replace(':', ''), '/F']);
+    const fails = [];
+    for (const tm of cfg.times) {
+      const r = await bkSchtasks(['/Create', '/TN', BK_TASK_PREFIX + tm.replace(':', ''), '/TR', `"${cmdFile}"`, '/SC', 'DAILY', '/ST', tm, '/RU', user, '/RP', password, '/F']);
+      if (!r.ok) fails.push(`${tm}: ${r.out.split(password).join('***').trim().slice(0, 200)}`);
+    }
+    const list = await bkTaskRefresh();
+    if (fails.length) return { ok: false, message: tr('Task বসানো যায়নি: ', 'Could not create the task: ') + fails[0] + tr(' (ভুল ইউজার/পাসওয়ার্ড, অথবা অ্যাপ Administrator হিসেবে না চালালে এই ইউজারের জন্য অনুমতি নেই)', ' (wrong user/password, or this account may not be allowed; try running the app as Administrator)'), times: list };
+    return { ok: true, message: tr(`Task Scheduler-এ বসানো হয়েছে: ${list.join(', ')} (অ্যাপ বন্ধ বা লগআউট থাকলেও চলবে)`, `Installed in Task Scheduler: ${list.join(', ')} (runs even when the app is closed or logged out)`), times: list };
+  } catch (err) {
+    return { ok: false, message: tr('সমস্যা: ', 'Error: ') + err.message };
+  }
+});
+
+ipcMain.handle('backup:taskRemove', async () => {
+  for (const tm of await bkTaskList()) await bkSchtasks(['/Delete', '/TN', BK_TASK_PREFIX + tm.replace(':', ''), '/F']);
+  const list = await bkTaskRefresh();
+  return list.length ? { ok: false, message: tr('কিছু task মোছা যায়নি (Administrator হিসেবে অ্যাপ চালিয়ে দেখুন)', 'Some tasks could not be removed (try running the app as Administrator)'), times: list } : { ok: true, message: tr('Task Scheduler থেকে মোছা হয়েছে', 'Removed from Task Scheduler'), times: [] };
+});
+
 // অ্যাপ খোলা থাকলে নির্ধারিত সময়ে নিজে backup (প্রতি ২০ সেকেন্ডে দেখে; একই দিনের একই সময়ে একবারই)
 let bkLastFire = '';
 setInterval(() => {
   try {
+    if (BACKUP_CLI || !GOT_LOCK) return;
     const cfg = backup.getConfig();
     if (!cfg.appEnabled || !cfg.times.length || backup.isRunning()) return;
     const d = new Date();
     const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()} ${hm}`;
-    if (!cfg.times.includes(hm) || bkLastFire === key) return;
+    if (!cfg.times.includes(hm) || bkLastFire === key || bkTaskTimes.has(hm)) return; // Task Scheduler-এ বসানো সময় অ্যাপ নিজে ধরে না (দুবার backup এড়াতে)
     bkLastFire = key;
     backup.runBackup({ source: 'timer' }).then((r) => {
       if (win && !win.isDestroyed()) win.webContents.send('status', (r.ok ? '' : '⚠ ') + r.message);
@@ -4530,17 +4782,38 @@ setInterval(() => {
 }, 20000);
 
 app.whenReady().then(() => {
+  if (!GOT_LOCK) return;
+  if (BACKUP_CLI) {
+    // Task Scheduler: উইন্ডো নেই; একবার backup নিয়ে কোড দিয়ে বেরিয়ে যায় (0 = সফল)
+    backup
+      .runBackup({ source: 'task' })
+      .then((r) => app.exit(r.ok ? 0 : 1))
+      .catch(() => app.exit(2));
+    return;
+  }
+  bkTaskRefresh().catch(() => {});
   Menu.setApplicationMenu(null);
   createWindow();
+  if (keepRunningOn()) buildTray();
+  applyLoginItem();
   if (!settings.wwwDir) {
     win.webContents.once('did-finish-load', () => askWwwFolderFirstRun());
   } else {
     // আগের বারের রয়ে যাওয়া node.exe সাফ করে \"অ্যাপ খুললে চালু\" Node অ্যাপগুলো চালু করা (উইন্ডো তৈরির একটু পরে)
     win.webContents.once('did-finish-load', () => setTimeout(() => startupNodeApps(), 2500));
+    // সেটিং চালু থাকলে অ্যাপ খুলে ৪ সেকেন্ড পর Start All (কোন ওয়েব সার্ভার, সেটা UI-তে বেছে রাখা, তাই renderer চালায়)
+    if (settings.startAllOnLaunch) {
+      win.webContents.once('did-finish-load', () =>
+        setTimeout(() => {
+          if (win && !win.isDestroyed()) win.webContents.send('auto:startAll');
+        }, 4000)
+      );
+    }
   }
 });
 
 app.on('before-quit', () => {
+  quitting = true;
   if (running) running.procs.forEach((p) => killTree(p.pid));
   for (const r of Object.values(nodeRun)) killTree(r.proc.pid); // Node অ্যাপগুলোও বন্ধ
   // ডাটাবেসকে আগে নিয়ম মেনে বন্ধ করার চেষ্টা (ডাটা নিরাপদ রাখতে)

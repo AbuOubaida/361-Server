@@ -114,6 +114,14 @@ contextBridge.exposeInMainWorld('api', {
   backupEnsure7z: () => ipcRenderer.invoke('backup:ensure7z'),
   backupChooseFolder: () => ipcRenderer.invoke('backup:chooseFolder'),
   backupOpenLogs: () => ipcRenderer.invoke('backup:openLogs'),
+  backupTaskState: () => ipcRenderer.invoke('backup:taskState'),
+  backupTaskInstall: (user, pw) => ipcRenderer.invoke('backup:taskInstall', user, pw),
+  backupTaskRemove: () => ipcRenderer.invoke('backup:taskRemove'),
+
+  // অ্যাপ চালু থাকা / অটো-স্টার্ট (ট্রে)
+  appGetBehavior: () => ipcRenderer.invoke('app:getBehavior'),
+  appSetBehavior: (b) => ipcRenderer.invoke('app:setBehavior', b),
+  onAutoStartAll: (callback) => ipcRenderer.on('auto:startAll', () => callback()),
 
   // ভাষা
   getLang: () => ipcRenderer.invoke('lang:get'),

@@ -121,6 +121,7 @@
     /* শুধু সাধারণ বাটনে হোভার; রঙিন বাটনে (সবুজ/লাল/নীল) আলাদা হোভার নিচে */
     .btn:not(.primary):not(.danger):not(.accent):hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
     .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn[hidden] { display: none; }
     .btn.primary { background: var(--ok); border-color: var(--ok); color: #fff; }
     .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
     .btn.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -488,7 +489,14 @@
             <div class="row">
               <label class="switch"><input type="checkbox" id="bkAppTimer"><i></i><span data-i18n="bk.appTimer">অ্যাপ খোলা থাকলে এই সময়গুলোতে নিজে চালান</span></label>
             </div>
-            <div class="hint" data-i18n="bk.sched.hint">অ্যাপ বন্ধ থাকলেও চালানোর জন্য Windows Task Scheduler-এর সুবিধা পরের ধাপে আসছে।</div>
+            <div class="hint" data-i18n="bk.sched.hint">অ্যাপ বন্ধ বা লগআউট থাকলেও চালাতে Windows Task Scheduler-এ বসান। এখানে দেওয়া Windows পাসওয়ার্ড আমরা সেভ করি না, শুধু Windows-কে একবার দিই।</div>
+            <div class="row">
+              <input id="bkTaskUser" type="text" style="width:200px" data-i18n-ph="bk.task.user" placeholder="Windows ইউজার" spellcheck="false" autocomplete="off">
+              <input id="bkTaskPw" type="password" style="width:200px" data-i18n-ph="bk.task.pw" placeholder="Windows পাসওয়ার্ড" autocomplete="new-password">
+              <button id="bkTaskInstall" class="btn sm accent" data-i18n="bk.task.install">Task Scheduler-এ বসান</button>
+              <button id="bkTaskRemove" class="btn sm" data-i18n="bk.task.remove">Task মুছুন</button>
+            </div>
+            <div class="hint" id="bkTaskState"></div>
           </div>
 
           <div class="section-title" data-i18n="bk.what.title">কী কী backup হবে</div>
@@ -501,9 +509,18 @@
             </div>
             <div class="hint" data-i18n="bk.what.hint">ডাটাবেস সবসময় dump হয় (চলমান ডাটা ফোল্ডার কপি হয় না), বন্ধ থাকলে ওই ধাপ বাদ যায়। www থেকে node_modules ও .git বাদ। সার্টিফিকেট ও সেটিংসে প্রাইভেট কী ও পাসওয়ার্ড থাকে, তাই এটা শুধু পাসওয়ার্ড দেওয়া (encrypted) backup-এ যায়।</div>
             <div class="row">
+              <label class="switch"><input type="checkbox" id="bkAutoDb"><i></i><span data-i18n="bk.autoDb">ডাটাবেস বন্ধ থাকলে backup-এর জন্য নিজে চালু করে, শেষে আবার বন্ধ করুন</span></label>
+            </div>
+            <div class="row">
               <button id="bkExtraAdd" class="btn sm" data-i18n="bk.extra.add">+ নিজের ফোল্ডার যোগ করুন</button>
             </div>
+            <div class="hint" data-i18n="bk.extra.hint">নিজের ফোল্ডারে দুটো মোড: "আর্কাইভ" = প্রতিবার .7z (পাসওয়ার্ড থাকলে encrypted), ছোট ফোল্ডারের জন্য। "Incremental কপি" = শুধু নতুন/বদলানো ফাইল কপি হয়, মূল ফোল্ডার থেকে ফাইল মুছলেও backup-এ থেকে যায়; বড় user-upload ফোল্ডারের জন্য। এই কপি গন্তব্যের files ফোল্ডারে প্লেইন ফাইল থাকে, encrypted নয়।</div>
             <div id="bkExtra"></div>
+            <div class="hint" style="margin-top:14px"><b data-i18n="bk.wwwEx.title">www আর্কাইভ থেকে বাদ দিন</b><br><span data-i18n="bk.wwwEx.hint">www-র ভেতরের বড় ফোল্ডার (যেমন সাইটের public\storage\uploads) এখানে যোগ করলে সেটা www.7z-এ ঢুকবে না। ওই ফোল্ডার আলাদা "Incremental কপি" হিসেবে যোগ করুন, না হলে সেটা কোনো backup-এই থাকবে না।</span></div>
+            <div class="row">
+              <button id="bkWwwExAdd" class="btn sm" data-i18n="bk.wwwEx.add">+ www থেকে ফোল্ডার বাদ দিন</button>
+            </div>
+            <div id="bkWwwEx"></div>
           </div>
 
           <div class="section-title" data-i18n="bk.sec.title">নিরাপত্তা ও পুরনো backup</div>
@@ -600,6 +617,24 @@
             </div>
             <div class="hint" data-i18n="settings.pw.forgotPg">পাসওয়ার্ড ভুলে গেলে রিসেট করুন।</div>
             <div class="hint" data-i18n="settings.pg.hint">PostgreSQL চালু থাকতে হবে।</div>
+          </div>
+
+          <div class="section-title" data-i18n="settings.app.section">অ্যাপ চালু থাকা</div>
+          <div class="card">
+            <div class="card-title" data-i18n="settings.app.title">চালু থাকা ও অটো-স্টার্ট</div>
+            <div class="card-sub" data-i18n="settings.app.sub">উইন্ডো বন্ধ করলেও সার্ভার চলতে থাকে, তাই সাইট ও নির্ধারিত backup ঠিকমতো কাজ করে</div>
+            <div class="row first">
+              <label class="switch"><input type="checkbox" id="appKeep"><i></i><b data-i18n="settings.app.keep">X চাপলে অ্যাপ ট্রেতে চলতে থাকুক</b></label>
+            </div>
+            <div class="hint" data-i18n="settings.app.keepHint">সার্ভার বন্ধ হবে না। পুরো বন্ধ করতে ট্রে আইকনে ডান-ক্লিক করে Quit দিন।</div>
+            <div class="row">
+              <label class="switch"><input type="checkbox" id="appLogin"><i></i><b data-i18n="settings.app.login">Windows-এ লগইন করলে অ্যাপ নিজে খুলুক</b></label>
+            </div>
+            <div class="hint" data-i18n="settings.app.loginHint">উইন্ডো ছাড়া শুধু ট্রেতে চালু হয়। লগইনের আগে চলে না (সার্ভার PC-তে Windows auto-login লাগবে)।</div>
+            <div class="row">
+              <label class="switch"><input type="checkbox" id="appAuto"><i></i><b data-i18n="settings.app.auto">অ্যাপ খুললে নিজে Start All চালাক</b></label>
+            </div>
+            <div class="hint" data-i18n="settings.app.autoHint">যে ওয়েব সার্ভার বাছা আছে সেটা, আর Services পেজে "Start All-এ যুক্ত" টিক দেওয়া ডাটাবেস (backup-এর জন্য MySQL ও PostgreSQL-এ টিক দিন)।</div>
           </div>
 
           <div class="section-title" data-i18n="settings.lang.section">ভাষা</div>

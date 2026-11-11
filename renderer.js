@@ -124,6 +124,7 @@ document.querySelectorAll('.nav').forEach((btn) =>
     if (page === 'sites') loadSites();
     if (page === 'tools') loadTools();
     if (page === 'backup') bkLoad();
+    if (page === 'settings') appBehaviorLoad();
   })
 );
 
@@ -1322,6 +1323,7 @@ function bkFill() {
   $('bkPg').checked = bk.what.postgres;
   $('bkWww').checked = bk.what.www;
   $('bkCerts').checked = bk.what.certs;
+  $('bkAutoDb').checked = bk.autoStartDb;
   $('bkZipPw').value = '';
   $('bkZipPw').placeholder = bk.hasZipPassword ? t('bk.pwSaved') : t('bk.zipPw');
   $('bkZipState').textContent = bk.hasZipPassword ? t('bk.zipPwSet') : t('bk.zipPwNone');
@@ -1330,6 +1332,8 @@ function bkFill() {
   $('bkMinFree').value = bk.minFreeGb;
   bkRenderTimes();
   bkRenderExtra();
+  bkRenderWwwEx();
+  bkTaskRefresh();
 }
 
 function bkRenderTimes() {
@@ -1360,6 +1364,8 @@ function bkRenderExtra() {
         'div',
         { className: 'row' },
         el('span', { className: 'pathbox', textContent: it.path, style: 'flex:1; margin:0' }),
+        bkModeSelect(it),
+        ...(it.mode === 'copy' ? [bkCleanInput(it)] : []),
         el('button', {
           className: 'btn sm',
           textContent: '✕',
@@ -1367,6 +1373,53 @@ function bkRenderExtra() {
           onclick: () => {
             bk.what.extra = bk.what.extra.filter((x) => x !== it);
             bkRenderExtra();
+          },
+        })
+      )
+    );
+  }
+}
+
+// প্রতিটা নিজের ফোল্ডারের মোড: আর্কাইভ (.7z) বা Incremental কপি (robocopy-র মতো)
+function bkModeSelect(it) {
+  const sel = el('select', {}, el('option', { value: 'archive', textContent: t('bk.extra.mode.archive') }), el('option', { value: 'copy', textContent: t('bk.extra.mode.copy') }));
+  sel.value = it.mode === 'copy' ? 'copy' : 'archive';
+  sel.addEventListener('change', () => {
+    it.mode = sel.value;
+    if (it.mode !== 'copy') it.cleanDays = 0;
+    bkRenderExtra(); // Incremental কপি হলে "N দিন পর মোছা" ঘরটা দেখানো/লুকানো
+  });
+  return sel;
+}
+
+// Incremental কপির জন্য: মূল ফোল্ডার থেকে হারানো ফাইল N দিন পর backup থেকে মোছা (০ = কখনো না)
+function bkCleanInput(it) {
+  const inp = el('input', { type: 'number', min: '0', max: '3650', value: String(it.cleanDays || 0), title: t('bk.extra.cleanTip'), style: 'width:80px' });
+  inp.addEventListener('change', () => {
+    const v = parseInt(inp.value, 10);
+    it.cleanDays = v > 0 ? Math.min(v, 3650) : 0;
+    inp.value = String(it.cleanDays);
+  });
+  return el('label', { className: 'hint', style: 'margin:0; display:flex; align-items:center; gap:6px; white-space:nowrap' }, t('bk.extra.clean'), inp);
+}
+
+// www থেকে বাদ দেওয়া ফোল্ডারের তালিকা (www-র সাপেক্ষে পথ)
+function bkRenderWwwEx() {
+  const box = $('bkWwwEx');
+  box.textContent = '';
+  for (const rel of bk.what.wwwExclude || []) {
+    box.appendChild(
+      el(
+        'div',
+        { className: 'row' },
+        el('span', { className: 'pathbox', textContent: 'www\\' + rel, style: 'flex:1; margin:0' }),
+        el('button', {
+          className: 'btn sm',
+          textContent: '✕',
+          title: t('bk.remove'),
+          onclick: () => {
+            bk.what.wwwExclude = bk.what.wwwExclude.filter((x) => x !== rel);
+            bkRenderWwwEx();
           },
         })
       )
@@ -1383,6 +1436,7 @@ function bkCollect() {
   bk.what.postgres = $('bkPg').checked;
   bk.what.www = $('bkWww').checked;
   bk.what.certs = $('bkCerts').checked;
+  bk.autoStartDb = $('bkAutoDb').checked;
   const days = parseInt($('bkRetention').value, 10);
   bk.retentionDays = Number.isInteger(days) && days >= 0 ? days : 14;
   const gb = Number($('bkMinFree').value);
@@ -1412,12 +1466,42 @@ async function bkStatus() {
   const last = s.last;
   if (s.running) $('bkLast').textContent = t('bk.running');
   else if (!last) $('bkLast').textContent = t('bk.noLast');
-  else $('bkLast').textContent = (last.ok ? '✔ ' : '✖ ') + t('bk.last', last.stamp, last.source);
+  else $('bkLast').textContent = (last.ok ? (last.warnings ? '⚠ ' : '✔ ') : '✖ ') + t('bk.last', last.stamp, last.source);
   const pre = $('bkLog');
   const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
   pre.textContent = s.log || '';
   if (atEnd) pre.scrollTop = pre.scrollHeight;
 }
+
+async function bkTaskRefresh() {
+  const s = await window.api.backupTaskState();
+  if (!$('bkTaskUser').value) $('bkTaskUser').value = s.user;
+  let txt = t('bk.task.none');
+  if (s.times.length) {
+    txt = t('bk.task.on', s.times.join(', '));
+    if (bk && s.times.join() !== bk.times.join()) txt += ' · ' + t('bk.task.diff');
+  }
+  $('bkTaskState').textContent = txt;
+  $('bkTaskRemove').hidden = !s.times.length;
+}
+$('bkTaskInstall').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    if (!(await bkSave())) return;
+    setStatus(t('bk.task.working'));
+    const r = await window.api.backupTaskInstall($('bkTaskUser').value, $('bkTaskPw').value);
+    $('bkTaskPw').value = '';
+    setStatus((r.ok ? '' : '⚠ ') + r.message);
+    bkTaskRefresh();
+  })
+);
+$('bkTaskRemove').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    if (!confirm(t('bk.task.removeConfirm'))) return;
+    const r = await window.api.backupTaskRemove();
+    setStatus((r.ok ? '' : '⚠ ') + r.message);
+    bkTaskRefresh();
+  })
+);
 
 $('bkLocalPick').addEventListener('click', async () => {
   const p = await window.api.backupChooseFolder();
@@ -1432,6 +1516,19 @@ $('bkExtraAdd').addEventListener('click', async () => {
   if (p && !bk.what.extra.some((x) => x.path === p)) {
     bk.what.extra.push({ path: p, label: bkBase(p) });
     bkRenderExtra();
+  }
+});
+$('bkWwwExAdd').addEventListener('click', async () => {
+  const p = await window.api.backupChooseFolder();
+  if (!p) return;
+  const www = String(await window.api.getWww()).replace(/\//g, '\\').replace(/\\+$/, '');
+  const v = p.replace(/\//g, '\\').replace(/\\+$/, '');
+  if (!v.toLowerCase().startsWith(www.toLowerCase() + '\\')) return setStatus(t('bk.wwwEx.outside'));
+  const rel = v.slice(www.length + 1);
+  bk.what.wwwExclude = bk.what.wwwExclude || [];
+  if (!bk.what.wwwExclude.some((x) => x.toLowerCase() === rel.toLowerCase())) {
+    bk.what.wwwExclude.push(rel);
+    bkRenderWwwEx();
   }
 });
 $('bkTimeAdd').addEventListener('click', () => {
@@ -1473,7 +1570,7 @@ $('bkRun').addEventListener('click', (e) =>
     const timer = setInterval(bkStatus, 1500);
     try {
       const r = await window.api.backupRun();
-      setStatus((r.ok ? '' : '⚠ ') + r.message);
+      setStatus((r.ok && !(r.status && r.status.warnings) ? '' : '⚠ ') + r.message);
     } finally {
       clearInterval(timer);
       bkStatus();
@@ -1484,6 +1581,29 @@ $('bkOpenLogs').addEventListener('click', () => window.api.backupOpenLogs());
 setInterval(() => {
   if (currentPage === 'backup') bkStatus();
 }, 4000);
+
+// ---------- অ্যাপ চালু থাকা / অটো-স্টার্ট ----------
+async function appBehaviorLoad() {
+  const b = await window.api.appGetBehavior();
+  $('appKeep').checked = b.keepRunning;
+  $('appLogin').checked = b.openAtLogin;
+  $('appAuto').checked = b.startAllOnLaunch;
+}
+['appKeep', 'appLogin', 'appAuto'].forEach((id) =>
+  $(id).addEventListener('change', async () => {
+    await window.api.appSetBehavior({ keepRunning: $('appKeep').checked, openAtLogin: $('appLogin').checked, startAllOnLaunch: $('appAuto').checked });
+    setStatus(t('settings.app.saved'));
+  })
+);
+// অ্যাপ খুললে (সেটিং চালু থাকলে) main থেকে ডাক আসে: নিজের বেছে নেওয়া ওয়েব সার্ভার দিয়ে Start All
+window.api.onAutoStartAll(async () => {
+  try {
+    setStatus(await window.api.startAll(selectedServer()));
+  } catch (err) {
+    setStatus(String(err && err.message ? err.message : err));
+  }
+});
+appBehaviorLoad();
 
 applyStatic();
 window.api.setLang(LANG); // মনে রাখা ভাষা main.js-কেও জানানো (বার্তা ও ডায়ালগের জন্য)
