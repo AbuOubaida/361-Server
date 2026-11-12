@@ -121,6 +121,14 @@ contextBridge.exposeInMainWorld('api', {
   restoreList: (customDir) => ipcRenderer.invoke('restore:list', customDir),
   restoreWwwInfo: (dir) => ipcRenderer.invoke('restore:wwwInfo', dir),
   restoreWww: (opts) => ipcRenderer.invoke('restore:www', opts),
+  restoreDbInfo: (dir) => ipcRenderer.invoke('restore:dbInfo', dir),
+  restoreDb: (opts) => ipcRenderer.invoke('restore:db', opts),
+  restorePgInfo: (opts) => ipcRenderer.invoke('restore:pgInfo', opts),
+  restorePg: (opts) => ipcRenderer.invoke('restore:pg', opts),
+  restoreOtherInfo: (dir) => ipcRenderer.invoke('restore:otherInfo', dir),
+  restoreOther: (opts) => ipcRenderer.invoke('restore:other', opts),
+  restoreSettingsInfo: (dir) => ipcRenderer.invoke('restore:settingsInfo', dir),
+  restoreSettings: (opts) => ipcRenderer.invoke('restore:settings', opts),
 
   // অ্যাপ চালু থাকা / অটো-স্টার্ট (ট্রে)
   appGetBehavior: () => ipcRenderer.invoke('app:getBehavior'),

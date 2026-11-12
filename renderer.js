@@ -1674,6 +1674,10 @@ function rsItem(it) {
   if (it.files.length) card.appendChild(rsLine(t('rs.files', it.files.map((f) => (f.exists ? f.name + ' (' + bkFmtBytes(f.size) + ')' : t('rs.missingFile', f.name))).join(', '))));
   card.appendChild(rsLine(it.dir));
   if (it.manifest && has(/^www\./i)) rsWwwButton(it, card);
+  if (it.manifest && has(/^database\./i) && it.mysqlDbs.length) rsDbButton(it, card);
+  if (it.manifest && has(/^database\./i) && it.postgres) rsPgButton(it, card);
+  if (it.manifest && (it.extras.length || (it.copyFolders && it.copyFolders.length))) rsOtherButton(it, card);
+  if (it.manifest && has(/^settings\./i)) rsSettingsButton(it, card);
   return card;
 }
 function rsRender(r) {
@@ -1775,6 +1779,357 @@ async function rsWwwOpen(it, panel) {
       if (typeof loadSites === 'function') {
         try {
           loadSites();
+        } catch {}
+      }
+    })
+  );
+  panel.appendChild(go);
+  panel.appendChild(out);
+}
+
+// ---------- Restore ধাপ ৩: MySQL ডাটাবেস ফেরত আনা ----------
+function rsDbButton(it, card) {
+  const panel = el('div', { style: 'margin-top:8px' });
+  const btn = el('button', { className: 'btn sm', textContent: t('rs.db.btn'), style: 'margin-top:6px' });
+  btn.addEventListener('click', (e) => work(e.currentTarget, () => rsDbOpen(it, panel)));
+  card.appendChild(btn);
+  card.appendChild(panel);
+}
+async function rsDbOpen(it, panel) {
+  panel.textContent = '';
+  let info;
+  try {
+    info = await window.api.restoreDbInfo(it.dir);
+  } catch (err) {
+    info = { ok: false, message: String(err && err.message ? err.message : err) };
+  }
+  if (!info || !info.ok) {
+    panel.appendChild(rsLine('⚠ ' + ((info && info.message) || ''), 'info'));
+    return;
+  }
+  if (!info.complete) panel.appendChild(rsLine('⚠ ' + t('rs.db.partial'), 'info'));
+  if (info.archive && /\.7z$/i.test(info.archive) && !info.sevenZip) panel.appendChild(rsLine('⚠ ' + t('rs.db.nosevenzip'), 'info'));
+  panel.appendChild(rsLine(t('rs.db.warn')));
+  if (info.postgres) panel.appendChild(rsLine(t('rs.db.pgnote')));
+  let pw = null;
+  if (info.encrypted) {
+    pw = el('input', { type: 'password', placeholder: t('rs.db.pw'), style: 'margin:6px 0;width:300px;max-width:100%' });
+    panel.appendChild(el('div', {}, pw));
+  }
+  if (!info.mysqlRunning && info.mysqlInstalled) panel.appendChild(rsLine(t('rs.db.unknown')));
+  panel.appendChild(rsLine(t('rs.db.pick'), 'info'));
+  const rows = [];
+  for (const d of info.dbs) {
+    const cb = el('input', { type: 'checkbox', checked: true });
+    const sel =
+      d.exists !== false
+        ? el(
+            'select',
+            { style: 'margin-left:8px;max-width:340px' },
+            el('option', { value: 'rename', textContent: t('rs.db.mode.rename') }),
+            el('option', { value: 'overwrite', textContent: t('rs.db.mode.over') })
+          )
+        : null;
+    const note = d.exists === true ? t('rs.db.exists') : d.exists === false ? t('rs.db.new') : '';
+    const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cb, el('b', { textContent: d.name }), el('span', { className: 'hint', style: 'margin:0', textContent: note }));
+    panel.appendChild(el('div', { style: 'margin:3px 0' }, label, sel));
+    rows.push({ name: d.name, cb, sel });
+  }
+  const out = el('div', {});
+  const go = el('button', { className: 'btn sm primary', textContent: t('rs.db.go'), style: 'margin-top:8px' });
+  go.addEventListener('click', (e) =>
+    work(e.currentTarget, async () => {
+      const picks = rows.filter((x) => x.cb.checked).map((x) => ({ name: x.name, mode: x.sel ? x.sel.value : 'rename' }));
+      if (!picks.length) {
+        out.textContent = '';
+        out.appendChild(rsLine(t('rs.db.none'), 'info'));
+        return;
+      }
+      if (!confirm(t('rs.db.confirm', picks.length))) return;
+      out.textContent = '';
+      out.appendChild(rsLine(t('rs.db.running'), 'info'));
+      let res;
+      try {
+        res = await window.api.restoreDb({ dir: it.dir, password: pw ? pw.value : '', picks });
+      } catch (err) {
+        res = { ok: false, message: String(err && err.message ? err.message : err) };
+      }
+      out.textContent = '';
+      if (res.message) out.appendChild(rsLine((res.ok ? '' : '⚠ ') + res.message, 'info'));
+      for (const x of res.results || []) {
+        if (!x.ok) out.appendChild(rsLine('✗ ' + t('rs.db.res.fail', x.name, x.message || ''), 'info'));
+        else {
+          const base = x.action === 'renamed' ? t('rs.db.res.renamed', x.name, x.final) : x.action === 'overwritten' ? t('rs.db.res.over', x.name) : t('rs.db.res.new', x.name);
+          out.appendChild(rsLine('✓ ' + base + (x.tables != null ? ' · ' + t('rs.db.res.tables', x.tables) : ''), 'info'));
+        }
+        for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));
+      }
+      for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
+      if (typeof refreshAll === 'function') {
+        try {
+          refreshAll();
+        } catch {}
+      }
+    })
+  );
+  panel.appendChild(go);
+  panel.appendChild(out);
+}
+
+// ---------- Restore ধাপ ৩b: PostgreSQL ডাটাবেস ফেরত আনা ----------
+function rsPgButton(it, card) {
+  const panel = el('div', { style: 'margin-top:8px' });
+  const btn = el('button', { className: 'btn sm', textContent: t('rs.pg.btn'), style: 'margin-top:6px' });
+  btn.addEventListener('click', (e) => work(e.currentTarget, async () => rsPgOpen(it, panel)));
+  card.appendChild(btn);
+  card.appendChild(panel);
+}
+function rsPgOpen(it, panel) {
+  panel.textContent = '';
+  if (it.complete === false) panel.appendChild(rsLine('⚠ ' + t('rs.db.partial'), 'info'));
+  panel.appendChild(rsLine(t('rs.pg.warn')));
+  let pw = null;
+  if (it.encrypted) {
+    pw = el('input', { type: 'password', placeholder: t('rs.db.pw'), style: 'margin:6px 0;width:300px;max-width:100%' });
+    panel.appendChild(el('div', {}, pw));
+  }
+  const box = el('div', {});
+  const lb = el('button', { className: 'btn sm', textContent: t('rs.pg.list'), style: 'margin-top:6px' });
+  lb.addEventListener('click', (e) => work(e.currentTarget, () => rsPgList(it, pw, box)));
+  panel.appendChild(lb);
+  panel.appendChild(box);
+}
+async function rsPgList(it, pw, box) {
+  box.textContent = '';
+  box.appendChild(rsLine(t('rs.pg.listing'), 'info'));
+  let info;
+  try {
+    info = await window.api.restorePgInfo({ dir: it.dir, password: pw ? pw.value : '' });
+  } catch (err) {
+    info = { ok: false, message: String(err && err.message ? err.message : err) };
+  }
+  box.textContent = '';
+  if (!info || !info.ok) {
+    box.appendChild(rsLine('⚠ ' + ((info && info.message) || ''), 'info'));
+    return;
+  }
+  if (!info.sevenZip && it.encrypted) box.appendChild(rsLine('⚠ ' + t('rs.db.nosevenzip'), 'info'));
+  if (info.skippedNames && info.skippedNames.length) box.appendChild(rsLine(t('rs.pg.skipped', info.skippedNames.join(', '))));
+  if (!info.dbs.length) {
+    box.appendChild(rsLine(t('rs.pg.empty'), 'info'));
+    return;
+  }
+  if (!info.pgRunning && info.pgInstalled) box.appendChild(rsLine(t('rs.pg.unknown')));
+  box.appendChild(rsLine(t('rs.db.pick'), 'info'));
+  const rows = [];
+  for (const d of info.dbs) {
+    const cb = el('input', { type: 'checkbox', checked: true });
+    const sel =
+      d.exists !== false
+        ? el(
+            'select',
+            { style: 'margin-left:8px;max-width:340px' },
+            el('option', { value: 'rename', textContent: t('rs.db.mode.rename') }),
+            el('option', { value: 'overwrite', textContent: t('rs.db.mode.over') })
+          )
+        : null;
+    const note = d.exists === true ? t('rs.pg.exists') : d.exists === false ? t('rs.pg.new') : '';
+    const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cb, el('b', { textContent: d.name }), el('span', { className: 'hint', style: 'margin:0', textContent: note }));
+    box.appendChild(el('div', { style: 'margin:3px 0' }, label, sel));
+    rows.push({ name: d.name, cb, sel });
+  }
+  const out = el('div', {});
+  const go = el('button', { className: 'btn sm primary', textContent: t('rs.pg.go'), style: 'margin-top:8px' });
+  go.addEventListener('click', (e) =>
+    work(e.currentTarget, async () => {
+      const picks = rows.filter((x) => x.cb.checked).map((x) => ({ name: x.name, mode: x.sel ? x.sel.value : 'rename' }));
+      out.textContent = '';
+      if (!picks.length) {
+        out.appendChild(rsLine(t('rs.db.none'), 'info'));
+        return;
+      }
+      if (!confirm(t('rs.pg.confirm', picks.length))) return;
+      out.appendChild(rsLine(t('rs.db.running'), 'info'));
+      let res;
+      try {
+        res = await window.api.restorePg({ dir: it.dir, password: pw ? pw.value : '', picks });
+      } catch (err) {
+        res = { ok: false, message: String(err && err.message ? err.message : err) };
+      }
+      out.textContent = '';
+      if (res.message) out.appendChild(rsLine((res.ok ? '' : '⚠ ') + res.message, 'info'));
+      for (const x of res.results || []) {
+        if (!x.ok) out.appendChild(rsLine('✗ ' + t('rs.db.res.fail', x.name, x.message || ''), 'info'));
+        else {
+          const base = x.action === 'renamed' ? t('rs.db.res.renamed', x.name, x.final) : x.action === 'overwritten' ? t('rs.db.res.over', x.name) : t('rs.db.res.new', x.name);
+          out.appendChild(rsLine('✓ ' + base + (x.tables != null ? ' · ' + t('rs.db.res.tables', x.tables) : ''), 'info'));
+        }
+        for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));
+      }
+      for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
+    })
+  );
+  box.appendChild(go);
+  box.appendChild(out);
+}
+
+// ---------- Restore ধাপ ৪a: নিজের ফোল্ডার (extra) আর আলাদা copy (files) ----------
+function rsOtherButton(it, card) {
+  const panel = el('div', { style: 'margin-top:8px' });
+  const btn = el('button', { className: 'btn sm', textContent: t('rs.ot.btn'), style: 'margin-top:6px' });
+  btn.addEventListener('click', (e) => work(e.currentTarget, () => rsOtherOpen(it, panel)));
+  card.appendChild(btn);
+  card.appendChild(panel);
+}
+async function rsOtherOpen(it, panel) {
+  panel.textContent = '';
+  let info;
+  try {
+    info = await window.api.restoreOtherInfo(it.dir);
+  } catch (err) {
+    info = { ok: false, message: String(err && err.message ? err.message : err) };
+  }
+  if (!info || !info.ok) {
+    panel.appendChild(rsLine('⚠ ' + ((info && info.message) || ''), 'info'));
+    return;
+  }
+  if (!info.complete) panel.appendChild(rsLine('⚠ ' + t('rs.ot.partial'), 'info'));
+  if (info.extras.some((x) => /\.7z$/i.test(x.archive)) && !info.sevenZip) panel.appendChild(rsLine('⚠ ' + t('rs.ot.nosevenzip'), 'info'));
+  panel.appendChild(rsLine(t('rs.ot.warn')));
+  let pw = null;
+  if (info.encrypted && info.extras.length) {
+    pw = el('input', { type: 'password', placeholder: t('rs.ot.pw'), style: 'margin:6px 0;width:300px;max-width:100%' });
+    panel.appendChild(el('div', {}, pw));
+  }
+  const rows = [];
+  if (info.extras.length) {
+    panel.appendChild(rsLine(t('rs.ot.pickExtra'), 'info'));
+    for (const x of info.extras) {
+      const cb = el('input', { type: 'checkbox', checked: !!x.archive, disabled: !x.archive });
+      const note = x.archive ? t('rs.ot.extraTo', x.target) : t('rs.ot.noArchive');
+      const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap' }, cb, el('b', { textContent: x.label }), el('span', { className: 'hint', style: 'margin:0', textContent: note }));
+      panel.appendChild(el('div', { style: 'margin:3px 0' }, label));
+      rows.push({ kind: 'extra', n: x.n, cb, sel: null });
+    }
+  }
+  if (info.copies.length) {
+    panel.appendChild(rsLine(t('rs.ot.pickCopy'), 'info'));
+    for (const c of info.copies) {
+      const ok = c.exists && !!c.source;
+      const cb = el('input', { type: 'checkbox', checked: ok, disabled: !ok });
+      const sel =
+        ok && c.sourceExists
+          ? el('select', { style: 'margin-left:8px;max-width:360px' }, el('option', { value: 'rename', textContent: t('rs.ot.mode.rename') }), el('option', { value: 'overwrite', textContent: t('rs.ot.mode.over') }))
+          : null;
+      const note = !c.exists ? t('rs.ot.noCopy') : !c.source ? t('rs.ot.noSource') : c.sourceExists ? t('rs.ot.srcExists', c.source) : t('rs.ot.srcNew', c.source);
+      const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap' }, cb, el('b', { textContent: c.label }), el('span', { className: 'hint', style: 'margin:0', textContent: note }));
+      panel.appendChild(el('div', { style: 'margin:3px 0' }, label, sel));
+      rows.push({ kind: 'copy', label: c.label, cb, sel });
+    }
+  }
+  const out = el('div', {});
+  const go = el('button', { className: 'btn sm primary', textContent: t('rs.ot.go'), style: 'margin-top:8px' });
+  go.addEventListener('click', (e) =>
+    work(e.currentTarget, async () => {
+      const picks = rows.filter((x) => x.cb.checked).map((x) => (x.kind === 'extra' ? { kind: 'extra', n: x.n } : { kind: 'copy', label: x.label, mode: x.sel ? x.sel.value : 'rename' }));
+      out.textContent = '';
+      if (!picks.length) {
+        out.appendChild(rsLine(t('rs.ot.none'), 'info'));
+        return;
+      }
+      if (!confirm(t('rs.ot.confirm', picks.length))) return;
+      out.appendChild(rsLine(t('rs.ot.running'), 'info'));
+      let res;
+      try {
+        res = await window.api.restoreOther({ dir: it.dir, password: pw ? pw.value : '', picks });
+      } catch (err) {
+        res = { ok: false, message: String(err && err.message ? err.message : err) };
+      }
+      out.textContent = '';
+      if (res.message) out.appendChild(rsLine((res.ok ? '' : '⚠ ') + res.message, 'info'));
+      for (const x of res.results || []) {
+        if (!x.ok) out.appendChild(rsLine('✗ ' + t('rs.ot.res.fail', x.name, x.message || ''), 'info'));
+        else {
+          const key = x.kind === 'extra' ? 'rs.ot.res.extra' : x.action === 'merged' ? 'rs.ot.res.merged' : x.action === 'renamed' ? 'rs.ot.res.renamed' : 'rs.ot.res.new';
+          out.appendChild(rsLine('✓ ' + t(key, x.name, x.target), 'info'));
+        }
+        for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));
+      }
+      for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
+    })
+  );
+  panel.appendChild(go);
+  panel.appendChild(out);
+}
+
+// ---------- Restore ধাপ ৪b: সার্টিফিকেট + প্রতি-সাইট সেটিংস ----------
+function rsSettingsButton(it, card) {
+  const panel = el('div', { style: 'margin-top:8px' });
+  const btn = el('button', { className: 'btn sm', textContent: t('rs.st.btn'), style: 'margin-top:6px' });
+  btn.addEventListener('click', (e) => work(e.currentTarget, () => rsSettingsOpen(it, panel)));
+  card.appendChild(btn);
+  card.appendChild(panel);
+}
+async function rsSettingsOpen(it, panel) {
+  panel.textContent = '';
+  let info;
+  try {
+    info = await window.api.restoreSettingsInfo(it.dir);
+  } catch (err) {
+    info = { ok: false, message: String(err && err.message ? err.message : err) };
+  }
+  if (!info || !info.ok) {
+    panel.appendChild(rsLine('⚠ ' + ((info && info.message) || ''), 'info'));
+    return;
+  }
+  if (!info.complete) panel.appendChild(rsLine('⚠ ' + t('rs.st.partial'), 'info'));
+  if (/\.7z$/i.test(info.archive) && !info.sevenZip) panel.appendChild(rsLine('⚠ ' + t('rs.st.nosevenzip'), 'info'));
+  panel.appendChild(rsLine(t('rs.st.warn')));
+  let pw = null;
+  if (info.encrypted) {
+    pw = el('input', { type: 'password', placeholder: t('rs.st.pw'), style: 'margin:6px 0;width:300px;max-width:100%' });
+    panel.appendChild(el('div', {}, pw));
+  }
+  const cbCerts = el('input', { type: 'checkbox', checked: true });
+  const cbSites = el('input', { type: 'checkbox', checked: true });
+  panel.appendChild(el('div', { style: 'margin:3px 0' }, el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cbCerts, el('span', { textContent: t('rs.st.certs') })), el('span', { className: 'hint', style: 'margin-left:8px', textContent: info.certsDir })));
+  panel.appendChild(el('div', { style: 'margin:3px 0' }, el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cbSites, el('span', { textContent: t('rs.st.sites') }))));
+  const sel = el('select', { style: 'margin:3px 0;max-width:100%' }, el('option', { value: 'keep', textContent: t('rs.st.mode.keep') }), el('option', { value: 'replace', textContent: t('rs.st.mode.replace') }));
+  panel.appendChild(el('div', {}, sel));
+  const out = el('div', {});
+  const go = el('button', { className: 'btn sm primary', textContent: t('rs.st.go'), style: 'margin-top:8px' });
+  go.addEventListener('click', (e) =>
+    work(e.currentTarget, async () => {
+      out.textContent = '';
+      if (!cbCerts.checked && !cbSites.checked) {
+        out.appendChild(rsLine(t('rs.st.none'), 'info'));
+        return;
+      }
+      if (!confirm(t('rs.st.confirm'))) return;
+      out.appendChild(rsLine(t('rs.st.running'), 'info'));
+      let res;
+      try {
+        res = await window.api.restoreSettings({ dir: it.dir, password: pw ? pw.value : '', certs: cbCerts.checked, sites: cbSites.checked, conflict: sel.value });
+      } catch (err) {
+        res = { ok: false, message: String(err && err.message ? err.message : err) };
+      }
+      out.textContent = '';
+      if (res.message) out.appendChild(rsLine((res.ok ? '' : '⚠ ') + res.message, 'info'));
+      if (res.certs) {
+        out.appendChild(rsLine('✓ ' + t('rs.st.res.certs', res.certs.copied.length, res.certs.same.length, res.certs.kept.length, res.certs.dir), 'info'));
+        if (res.certs.copied.length) out.appendChild(rsLine(t('rs.st.reload')));
+      }
+      if (res.sites) {
+        const x = res.sites;
+        out.appendChild(rsLine('✓ ' + t('rs.st.res.sites', x.added, x.replaced, x.kept, x.same, x.skipped), 'info'));
+        if (x.skippedList && x.skippedList.length) out.appendChild(rsLine('   · ' + t('rs.st.res.skipped', x.skippedList.slice(0, 8).join('; ') + (x.skippedList.length > 8 ? ' ...' : ''))));
+      }
+      if (res.settingsBackup) out.appendChild(rsLine('   · ' + t('rs.st.res.copy', res.settingsBackup)));
+      for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
+      if (res.hostsNote) out.appendChild(rsLine('⚠ ' + res.hostsNote));
+      if (typeof refreshAll === 'function') {
+        try {
+          refreshAll();
         } catch {}
       }
     })

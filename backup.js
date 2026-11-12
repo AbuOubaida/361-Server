@@ -5,7 +5,8 @@
 // তাই নেটওয়ার্ক ভাঙলে আধা-ফাইল পড়ে থাকে না।
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
+const readline = require('readline');
 const net = require('net');
 
 const STAMP_RE = /^\d{8}-\d{6}$/;
@@ -176,6 +177,58 @@ function run(exe, args, opts = {}) {
     if (opts.onData && ch.stdout) ch.stdout.on('data', (d) => opts.onData(String(d)));
   });
 }
+
+// ফাইলটা stdin-এ দিয়ে প্রোগ্রাম চালানো (mysql < file.sql); stdout/stderr শেষের দিকটুকু রাখে
+function runWithFile(exe, args, file, opts = {}) {
+  return new Promise((resolve) => {
+    let out = '';
+    let err = '';
+    let done = false;
+    const fin = (v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    let ch;
+    try {
+      ch = spawn(exe, args, { windowsHide: true, env: opts.env || process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (e) {
+      return resolve({ ok: false, code: -1, stdout: '', stderr: e.message });
+    }
+    const timer = setTimeout(() => {
+      try {
+        ch.kill();
+      } catch {}
+      fin({ ok: false, code: -1, stdout: out, stderr: err + '\n(timeout)' });
+    }, opts.timeout || 6 * 3600 * 1000);
+    ch.stdout.on('data', (d) => (out = (out + d).slice(-4000)));
+    ch.stderr.on('data', (d) => (err = (err + d).slice(-4000)));
+    ch.on('error', (e) => fin({ ok: false, code: -1, stdout: out, stderr: err + e.message }));
+    ch.on('close', (code) => fin({ ok: code === 0, code: code == null ? -1 : code, stdout: out, stderr: err }));
+    const rs = fs.createReadStream(file);
+    rs.on('error', (e) => {
+      try {
+        ch.kill();
+      } catch {}
+      fin({ ok: false, code: -1, stdout: out, stderr: err + e.message });
+    });
+    ch.stdin.on('error', () => {}); // mysql আগে বেরিয়ে গেলে EPIPE উপেক্ষা
+    rs.pipe(ch.stdin);
+  });
+}
+
+// latin1 (বাইট-নিরাপদ) স্ট্রিম লেখা; বাফার ভরলে অপেক্ষা
+function writeLatin1(stream, str) {
+  return stream.write(str, 'latin1') ? Promise.resolve() : new Promise((r) => stream.once('drain', r));
+}
+function closeStream(stream) {
+  return new Promise((resolve, reject) => {
+    stream.on('error', reject);
+    stream.end(resolve);
+  });
+}
+const toL1 = (s) => Buffer.from(String(s), 'utf8').toString('latin1'); // UTF-8 নামকে ফাইলের (latin1 পড়া) বাইটের রূপে
 
 function createBackup(ctx) {
   const tr = ctx.tr || ((bn, en) => en);
@@ -673,7 +726,7 @@ function createBackup(ctx) {
   // ---------- Restore, step 1: list backups (READ ONLY, nothing is changed) ----------
   // One entry per backup folder (<root>\<YYYYMMDD-HHMMSS>\ with manifest.json). A folder without a readable manifest.json is still listed (manifest:false).
   function readBackupDir(dir, source) {
-    const item = { dir, stamp: path.basename(dir), source, manifest: true, complete: false, encrypted: false, created: '', files: [], missing: [], mysqlDbs: [], postgres: false, sites: [], extras: [], failedSteps: [], note: '' };
+    const item = { dir, stamp: path.basename(dir), source, manifest: true, complete: false, encrypted: false, created: '', files: [], missing: [], mysqlDbs: [], postgres: false, sites: [], extras: [], copyFolders: [], failedSteps: [], note: '' };
     let m = null;
     try {
       m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
@@ -690,6 +743,7 @@ function createBackup(ctx) {
       item.postgres = !!m.postgres;
       item.sites = Array.isArray(m.sites) ? m.sites.map(String) : [];
       item.failedSteps = Array.isArray(m.failedSteps) ? m.failedSteps.map(String) : [];
+      item.copyFolders = Array.isArray(m.copyFolders) ? m.copyFolders.filter((c) => c && typeof c.label === 'string').map((c) => String(c.label)) : [];
       for (const k of Object.keys(m)) {
         const x = /^extra(\d+)$/.exec(k);
         if (x) item.extras.push({ n: Number(x[1]), label: String(m[k]) });
@@ -1256,7 +1310,1200 @@ function createBackup(ctx) {
     }
   }
 
-  return { getConfig, setConfig, runBackup, isRunning, lastStatus, tailLog, find7z, ensure7z, listBackups, restoreWwwInfo, restoreWww, dirs: { baseDir, logsDir } };
+  // ---------- Restore, step 3: MySQL ডাটাবেস ফেরত আনা ----------
+  // backup-এ database.7z-এর ভেতরে db\mysql.sql (mysqldump --databases, সব ইউজার-ডাটাবেস একটা ফাইলে)।
+  // আমরা ফাইলটাকে ডাটাবেস ধরে ভাগ করি (header + প্রতিটা "-- Current Database:" অংশ + footer), তারপর বাছা প্রতিটার জন্য আলাদা mysql চালাই,
+  // তাই একটা ব্যর্থ হলে অন্যগুলো আটকায় না। নাম মিললে: rename (<নাম>_restored, পুরনো অক্ষত) বা overwrite (আগে পুরনোটার safety dump, তারপর DROP + import)।
+  // PostgreSQL এখানে নেই (postgres.sql আলাদা ধাপে)।
+  const SAFE_DB = (n) => typeof n === 'string' && n.length > 0 && n.length <= 64 && !/[`\\/\r\n\0]/.test(n) && !SYSTEM_MYSQL_DBS.has(n.toLowerCase());
+  const DB_MARK = /^-- Current Database: `(.*)`\s*$/;
+  const DB_FOOT = /^\/\*!40103 SET TIME_ZONE=@OLD_TIME_ZONE \*\/;/;
+
+  function dbArchiveOf(item) {
+    const f = item.files.find((x) => x.exists && /^database\.(7z|zip)$/i.test(x.name));
+    return f ? path.join(item.dir, f.name) : '';
+  }
+  function mysqlTools() {
+    const bin = path.join(ctx.mysqlDir(), 'bin');
+    return { mysqlExe: path.join(bin, 'mysql.exe'), dumpExe: path.join(bin, 'mysqldump.exe'), common: ['--no-defaults', '-u', 'root', '-h', '127.0.0.1', '-P', String(ctx.mysqlPort())] };
+  }
+  async function listMysqlDbs() {
+    const { mysqlExe, common } = mysqlTools();
+    if (!fs.existsSync(mysqlExe)) return { ok: false, installed: false, message: 'MySQL not installed' };
+    const r = await run(mysqlExe, [...common, '-N', '-B', '-e', 'SHOW DATABASES'], { env: ctx.mysqlEnv(), timeout: 60000 });
+    if (!r.ok) return { ok: false, installed: true, notRunning: /2003|10061|Can't connect/i.test(r.stderr || ''), message: (r.stderr || '').trim().slice(0, 200) };
+    return { ok: true, installed: true, dbs: r.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean) };
+  }
+
+  async function restoreDbInfo(dir) {
+    if (typeof dir !== 'string' || !dir) return { ok: false, message: tr('ফোল্ডার দেওয়া হয়নি', 'No folder given') };
+    const item = readBackupDir(dir, 'custom');
+    if (!item.manifest) return { ok: false, message: tr('manifest.json নেই বা পড়া যায় না, তাই ডাটাবেস restore করা যাবে না', 'manifest.json is missing or unreadable, so databases cannot be restored') };
+    const archive = dbArchiveOf(item);
+    if (!archive) return { ok: false, message: tr('এই backup-এ ডাটাবেস আর্কাইভ নেই', 'This backup has no database archive') };
+    if (!item.mysqlDbs.length) return { ok: false, message: tr('এই backup-এ কোনো MySQL ডাটাবেস নেই', 'This backup has no MySQL databases') };
+    const cur = await listMysqlDbs();
+    const have = cur.ok ? new Set(cur.dbs.map((x) => x.toLowerCase())) : null;
+    const dbs = item.mysqlDbs.filter(SAFE_DB).map((name) => ({ name, exists: have ? have.has(name.toLowerCase()) : null }));
+    return {
+      ok: true,
+      archive,
+      encrypted: item.encrypted,
+      complete: item.complete,
+      failedSteps: item.failedSteps,
+      dbs,
+      skippedNames: item.mysqlDbs.filter((n) => !SAFE_DB(n)),
+      postgres: item.postgres,
+      mysqlInstalled: cur.installed !== false,
+      mysqlRunning: !!cur.ok,
+      sevenZip: !!find7z(),
+    };
+  }
+
+  // mysql.sql-কে ভাগ করা: { header[], footer[], sections:[{name, file}] }; ফাইল latin1 পড়া/লেখা (বাইনারি কলামের বাইট অক্ষত থাকে)
+  async function splitMysqlDump(file, outDir) {
+    const header = [];
+    const footer = [];
+    const sections = [];
+    let cur = null;
+    let mode = 'header';
+    const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'latin1' }), crlfDelay: Infinity });
+    try {
+      for await (const line of rl) {
+        const mk = DB_MARK.exec(line);
+        if (mk && mode !== 'footer') {
+          if (cur) await closeStream(cur.stream);
+          const name = Buffer.from(mk[1], 'latin1').toString('utf8');
+          const f = path.join(outDir, 'sec-' + sections.length + '.sql');
+          cur = { name, file: f, stream: fs.createWriteStream(f, { encoding: 'latin1' }) };
+          sections.push({ name, file: f });
+          mode = 'section';
+        } else if (mode === 'section' && DB_FOOT.test(line)) {
+          mode = 'footer';
+          footer.push(line);
+          continue;
+        }
+        if (mode === 'header') header.push(line);
+        else if (mode === 'footer') footer.push(line);
+        else await writeLatin1(cur.stream, line + '\n');
+      }
+    } finally {
+      rl.close();
+      if (cur) await closeStream(cur.stream).catch(() => {});
+    }
+    return { header, footer, sections };
+  }
+
+  // বাছা ডাটাবেসের জন্য চালানোর SQL ফাইল: header + [DROP] + অংশ (নাম বদলালে CREATE/USE লাইন বদলে) + footer
+  async function buildRunFile(runFile, parts, sec, oldName, newName, drop) {
+    const out = fs.createWriteStream(runFile, { encoding: 'latin1' });
+    const oldL = '`' + toL1(oldName) + '`';
+    const newL = '`' + toL1(newName) + '`';
+    const rename = newName !== oldName;
+    let qualified = 0;
+    let seenCreate = false;
+    let seenUse = false;
+    try {
+      for (const l of parts.header) await writeLatin1(out, l + '\n');
+      if (drop) await writeLatin1(out, 'DROP DATABASE IF EXISTS ' + oldL + ';\n');
+      const rl = readline.createInterface({ input: fs.createReadStream(sec.file, { encoding: 'latin1' }), crlfDelay: Infinity });
+      for await (let line of rl) {
+        if (rename) {
+          if (!seenCreate && /^CREATE DATABASE\b/.test(line)) {
+            line = line.replace(oldL, newL);
+            seenCreate = true;
+          } else if (!seenUse && line.startsWith('USE ' + oldL)) {
+            line = line.replace(oldL, newL);
+            seenUse = true;
+          } else if (line.includes(oldL + '.')) qualified++;
+        }
+        await writeLatin1(out, line + '\n');
+      }
+      for (const l of parts.footer) await writeLatin1(out, l + '\n');
+    } finally {
+      await closeStream(out).catch(() => {});
+    }
+    return { qualified, renamedOk: !rename || (seenCreate && seenUse) };
+  }
+
+  function freeDbName(base, taken) {
+    const lower = new Set([...taken].map((x) => x.toLowerCase()));
+    for (let i = 1; i < 1000; i++) {
+      const suf = i === 1 ? '_restored' : '_restored' + i;
+      const nm = base.slice(0, 64 - suf.length) + suf;
+      if (!lower.has(nm.toLowerCase())) return nm;
+    }
+    return '';
+  }
+
+  async function restoreMysql(opts) {
+    if (restoring) return { ok: false, message: tr('আরেকটা restore চলছে', 'Another restore is running') };
+    if (running) return { ok: false, message: tr('একটা backup চলছে, শেষ হলে চেষ্টা করুন', 'A backup is running, try again when it has finished') };
+    const info = await restoreDbInfo(opts && opts.dir);
+    if (!info.ok) return info;
+    if (!info.mysqlInstalled) return { ok: false, message: tr('MySQL ইনস্টল করা নেই; আগে Services পেজ থেকে MySQL চালু করুন', 'MySQL is not installed; start MySQL once from the Services page first') };
+    const valid = new Set(info.dbs.map((d) => d.name));
+    const picks = (Array.isArray(opts.picks) ? opts.picks : []).filter((p) => p && valid.has(p.name));
+    if (!picks.length) return { ok: false, message: tr('কোনো ডাটাবেস বাছা হয়নি', 'No database selected') };
+    const password = typeof opts.password === 'string' ? opts.password : '';
+    if (info.encrypted && !password) return { ok: false, needPassword: true, message: tr('এই backup পাসওয়ার্ড দিয়ে encrypted, পাসওয়ার্ড দিন', 'This backup is encrypted, enter the password') };
+    const sevenZ = find7z();
+    const is7z = /\.7z$/i.test(info.archive);
+    if (is7z && !sevenZ) return { ok: false, message: tr('7-Zip নেই; Backup পেজ থেকে ইনস্টল করুন', '7-Zip is missing; install it from the Backup page') };
+    const wrongPw = (x) => /wrong password|cannot open encrypted archive|can not open encrypted archive|data error in encrypted/i.test(x);
+    const stamp = stampOf();
+    const tmp = path.join(tmpRoot(), 'restore-db-' + stamp);
+    const results = [];
+    const warnings = [];
+    let startedHere = false;
+    restoring = true;
+    try {
+      fs.mkdirSync(tmp, { recursive: true });
+      log(`Restore MySQL: ${info.archive} -> ${picks.length} database(s): ${picks.map((p) => p.name + '(' + (p.mode || 'rename') + ')').join(', ')}`);
+      // ১) আর্কাইভ খোলা (শুধু dump ফাইল, ছোট)
+      if (ctx.onProgress) ctx.onProgress('Restore: reading database archive');
+      const exDir = path.join(tmp, 'x');
+      fs.mkdirSync(exDir, { recursive: true });
+      if (sevenZ) {
+        const xr = await run(sevenZ, ['x', info.archive, '-o' + exDir, '-y', ...(password ? ['-p' + password] : [])], { timeout: 6 * 3600 * 1000 });
+        const xout = xr.stdout + xr.stderr;
+        if (!xr.ok && xr.code !== 1) {
+          if (wrongPw(xout)) return { ok: false, wrongPassword: true, message: tr('পাসওয়ার্ড ভুল', 'Wrong password') };
+          return { ok: false, message: `7z extract failed (exit code ${xr.code}): ` + xout.trim().slice(-300) };
+        }
+        if (xr.code === 1) warnings.push(tr('7-Zip সতর্কতা দিয়েছে, বিস্তারিত log-এ', '7-Zip reported warnings, see the log'));
+      } else {
+        const tarExe = ctx.tarExe || (win ? 'tar.exe' : 'tar');
+        const r = await run(tarExe, ['-xf', info.archive, '-C', exDir], {});
+        if (!r.ok) return { ok: false, message: ('tar failed: ' + r.stderr).slice(0, 400) };
+      }
+      const findSql = (d, depth) => {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          if (e.isFile() && e.name.toLowerCase() === 'mysql.sql') return path.join(d, e.name);
+        }
+        if (depth > 0) {
+          for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+            if (e.isDirectory()) {
+              const r = findSql(path.join(d, e.name), depth - 1);
+              if (r) return r;
+            }
+          }
+        }
+        return '';
+      };
+      const sqlFile = findSql(exDir, 2);
+      if (!sqlFile) return { ok: false, message: tr('আর্কাইভে mysql.sql পাওয়া যায়নি', 'mysql.sql was not found in the archive') };
+
+      // ২) MySQL চালু আছে কি; না থাকলে চালু করা (বন্ধ করি না: সাইটগুলো এখন এটা চাইবে)
+      let cur = await listMysqlDbs();
+      if (!cur.ok && cur.notRunning && ctx.startDb) {
+        log('  MySQL is not running, starting it for the restore ...');
+        if (ctx.onProgress) ctx.onProgress('Restore: starting MySQL');
+        const sr = await ctx.startDb('mysql').catch((e) => ({ ok: false, message: e.message }));
+        if (!sr || !sr.ok) return { ok: false, message: tr('MySQL চালু করা যায়নি: ', 'Could not start MySQL: ') + String((sr && sr.message) || '').slice(0, 200) };
+        startedHere = true;
+        cur = await listMysqlDbs();
+      }
+      if (!cur.ok) return { ok: false, message: tr('MySQL-এ ঢোকা যায়নি: ', 'Cannot connect to MySQL: ') + (cur.message || '') };
+      const taken = new Set(cur.dbs);
+
+      // ৩) dump ভাগ করা
+      if (ctx.onProgress) ctx.onProgress('Restore: splitting the dump');
+      const secDir = path.join(tmp, 'sec');
+      fs.mkdirSync(secDir, { recursive: true });
+      const parts = await splitMysqlDump(sqlFile, secDir);
+      log(`  dump has ${parts.sections.length} database section(s): ${parts.sections.map((x) => x.name).join(', ')}`);
+      const { mysqlExe, dumpExe, common } = mysqlTools();
+      const env = ctx.mysqlEnv();
+      const preDir = path.join(baseDir(), 'pre-restore', stamp);
+
+      // ৪) প্রতিটা বাছা ডাটাবেস
+      for (const p of picks) {
+        const sec = parts.sections.find((x) => x.name === p.name);
+        if (!sec) {
+          results.push({ name: p.name, ok: false, message: tr('dump-এ পাওয়া যায়নি', 'not found in the dump') });
+          continue;
+        }
+        const clash = [...taken].some((x) => x.toLowerCase() === p.name.toLowerCase());
+        let finalName = p.name;
+        let action = 'new';
+        let drop = false;
+        if (clash) {
+          if (p.mode === 'overwrite') {
+            action = 'overwritten';
+            drop = true;
+          } else {
+            finalName = freeDbName(p.name, taken);
+            action = 'renamed';
+            if (!finalName) {
+              results.push({ name: p.name, ok: false, message: tr('নতুন নাম পাওয়া গেল না', 'no free name found') });
+              continue;
+            }
+          }
+        }
+        const res = { name: p.name, final: finalName, action, ok: false, notes: [] };
+        try {
+          if (ctx.onProgress) ctx.onProgress(`Restore: ${p.name}`);
+          // overwrite: আগে পুরনোটার safety dump; না হলে কিছুই মোছা হয় না
+          if (drop) {
+            fs.mkdirSync(preDir, { recursive: true });
+            const pre = path.join(preDir, p.name.replace(/[^A-Za-z0-9_.-]/g, '_') + '.sql');
+            const dr = await run(dumpExe, [...common, '--single-transaction', '--quick', '--routines', '--triggers', '--events', '--default-character-set=utf8mb4', '--databases', p.name, '--result-file=' + pre], { env, timeout: 3600000 });
+            if (!dr.ok) {
+              res.message = tr('পুরনো ডাটাবেসের safety dump হয়নি, তাই কিছু মোছা হয়নি: ', 'Safety dump of the old database failed, so nothing was dropped: ') + (dr.stderr || '').trim().slice(0, 200);
+              results.push(res);
+              log(`  [FAIL] ${p.name}: ${res.message}`);
+              continue;
+            }
+            res.preDump = pre;
+            res.notes.push(tr('পুরনো ডাটাবেসের কপি রাখা আছে: ' + pre, 'A copy of the old database was saved: ' + pre));
+          }
+          const runFile = path.join(tmp, 'run-' + results.length + '.sql');
+          const br = await buildRunFile(runFile, parts, sec, p.name, finalName, drop);
+          if (!br.renamedOk) {
+            res.message = tr('dump-এর CREATE/USE লাইন চেনা গেল না, নাম বদলানো যায়নি', 'Could not find the CREATE/USE lines in the dump, cannot rename');
+            results.push(res);
+            continue;
+          }
+          if (br.qualified) res.notes.push(tr(`${br.qualified}টা লাইনে (view/trigger) পুরনো ডাটাবেসের নাম লেখা আছে, নতুন নামে সেগুলো পুরনোটার দিকেই দেখাতে পারে`, `${br.qualified} line(s) (views/triggers) mention the old database name and may still point to the old one`));
+          const ir = await runWithFile(mysqlExe, [...common, '--default-character-set=utf8mb4'], runFile, { env });
+          try {
+            fs.rmSync(runFile, { force: true });
+          } catch {}
+          if (!ir.ok) {
+            res.message = `mysql import failed (exit code ${ir.code}): ` + (ir.stderr || ir.stdout).trim().slice(-300);
+            if (drop) res.notes.push(tr('ডাটাবেস আংশিক থাকতে পারে; উপরের safety dump থেকে ফেরত নেওয়া যাবে', 'The database may be partial; the safety dump above can bring it back'));
+            results.push(res);
+            log(`  [FAIL] ${p.name}: ${res.message}`);
+            continue;
+          }
+          const cnt = await run(mysqlExe, [...common, '-N', '-B', '-e', `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${finalName.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`], { env, timeout: 60000 });
+          res.tables = cnt.ok ? parseInt(cnt.stdout.trim(), 10) : null;
+          res.ok = true;
+          taken.add(finalName);
+          results.push(res);
+          log(`  restored ${p.name} -> ${finalName} (${action}${res.tables != null ? ', ' + res.tables + ' tables' : ''})`);
+        } catch (e) {
+          res.message = e.message;
+          results.push(res);
+          log(`  [FAIL] ${p.name}: ${e.message}`);
+        }
+      }
+      if (!info.complete) warnings.push(tr('এই backup আংশিক (complete নয়): ' + (info.failedSteps.join(', ') || '?'), 'This backup is partial (not complete): ' + (info.failedSteps.join(', ') || '?')));
+      if (results.some((r) => r.ok && r.action === 'renamed')) warnings.push(tr('নতুন নামে রাখা ডাটাবেস সাইটের .env / wp-config.php-তে নিজে থেকে বসে না; সাইট ওই নামে চালাতে চাইলে ফাইলে নামটা বদলান', 'A database restored under a new name is not wired into any site (.env / wp-config.php); edit the file if a site should use it'));
+      if (info.postgres) warnings.push(tr('PostgreSQL ডাম্প (postgres.sql) আলাদা বোতামে ফেরত আনা হয়: "PostgreSQL ডাটাবেস ফেরত আনুন"', 'The PostgreSQL dump (postgres.sql) is restored with its own button: "Restore PostgreSQL databases"'));
+      if (startedHere) warnings.push(tr('MySQL এই restore-এর জন্য চালু করা হয়েছিল, চালু অবস্থায় রাখা আছে', 'MySQL was started for this restore and is left running'));
+      return { ok: results.some((r) => r.ok), results, warnings };
+    } catch (e) {
+      return { ok: false, message: e.message };
+    } finally {
+      restoring = false;
+      try {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+
+  // ---------- Restore, step 3b: PostgreSQL ডাটাবেস ফেরত আনা ----------
+  // backup-এ database.7z-এর ভেতরে db\postgres.sql (pg_dumpall)। প্রতিটা ইউজার-ডাটাবেসের অংশ এরকম (PostgreSQL 18.6-এ আসল ফাইলে দেখা):
+  //   \restrict <key> ... CREATE DATABASE <নাম> WITH ...; ... \unrestrict <key>   (তৈরির ব্লক)
+  //   \connect <নাম>
+  //   \restrict <key> ... ডেটা ... \unrestrict <key>
+  // postgres / template1 অংশে CREATE DATABASE থাকে না (ফেরত আনা হয় না); role-গুলো (CREATE ROLE) ফেরত আনা হয় না।
+  // ফাইলটা latin1 লাইনে পড়ি (বাইট ঠিক থাকে), CREATE DATABASE-ওয়ালা ব্লক থেকে অংশ শুরু, একই নামের \connect-এর পরের ব্লক সেই অংশে যায়।
+  // নাম মিললে: rename (<নাম>_restored, পুরনো অক্ষত) বা overwrite (আগে পুরনোটার pg_dump safety copy, তারপর DROP + import)।
+  const SAFE_PGDB = (n) => typeof n === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$/.test(n) && !['postgres', 'template0', 'template1'].includes(n);
+  const pgIdent = (n) => '"' + String(n).replace(/"/g, '""') + '"';
+  const parsePgIdent = (s) => {
+    const m = /^\s*("(?:[^"]|"")*"|[^\s;"]+)/.exec(s || '');
+    if (!m) return '';
+    const v = m[1];
+    return v[0] === '"' ? v.slice(1, -1).replace(/""/g, '"') : v;
+  };
+  const PG_BLOCK_MAX = 3000; // CREATE DATABASE-ওয়ালা ব্লক ছোট; এর চেয়ে বড় ব্লক (বড় ডেটা) ইউজার-ডাটাবেসের তৈরির ব্লক নয়
+
+  function pgTools() {
+    const bin = path.join(ctx.pgDir(), 'bin');
+    return {
+      psql: path.join(bin, 'psql.exe'),
+      dump: path.join(bin, 'pg_dump.exe'),
+      common: ['-X', '-q', '-w', '-h', '127.0.0.1', '-p', String(ctx.pgPort()), '-U', 'postgres'],
+    };
+  }
+  async function listPgDbs() {
+    const { psql, common } = pgTools();
+    if (!fs.existsSync(psql)) return { ok: false, installed: false, message: 'PostgreSQL not installed' };
+    const r = await run(psql, [...common, '-d', 'postgres', '-A', '-t', '-c', 'SELECT datname FROM pg_database ORDER BY 1'], { env: ctx.pgEnv(), timeout: 60000 });
+    if (!r.ok) return { ok: false, installed: true, notRunning: /could not connect|connection refused|timeout expired|10061/i.test(r.stderr || ''), message: (r.stderr || '').trim().slice(0, 200) };
+    return { ok: true, installed: true, dbs: r.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean) };
+  }
+
+  // postgres.sql ভাগ করা। outDir দিলে প্রতি ইউজার-ডাটাবেসের জন্য সেকশন ফাইল লেখে; না দিলে শুধু নামগুলো (restorePgInfo)।
+  async function splitPgDump(file, outDir) {
+    const sections = [];
+    let cur = null; // { name, file, stream, connected }
+    let inBlock = false;
+    let direct = false; // ব্লকটা সরাসরি cur-এ লিখছি (ডেটা ব্লক)
+    let buf = [];
+    let overflow = false;
+    let createName = '';
+    const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'latin1' }), crlfDelay: Infinity });
+    const put = async (c, line) => {
+      if (c && c.stream) await writeLatin1(c.stream, line + '\n');
+    };
+    const closeCur = async () => {
+      if (cur && cur.stream) await closeStream(cur.stream).catch(() => {});
+      cur = null;
+    };
+    try {
+      for await (const line of rl) {
+        if (!inBlock) {
+          if (line.charCodeAt(0) === 92 /* \ */) {
+            if (line.startsWith('\\restrict ')) {
+              inBlock = true;
+              if (cur && cur.connected) {
+                direct = true;
+                await put(cur, line);
+              } else {
+                direct = false;
+                buf = [line];
+                overflow = false;
+                createName = '';
+              }
+              continue;
+            }
+            const mc = /^\\connect\s+(.*)$/.exec(line);
+            if (mc) {
+              const nm = parsePgIdent(mc[1]);
+              if (cur && cur.name === nm) {
+                cur.connected = true;
+                await put(cur, line);
+              } else {
+                await closeCur();
+              }
+              continue;
+            }
+          }
+          if (cur) await put(cur, line); // ব্লকের বাইরের বাকি লাইন (ফাঁকা/মন্তব্য)
+          continue;
+        }
+        // ব্লকের ভেতরে
+        if (direct) {
+          await put(cur, line);
+          if (line.startsWith('\\unrestrict ')) {
+            inBlock = false;
+            direct = false;
+            await closeCur(); // ডেটা ব্লক শেষ = এই ডাটাবেসের অংশ শেষ; পরের \restrict নতুন ডাটাবেসের হতে পারে
+          }
+          continue;
+        }
+        if (!overflow) {
+          buf.push(line);
+          if (!createName && line.startsWith('CREATE DATABASE ')) createName = parsePgIdent(line.slice(16));
+          if (buf.length > PG_BLOCK_MAX) {
+            overflow = true;
+            buf = [];
+          }
+        }
+        if (line.startsWith('\\unrestrict ')) {
+          inBlock = false;
+          if (!overflow && createName) {
+            await closeCur();
+            if (outDir) {
+              const f = path.join(outDir, 'pg-' + sections.length + '.sql');
+              cur = { name: createName, file: f, stream: fs.createWriteStream(f, { encoding: 'latin1' }), connected: false };
+              for (const l of buf) await put(cur, l);
+            } else {
+              cur = { name: createName, file: '', stream: null, connected: false };
+            }
+            sections.push({ name: createName, file: cur.file });
+          }
+          buf = [];
+        }
+      }
+    } finally {
+      rl.close();
+      await closeCur();
+    }
+    return { sections };
+  }
+
+  // বাছা অংশের চালানোর ফাইল: নাম বদলালে তৈরির ব্লকের CREATE/ALTER/COMMENT DATABASE আর \connect লাইনে নতুন নাম
+  async function buildPgRunFile(runFile, secFile, oldName, newName, rename) {
+    const out = fs.createWriteStream(runFile, { encoding: 'latin1' });
+    let seenCreate = false;
+    let seenConnect = false;
+    let phase = 0; // 0 = \connect-এর আগে (তৈরির ব্লক)
+    const nid = pgIdent(newName);
+    const rl = readline.createInterface({ input: fs.createReadStream(secFile, { encoding: 'latin1' }), crlfDelay: Infinity });
+    try {
+      for await (let line of rl) {
+        if (rename && phase === 0) {
+          let m;
+          if (line.startsWith('CREATE DATABASE ') && (m = /^CREATE DATABASE\s+("(?:[^"]|"")*"|\S+)(.*)$/.exec(line)) && parsePgIdent(m[1]) === oldName) {
+            line = 'CREATE DATABASE ' + nid + m[2];
+            seenCreate = true;
+          } else if (line.startsWith('ALTER DATABASE ') && (m = /^ALTER DATABASE\s+("(?:[^"]|"")*"|\S+)(.*)$/.exec(line)) && parsePgIdent(m[1]) === oldName) {
+            line = 'ALTER DATABASE ' + nid + m[2];
+          } else if (line.startsWith('COMMENT ON DATABASE ') && (m = /^COMMENT ON DATABASE\s+("(?:[^"]|"")*"|\S+)(.*)$/.exec(line)) && parsePgIdent(m[1]) === oldName) {
+            line = 'COMMENT ON DATABASE ' + nid + m[2];
+          } else if (line.startsWith('\\connect ') && parsePgIdent(line.slice(9)) === oldName) {
+            line = '\\connect ' + nid;
+            seenConnect = true;
+          }
+        }
+        if (phase === 0 && line.startsWith('\\connect ')) phase = 1;
+        await writeLatin1(out, line + '\n');
+      }
+    } finally {
+      rl.close();
+      await closeStream(out).catch(() => {});
+    }
+    return { renamedOk: !rename || (seenCreate && seenConnect) };
+  }
+
+  function freePgName(base, taken) {
+    const have = new Set([...taken]);
+    for (let i = 1; i < 1000; i++) {
+      const suf = i === 1 ? '_restored' : '_restored' + i;
+      const nm = base.slice(0, 63 - suf.length) + suf;
+      if (!have.has(nm)) return nm;
+    }
+    return '';
+  }
+
+  // database.7z/zip থেকে db\postgres.sql বের করা; ফেরত { ok, file } বা { ok:false, ... }
+  async function extractPgSql(archive, password, exDir, warnings) {
+    const sevenZ = find7z();
+    const is7z = /\.7z$/i.test(archive);
+    if (is7z && !sevenZ) return { ok: false, message: tr('7-Zip নেই; Backup পেজ থেকে ইনস্টল করুন', '7-Zip is missing; install it from the Backup page') };
+    const wrongPw = (x) => /wrong password|cannot open encrypted archive|can not open encrypted archive|data error in encrypted/i.test(x);
+    fs.mkdirSync(exDir, { recursive: true });
+    if (sevenZ) {
+      const xr = await run(sevenZ, ['x', archive, '-o' + exDir, '-y', ...(password ? ['-p' + password] : [])], { timeout: 6 * 3600 * 1000 });
+      const xout = xr.stdout + xr.stderr;
+      if (!xr.ok && xr.code !== 1) {
+        if (wrongPw(xout)) return { ok: false, wrongPassword: true, message: tr('পাসওয়ার্ড ভুল', 'Wrong password') };
+        return { ok: false, message: `7z extract failed (exit code ${xr.code}): ` + xout.trim().slice(-300) };
+      }
+      if (xr.code === 1 && warnings) warnings.push(tr('7-Zip সতর্কতা দিয়েছে, বিস্তারিত log-এ', '7-Zip reported warnings, see the log'));
+    } else {
+      const tarExe = ctx.tarExe || (win ? 'tar.exe' : 'tar');
+      const r = await run(tarExe, ['-xf', archive, '-C', exDir], {});
+      if (!r.ok) return { ok: false, message: ('tar failed: ' + r.stderr).slice(0, 400) };
+    }
+    const find = (d, depth) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) if (e.isFile() && e.name.toLowerCase() === 'postgres.sql') return path.join(d, e.name);
+      if (depth > 0) {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          if (e.isDirectory()) {
+            const r = find(path.join(d, e.name), depth - 1);
+            if (r) return r;
+          }
+        }
+      }
+      return '';
+    };
+    const file = find(exDir, 2);
+    if (!file) return { ok: false, message: tr('আর্কাইভে postgres.sql পাওয়া যায়নি', 'postgres.sql was not found in the archive') };
+    return { ok: true, file };
+  }
+
+  // শুধু পড়ে: dump-এ কোন কোন ডাটাবেস আছে (পাসওয়ার্ড লাগে, কারণ নামগুলো মূল ফাইলের ভেতরে) আর PostgreSQL-এ এখন কোনটা আছে
+  async function restorePgInfo(opts) {
+    if (restoring) return { ok: false, message: tr('আরেকটা restore চলছে', 'Another restore is running') };
+    const dir = opts && opts.dir;
+    if (typeof dir !== 'string' || !dir) return { ok: false, message: tr('ফোল্ডার দেওয়া হয়নি', 'No folder given') };
+    const item = readBackupDir(dir, 'custom');
+    if (!item.manifest) return { ok: false, message: tr('manifest.json নেই বা পড়া যায় না, তাই ডাটাবেস restore করা যাবে না', 'manifest.json is missing or unreadable, so databases cannot be restored') };
+    const archive = dbArchiveOf(item);
+    if (!archive) return { ok: false, message: tr('এই backup-এ ডাটাবেস আর্কাইভ নেই', 'This backup has no database archive') };
+    if (!item.postgres) return { ok: false, message: tr('এই backup-এ PostgreSQL ডাম্প নেই', 'This backup has no PostgreSQL dump') };
+    const password = typeof (opts && opts.password) === 'string' ? opts.password : '';
+    if (item.encrypted && !password) return { ok: false, needPassword: true, message: tr('এই backup পাসওয়ার্ড দিয়ে encrypted, পাসওয়ার্ড দিন', 'This backup is encrypted, enter the password') };
+    const tmp = path.join(tmpRoot(), 'restore-pginfo-' + stampOf());
+    restoring = true;
+    try {
+      const ex = await extractPgSql(archive, password, path.join(tmp, 'x'), null);
+      if (!ex.ok) return ex;
+      const parts = await splitPgDump(ex.file, null);
+      const cur = await listPgDbs();
+      const have = cur.ok ? new Set(cur.dbs) : null;
+      const names = [...new Set(parts.sections.map((s) => s.name))];
+      return {
+        ok: true,
+        encrypted: item.encrypted,
+        complete: item.complete,
+        failedSteps: item.failedSteps,
+        dbs: names.filter(SAFE_PGDB).map((name) => ({ name, exists: have ? have.has(name) : null })),
+        skippedNames: names.filter((n) => !SAFE_PGDB(n)),
+        pgInstalled: cur.installed !== false,
+        pgRunning: !!cur.ok,
+        sevenZip: !!find7z(),
+      };
+    } catch (e) {
+      return { ok: false, message: e.message };
+    } finally {
+      restoring = false;
+      try {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+
+  async function restorePg(opts) {
+    if (restoring) return { ok: false, message: tr('আরেকটা restore চলছে', 'Another restore is running') };
+    if (running) return { ok: false, message: tr('একটা backup চলছে, শেষ হলে চেষ্টা করুন', 'A backup is running, try again when it has finished') };
+    const dir = opts && opts.dir;
+    if (typeof dir !== 'string' || !dir) return { ok: false, message: tr('ফোল্ডার দেওয়া হয়নি', 'No folder given') };
+    const item = readBackupDir(dir, 'custom');
+    if (!item.manifest) return { ok: false, message: tr('manifest.json নেই বা পড়া যায় না, তাই ডাটাবেস restore করা যাবে না', 'manifest.json is missing or unreadable, so databases cannot be restored') };
+    const archive = dbArchiveOf(item);
+    if (!archive) return { ok: false, message: tr('এই backup-এ ডাটাবেস আর্কাইভ নেই', 'This backup has no database archive') };
+    if (!item.postgres) return { ok: false, message: tr('এই backup-এ PostgreSQL ডাম্প নেই', 'This backup has no PostgreSQL dump') };
+    const password = typeof opts.password === 'string' ? opts.password : '';
+    if (item.encrypted && !password) return { ok: false, needPassword: true, message: tr('এই backup পাসওয়ার্ড দিয়ে encrypted, পাসওয়ার্ড দিন', 'This backup is encrypted, enter the password') };
+    const { psql, dump, common } = pgTools();
+    if (!fs.existsSync(psql)) return { ok: false, message: tr('PostgreSQL ইনস্টল করা নেই; আগে Services পেজ থেকে PostgreSQL চালু করুন', 'PostgreSQL is not installed; start PostgreSQL once from the Services page first') };
+    const picks = (Array.isArray(opts.picks) ? opts.picks : []).filter((p) => p && SAFE_PGDB(p.name));
+    if (!picks.length) return { ok: false, message: tr('কোনো ডাটাবেস বাছা হয়নি', 'No database selected') };
+    const stamp = stampOf();
+    const tmp = path.join(tmpRoot(), 'restore-pg-' + stamp);
+    const results = [];
+    const warnings = [];
+    let startedHere = false;
+    restoring = true;
+    try {
+      fs.mkdirSync(tmp, { recursive: true });
+      log(`Restore PostgreSQL: ${archive} -> ${picks.length} database(s): ${picks.map((p) => p.name + '(' + (p.mode || 'rename') + ')').join(', ')}`);
+      if (ctx.onProgress) ctx.onProgress('Restore: reading database archive');
+      const ex = await extractPgSql(archive, password, path.join(tmp, 'x'), warnings);
+      if (!ex.ok) return ex;
+
+      let cur = await listPgDbs();
+      if (!cur.ok && cur.notRunning && ctx.startDb) {
+        log('  PostgreSQL is not running, starting it for the restore ...');
+        if (ctx.onProgress) ctx.onProgress('Restore: starting PostgreSQL');
+        const sr = await ctx.startDb('postgres').catch((e) => ({ ok: false, message: e.message }));
+        if (!sr || !sr.ok) return { ok: false, message: tr('PostgreSQL চালু করা যায়নি: ', 'Could not start PostgreSQL: ') + String((sr && sr.message) || '').slice(0, 200) };
+        startedHere = true;
+        cur = await listPgDbs();
+      }
+      if (!cur.ok) return { ok: false, message: tr('PostgreSQL-এ ঢোকা যায়নি: ', 'Cannot connect to PostgreSQL: ') + (cur.message || '') };
+      const taken = new Set(cur.dbs);
+
+      if (ctx.onProgress) ctx.onProgress('Restore: splitting the dump');
+      const secDir = path.join(tmp, 'sec');
+      fs.mkdirSync(secDir, { recursive: true });
+      const parts = await splitPgDump(ex.file, secDir);
+      log(`  dump has ${parts.sections.length} database section(s): ${parts.sections.map((x) => x.name).join(', ')}`);
+      const env = ctx.pgEnv();
+      const preDir = path.join(baseDir(), 'pre-restore', stamp);
+
+      for (const p of picks) {
+        const sec = parts.sections.find((x) => x.name === p.name);
+        if (!sec) {
+          results.push({ name: p.name, ok: false, message: tr('dump-এ পাওয়া যায়নি', 'not found in the dump') });
+          continue;
+        }
+        const clash = taken.has(p.name);
+        let finalName = p.name;
+        let action = 'new';
+        let drop = false;
+        if (clash) {
+          if (p.mode === 'overwrite') {
+            action = 'overwritten';
+            drop = true;
+          } else {
+            finalName = freePgName(p.name, taken);
+            action = 'renamed';
+            if (!finalName) {
+              results.push({ name: p.name, ok: false, message: tr('নতুন নাম পাওয়া গেল না', 'no free name found') });
+              continue;
+            }
+          }
+        }
+        const res = { name: p.name, final: finalName, action, ok: false, notes: [] };
+        try {
+          if (ctx.onProgress) ctx.onProgress(`Restore: ${p.name}`);
+          if (drop) {
+            // পুরনোটার safety copy আগে; না হলে কিছুই মোছা হয় না
+            fs.mkdirSync(preDir, { recursive: true });
+            const pre = path.join(preDir, 'pg_' + p.name.replace(/[^A-Za-z0-9_.-]/g, '_') + '.sql');
+            const dr = await run(dump, ['-w', '-h', '127.0.0.1', '-p', String(ctx.pgPort()), '-U', 'postgres', '-d', p.name, '-f', pre], { env, timeout: 3600000 });
+            if (!dr.ok) {
+              try {
+                fs.rmSync(pre, { force: true });
+              } catch {}
+              res.message = tr('পুরনো ডাটাবেসের safety dump হয়নি, তাই কিছু মোছা হয়নি: ', 'Safety dump of the old database failed, so nothing was dropped: ') + (dr.stderr || '').trim().slice(0, 200);
+              results.push(res);
+              log(`  [FAIL] ${p.name}: ${res.message}`);
+              continue;
+            }
+            res.preDump = pre;
+            res.notes.push(tr('পুরনো ডাটাবেসের কপি রাখা আছে: ' + pre, 'A copy of the old database was saved: ' + pre));
+            const dd = await run(psql, [...common, '-d', 'postgres', '-c', `DROP DATABASE IF EXISTS ${pgIdent(p.name)} WITH (FORCE)`], { env, timeout: 120000 });
+            if (!dd.ok) {
+              res.message = tr('পুরনো ডাটাবেস মোছা যায়নি (এখনো কেউ ব্যবহার করছে?): ', 'Could not drop the old database (is something still using it?): ') + (dd.stderr || '').trim().slice(0, 200);
+              results.push(res);
+              log(`  [FAIL] ${p.name}: ${res.message}`);
+              continue;
+            }
+          }
+          const rename = finalName !== p.name;
+          let runFile = sec.file;
+          if (rename) {
+            runFile = path.join(tmp, 'run-' + results.length + '.sql');
+            const br = await buildPgRunFile(runFile, sec.file, p.name, finalName, true);
+            if (!br.renamedOk) {
+              res.message = tr('dump-এর CREATE DATABASE / \\connect লাইন চেনা গেল না, নাম বদলানো যায়নি', 'Could not find the CREATE DATABASE / \\connect lines in the dump, cannot rename');
+              results.push(res);
+              continue;
+            }
+          }
+          const ir = await runWithFile(psql, [...common, '-d', 'postgres'], runFile, { env });
+          if (rename) {
+            try {
+              fs.rmSync(runFile, { force: true });
+            } catch {}
+          }
+          const errLines = (ir.stderr || '').split(/\r?\n/).filter((l) => /\bERROR:|\bFATAL:/.test(l));
+          const after = await listPgDbs();
+          if (!after.ok || !after.dbs.includes(finalName)) {
+            res.message = `psql import failed (exit code ${ir.code}): ` + (errLines.join(' | ') || (ir.stderr || ir.stdout || '').trim()).slice(-300);
+            if (drop) res.notes.push(tr('ডাটাবেস নেই বা আংশিক; উপরের safety copy থেকে ফেরত নেওয়া যাবে', 'The database is missing or partial; the safety copy above can bring it back'));
+            results.push(res);
+            log(`  [FAIL] ${p.name}: ${res.message}`);
+            continue;
+          }
+          const cnt = await run(psql, [...common, '-d', finalName, '-A', '-t', '-c', "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema')"], { env, timeout: 60000 });
+          res.tables = cnt.ok ? parseInt(cnt.stdout.trim(), 10) : null;
+          if (errLines.length) res.notes.push(tr(`import-এ ${errLines.length}টা ত্রুটির লাইন ছিল (যেমন অনুপস্থিত role): ` + errLines.slice(0, 3).join(' | ').slice(0, 300), `The import printed ${errLines.length} error line(s) (for example a missing role): ` + errLines.slice(0, 3).join(' | ').slice(0, 300)));
+          res.ok = true;
+          taken.add(finalName);
+          results.push(res);
+          log(`  restored ${p.name} -> ${finalName} (${action}${res.tables != null ? ', ' + res.tables + ' tables' : ''}${errLines.length ? ', ' + errLines.length + ' error line(s)' : ''})`);
+        } catch (e) {
+          res.message = e.message;
+          results.push(res);
+          log(`  [FAIL] ${p.name}: ${e.message}`);
+        }
+      }
+      if (!item.complete) warnings.push(tr('এই backup আংশিক (complete নয়): ' + (item.failedSteps.join(', ') || '?'), 'This backup is partial (not complete): ' + (item.failedSteps.join(', ') || '?')));
+      warnings.push(tr('role/ইউজার (এবং postgres, template1) ফেরত আনা হয় না; মালিক role এই PostgreSQL-এ না থাকলে ownership-এর ত্রুটি আসতে পারে', 'Roles/users (and the postgres and template1 databases) are not restored; a missing owner role can print ownership errors'));
+      if (results.some((r) => r.ok && r.action === 'renamed')) warnings.push(tr('নতুন নামে রাখা ডাটাবেস সাইটের কনফিগে নিজে থেকে বসে না; সাইট ওই নামে চালাতে চাইলে নামটা বদলান', 'A database restored under a new name is not wired into any site; change the name in the site config if a site should use it'));
+      if (startedHere) warnings.push(tr('PostgreSQL এই restore-এর জন্য চালু করা হয়েছিল, চালু অবস্থায় রাখা আছে', 'PostgreSQL was started for this restore and is left running'));
+      return { ok: results.some((r) => r.ok), results, warnings };
+    } catch (e) {
+      return { ok: false, message: e.message };
+    } finally {
+      restoring = false;
+      try {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+
+  // ---------- Restore, step 4a: নিজের ফোল্ডার (extra-N আর্কাইভ) আর plain copy (files\<label>) ----------
+  // কখনো কিছু নিজে থেকে মুছি না, আর settings.json / সার্টিফিকেটে হাত দিই না (সেটা আলাদা ধাপ)।
+  // extra-N: backup-এ মূল পথ রাখা নেই (শুধু নাম), তাই সবসময় নতুন ফোল্ডারে: <ROOT>\restored\<নাম>-<stamp>।
+  // files\<label>: manifest-এ মূল পথ (source) আছে। মূল পথ না থাকলে সেখানেই বসে; থাকলে ব্যবহারকারী বাছে:
+  //   rename (<পথ>_restored, পুরনো অক্ষত, ডিফল্ট) বা overwrite (merge: একই নামের ফাইল বদলায়, backup-এ নেই এমন ফাইল থেকে যায়)।
+  // .versions আর .s360-state.json ফেরত আনা হয় না।
+  const safeName = (s) => String(s).replace(/[\\/:*?"<>|\x00-\x1f]+/g, '_').trim().replace(/^\.+$/, '_') || 'folder';
+  function freeDirName(base) {
+    if (!fs.existsSync(base)) return base;
+    for (let i = 1; i < 1000; i++) {
+      const cand = base + (i === 1 ? '_restored' : '_restored' + i);
+      if (!fs.existsSync(cand)) return cand;
+    }
+    return '';
+  }
+  function readManifestRaw(dir) {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+  function restoreOtherInfo(dir) {
+    if (typeof dir !== 'string' || !dir) return { ok: false, message: tr('ফোল্ডার দেওয়া হয়নি', 'No folder given') };
+    const item = readBackupDir(dir, 'custom');
+    const m = item.manifest ? readManifestRaw(dir) : null;
+    if (!m) return { ok: false, message: tr('manifest.json নেই বা পড়া যায় না, তাই restore করা যাবে না', 'manifest.json is missing or unreadable, so nothing can be restored') };
+    const extras = [];
+    for (const x of item.extras) {
+      const f = item.files.find((y) => y.exists && new RegExp('^extra-' + x.n + '\\.(7z|zip)$', 'i').test(y.name));
+      extras.push({ n: x.n, label: x.label, archive: f ? path.join(dir, f.name) : '', target: path.join(ctx.rootDir(), 'restored', safeName(x.label) + '-' + item.stamp) });
+    }
+    const copies = [];
+    const list = Array.isArray(m.copyFolders) ? m.copyFolders : [];
+    for (const c of list) {
+      if (!c || typeof c.label !== 'string') continue;
+      const mm = /^files[\\/]([^\\/]+)$/.exec(String(c.folder || ''));
+      if (!mm || mm[1] === '.' || mm[1] === '..') continue;
+      const srcDir = path.join(path.dirname(dir), 'files', mm[1]);
+      let exists = false;
+      try {
+        exists = fs.statSync(srcDir).isDirectory();
+      } catch {}
+      const source = typeof c.source === 'string' ? c.source : '';
+      copies.push({ label: c.label, srcDir, exists, source, sourceExists: !!source && fs.existsSync(source) });
+    }
+    if (!extras.length && !copies.length) return { ok: false, message: tr('এই backup-এ নিজের ফোল্ডার বা আলাদা copy নেই', 'This backup has no own folders or plain copies') };
+    return { ok: true, encrypted: item.encrypted, complete: item.complete, failedSteps: item.failedSteps, extras, copies, sevenZip: !!find7z(), restoredRoot: path.join(ctx.rootDir(), 'restored') };
+  }
+
+  async function restoreOther(opts) {
+    if (restoring) return { ok: false, message: tr('আরেকটা restore চলছে', 'Another restore is running') };
+    if (running) return { ok: false, message: tr('একটা backup চলছে, শেষ হলে চেষ্টা করুন', 'A backup is running, try again when it has finished') };
+    const info = restoreOtherInfo(opts && opts.dir);
+    if (!info.ok) return info;
+    const picks = Array.isArray(opts.picks) ? opts.picks : [];
+    const todo = [];
+    for (const p of picks) {
+      if (!p) continue;
+      if (p.kind === 'extra') {
+        const e = info.extras.find((x) => x.n === p.n);
+        if (e) todo.push({ kind: 'extra', e });
+      } else if (p.kind === 'copy') {
+        const c = info.copies.find((x) => x.label === p.label);
+        if (c) todo.push({ kind: 'copy', c, mode: p.mode === 'overwrite' ? 'overwrite' : 'rename' });
+      }
+    }
+    if (!todo.length) return { ok: false, message: tr('কিছু বাছা হয়নি', 'Nothing selected') };
+    const password = typeof opts.password === 'string' ? opts.password : '';
+    if (info.encrypted && !password && todo.some((x) => x.kind === 'extra')) return { ok: false, needPassword: true, message: tr('এই backup পাসওয়ার্ড দিয়ে encrypted, পাসওয়ার্ড দিন', 'This backup is encrypted, enter the password') };
+    const sevenZ = find7z();
+    const wrongPw = (x) => /wrong password|cannot open encrypted archive|can not open encrypted archive|data error in encrypted/i.test(x);
+    const results = [];
+    const warnings = [];
+    restoring = true;
+    try {
+      log(`Restore own folders: ${todo.map((x) => (x.kind === 'extra' ? 'extra-' + x.e.n : 'copy ' + x.c.label + '(' + x.mode + ')')).join(', ')}`);
+      for (const x of todo) {
+        if (x.kind === 'extra') {
+          const e = x.e;
+          const res = { kind: 'extra', name: e.label, ok: false, notes: [] };
+          results.push(res);
+          if (!e.archive) {
+            res.message = tr('আর্কাইভ ফাইল নেই', 'archive file is missing');
+            continue;
+          }
+          const is7z = /\.7z$/i.test(e.archive);
+          if (is7z && !sevenZ) {
+            res.message = tr('7-Zip নেই; Backup পেজ থেকে ইনস্টল করুন', '7-Zip is missing; install it from the Backup page');
+            continue;
+          }
+          const target = freeDirName(e.target);
+          if (!target) {
+            res.message = tr('নতুন ফোল্ডারের নাম পাওয়া গেল না', 'no free folder name found');
+            continue;
+          }
+          try {
+            if (ctx.onProgress) ctx.onProgress(`Restore: ${e.label}`);
+            fs.mkdirSync(target, { recursive: true });
+            let r;
+            if (sevenZ) {
+              r = await run(sevenZ, ['x', e.archive, '-o' + target, '-y', ...(password ? ['-p' + password] : [])], { timeout: 6 * 3600 * 1000 });
+            } else {
+              r = await run(ctx.tarExe || (win ? 'tar.exe' : 'tar'), ['-xf', e.archive, '-C', target], {});
+            }
+            const out = r.stdout + r.stderr;
+            if (!r.ok && r.code !== 1) {
+              try {
+                fs.rmSync(target, { recursive: true, force: true });
+              } catch {}
+              if (wrongPw(out)) {
+                res.wrongPassword = true;
+                res.message = tr('পাসওয়ার্ড ভুল', 'Wrong password');
+              } else res.message = `extract failed (exit code ${r.code}): ` + out.trim().slice(-300);
+              log(`  [FAIL] ${e.label}: ${res.message}`);
+              continue;
+            }
+            if (r.code === 1) res.notes.push(tr('7-Zip সতর্কতা দিয়েছে, বিস্তারিত log-এ', '7-Zip reported warnings, see the log'));
+            res.ok = true;
+            res.target = target;
+            log(`  restored extra-${e.n} (${e.label}) -> ${target}`);
+          } catch (err) {
+            res.message = err.message;
+            log(`  [FAIL] ${e.label}: ${err.message}`);
+          }
+        } else {
+          const c = x.c;
+          const res = { kind: 'copy', name: c.label, ok: false, notes: [] };
+          results.push(res);
+          if (!c.exists) {
+            res.message = tr('backup-এর files ফোল্ডারে এই copy পাওয়া যায়নি: ', 'This copy was not found in the backup files folder: ') + c.srcDir;
+            continue;
+          }
+          if (!c.source) {
+            res.message = tr('মূল পথ manifest-এ নেই', 'the original path is not in manifest.json');
+            continue;
+          }
+          let dst = c.source;
+          let action = 'new';
+          if (c.sourceExists) {
+            if (x.mode === 'overwrite') action = 'merged';
+            else {
+              dst = freeDirName(c.source);
+              action = 'renamed';
+            }
+          }
+          if (!dst) {
+            res.message = tr('নতুন ফোল্ডারের নাম পাওয়া গেল না', 'no free folder name found');
+            continue;
+          }
+          const rs = path.resolve(c.srcDir).toLowerCase();
+          const rd = path.resolve(dst).toLowerCase();
+          if (rd === path.parse(rd).root || rd === rs || rd.startsWith(rs + path.sep) || rs.startsWith(rd + path.sep)) {
+            res.message = tr('গন্তব্য ও backup-এর copy একটা আরেকটার ভেতরে বা একই জায়গায়, তাই থামানো হয়েছে: ', 'The target and the backup copy overlap, stopped: ') + dst;
+            continue;
+          }
+          try {
+            if (ctx.onProgress) ctx.onProgress(`Restore: ${c.label}`);
+            let n = 0;
+            await fs.promises.cp(c.srcDir, dst, {
+              recursive: true,
+              force: true,
+              filter: (sp) => {
+                const rel = path.relative(c.srcDir, sp);
+                const first = rel.split(path.sep)[0];
+                if (first === '.versions' || (rel === '.s360-state.json')) return false;
+                n++;
+                return true;
+              },
+            });
+            res.ok = true;
+            res.action = action;
+            res.target = dst;
+            res.items = n;
+            if (action === 'merged') res.notes.push(tr('মূল ফোল্ডারে একই নামের ফাইল backup-এরটা দিয়ে বদলেছে; backup-এ নেই এমন ফাইল থেকে গেছে', 'Files with the same name in the original folder were replaced; files that are not in the backup were kept'));
+            log(`  restored copy ${c.label} -> ${dst} (${action}, ${n} entries)`);
+          } catch (err) {
+            res.message = err.message;
+            log(`  [FAIL] ${c.label}: ${err.message}`);
+          }
+        }
+      }
+      if (!info.complete) warnings.push(tr('এই backup আংশিক (complete নয়): ' + (info.failedSteps.join(', ') || '?'), 'This backup is partial (not complete): ' + (info.failedSteps.join(', ') || '?')));
+      if (results.some((r) => r.kind === 'copy' && r.ok && r.action === 'renamed')) warnings.push(tr('নতুন নামে রাখা ফোল্ডার কোনো সাইট বা প্রোগ্রামের সাথে জোড়া নেই; দরকার হলে নিজে ঠিক করুন', 'A folder restored under a new name is not linked to any site or program; fix that yourself if needed'));
+      return { ok: results.some((r) => r.ok), results, warnings };
+    } catch (e) {
+      return { ok: false, message: e.message };
+    } finally {
+      restoring = false;
+    }
+  }
+
+  // ---------- Restore, step 4b: settings.7z = সার্টিফিকেট + প্রতি-সাইট সেটিংস ----------
+  // settings.7z-এর ভেতরে secrets\certs\* আর secrets\settings.json (শুধু পাসওয়ার্ড দিয়ে backup নিলে থাকে)।
+  // settings.json পুরো বসানো হয় না: তাতে পুরনো PC-র পথ (rootDir/wwwDir), পোর্ট আর plain-text DB পাসওয়ার্ড আছে।
+  // শুধু সাইট ধরে সেটিংস আমদানি হয় (সাদা তালিকা + যাচাই); বর্তমান সেটিংসের একটা কপি আগে রাখা হয়।
+  // সার্টিফিকেট: বর্তমান ফাইল কখনো বদলায় না (একই নামে অন্য ফাইল থাকলে সেটা থেকে যায়, বলা হয়)।
+  const SITE_KEYS = ['sitePhp', 'siteSession', 'sitePhpIni', 'sitePublic', 'siteDisabled', 'nodeSites', 'phpExt'];
+  const BAD_KEY = (k) => typeof k !== 'string' || !k || k.length > 100 || ['__proto__', 'constructor', 'prototype'].includes(k) || /[\x00-\x1f\\/]/.test(k);
+  const DOMAIN_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
+  const VERSION_RE = /^[0-9A-Za-z._-]{1,40}$/;
+  const INI_KEYS = ['max_execution_time', 'max_input_time', 'memory_limit', 'display_errors', 'upload_max_filesize', 'post_max_size', 'max_input_vars'];
+  const HOST_RE = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/i;
+  const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+
+  function settingsArchiveOf(item) {
+    const f = item.files.find((x) => x.exists && /^settings\.(7z|zip)$/i.test(x.name));
+    return f ? path.join(item.dir, f.name) : '';
+  }
+  function restoreSettingsInfo(dir) {
+    if (typeof dir !== 'string' || !dir) return { ok: false, message: tr('ফোল্ডার দেওয়া হয়নি', 'No folder given') };
+    const item = readBackupDir(dir, 'custom');
+    if (!item.manifest) return { ok: false, message: tr('manifest.json নেই বা পড়া যায় না, তাই restore করা যাবে না', 'manifest.json is missing or unreadable, so nothing can be restored') };
+    const archive = settingsArchiveOf(item);
+    if (!archive) return { ok: false, message: tr('এই backup-এ settings আর্কাইভ নেই (পাসওয়ার্ড ছাড়া backup-এ সেটা রাখা হয় না)', 'This backup has no settings archive (it is only made when a password is set)') };
+    return { ok: true, archive, encrypted: item.encrypted, complete: item.complete, failedSteps: item.failedSteps, sevenZip: !!find7z(), certsDir: ctx.certsDir() };
+  }
+
+  function findSecretsRoot(d, depth) {
+    if (fs.existsSync(path.join(d, 'settings.json')) || fs.existsSync(path.join(d, 'certs'))) return d;
+    if (depth > 0) {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        if (e.isDirectory()) {
+          const r = findSecretsRoot(path.join(d, e.name), depth - 1);
+          if (r) return r;
+        }
+      }
+    }
+    return '';
+  }
+
+  // বর্তমান সার্টিফিকেট ফোল্ডারে বসানো: আগের কোনো ফাইল বদলায় না
+  function copyCerts(srcDir, dstDir) {
+    const out = { copied: [], same: [], kept: [] };
+    const walk = (rel) => {
+      for (const e of fs.readdirSync(path.join(srcDir, rel), { withFileTypes: true })) {
+        const r = path.join(rel, e.name);
+        if (e.isSymbolicLink()) continue;
+        if (e.isDirectory()) {
+          walk(r);
+          continue;
+        }
+        if (!e.isFile()) continue;
+        const from = path.join(srcDir, r);
+        const to = path.join(dstDir, r);
+        if (fs.existsSync(to)) {
+          let same = false;
+          try {
+            same = fs.statSync(to).size === fs.statSync(from).size && fs.readFileSync(to).equals(fs.readFileSync(from));
+          } catch {}
+          (same ? out.same : out.kept).push(r);
+          continue;
+        }
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        fs.copyFileSync(from, to);
+        out.copied.push(r);
+      }
+    };
+    walk('');
+    return out;
+  }
+
+  // একটা সাইট-সেটিং মান যাচাই; ঠিক থাকলে {v} (পরিষ্কার করা মান), না হলে {skip: কারণ}
+  function cleanSiteValue(key, domain, v, cur) {
+    if (key === 'sitePhp') {
+      if (typeof v !== 'string' || !VERSION_RE.test(v)) return { skip: 'bad value' };
+      if (ctx.phpVersions && !ctx.phpVersions().includes(v)) return { skip: 'PHP ' + v + ' is not registered on this PC' };
+      return { v };
+    }
+    if (key === 'siteSession') {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 0 || n > 1000000) return { skip: 'bad value' };
+      return { v: n };
+    }
+    if (key === 'sitePhpIni') {
+      if (!isObj(v)) return { skip: 'bad value' };
+      const o = {};
+      const SIZE_RE = /^(0|\d{1,6}[KMGkmg]?)$/;
+      for (const [k, x] of Object.entries(v)) {
+        if (!INI_KEYS.includes(k)) continue;
+        const sv = String(x);
+        // ini_set-এর চার মান prepend স্ক্রিপ্টের নিয়মে ([A-Za-z0-9-]+); বাকি তিনটা .user.ini-র জন্য আকার/সংখ্যা
+        const ok = k === 'upload_max_filesize' || k === 'post_max_size' ? SIZE_RE.test(sv) : k === 'max_input_vars' ? /^\d{1,6}$/.test(sv) : /^[A-Za-z0-9-]{1,20}$/.test(sv);
+        if (ok) o[k] = sv;
+      }
+      // site:setPhpIni-র নিয়ম: upload-এর সাথে post_max_size লাগে, আর post >= upload
+      const bytes = (x) => {
+        const m = /^(\d+)([KMGkmg]?)$/.exec(String(x));
+        return m ? Number(m[1]) * ({ '': 1, k: 1024, m: 1048576, g: 1073741824 }[m[2].toLowerCase()]) : 0;
+      };
+      if (o.upload_max_filesize) {
+        const bad = !o.post_max_size || (bytes(o.post_max_size) !== 0 && bytes(o.post_max_size) < bytes(o.upload_max_filesize));
+        if (bad) delete o.upload_max_filesize;
+      }
+      return Object.keys(o).length ? { v: o } : { skip: 'empty' };
+    }
+    if (key === 'sitePublic') {
+      if (!Array.isArray(v) || !v.length) return { skip: 'bad value' };
+      const used = new Set();
+      for (const [d, arr] of Object.entries(cur.sitePublic || {})) if (d !== domain && Array.isArray(arr)) arr.forEach((n) => used.add(String(n).toLowerCase()));
+      const names = [];
+      for (const n of v.slice(0, 10)) {
+        const nm = String(n).toLowerCase();
+        if (HOST_RE.test(nm) && !used.has(nm) && !names.includes(nm)) names.push(nm);
+      }
+      return names.length ? { v: names } : { skip: 'names invalid or used by another site' };
+    }
+    if (key === 'siteDisabled') return v === true ? { v: true } : { skip: 'bad value' };
+    if (key === 'nodeSites') {
+      if (!isObj(v)) return { skip: 'bad value' };
+      const o = {};
+      if (typeof v.cmd === 'string' && v.cmd.length <= 300 && !/[\r\n]/.test(v.cmd)) o.cmd = v.cmd;
+      if (typeof v.version === 'string' && VERSION_RE.test(v.version) && (!ctx.nodeVersions || ctx.nodeVersions().includes(v.version))) o.version = v.version;
+      if (v.autostart === true) o.autostart = true;
+      if (v.startall === true) o.startall = true;
+      // পোর্ট: শুধু হাতে দেওয়া (manual) আর এই PC-তে অন্য সাইট ব্যবহার না করলে; নইলে নিজে নতুন পোর্ট নেবে
+      const port = Number(v.port);
+      if (v.manual === true && Number.isInteger(port) && port >= 1 && port <= 65535) {
+        const taken = Object.entries(cur.nodeSites || {}).some(([d, c]) => d !== domain && c && Number(c.port) === port);
+        if (!taken) {
+          o.port = port;
+          o.manual = true;
+        }
+      }
+      return Object.keys(o).length ? { v: o } : { skip: 'empty' };
+    }
+    return { skip: 'unknown key' };
+  }
+
+  // ব্যবহারকারীর বর্তমান সেটিংসে মেশানো (কপি বানিয়ে); conflict: 'keep' (ডিফল্ট) | 'replace'
+  function mergeSiteSettings(backupSettings, cur, conflict) {
+    const next = {};
+    const stats = { added: 0, replaced: 0, kept: 0, same: 0, skipped: 0, byKey: {}, skippedList: [] };
+    const bump = (key, what) => {
+      stats[what]++;
+      const b = (stats.byKey[key] = stats.byKey[key] || { added: 0, replaced: 0, kept: 0, same: 0, skipped: 0 });
+      b[what]++;
+    };
+    for (const key of SITE_KEYS) {
+      const src = backupSettings[key];
+      if (!isObj(src)) continue;
+      const base = isObj(cur[key]) ? cur[key] : {};
+      const merged = { ...base };
+      let touched = false;
+      if (key === 'phpExt') {
+        for (const [ver, exts] of Object.entries(src)) {
+          if (BAD_KEY(ver) || !VERSION_RE.test(ver) || !isObj(exts)) {
+            bump(key, 'skipped');
+            continue;
+          }
+          const m = { ...(isObj(merged[ver]) ? merged[ver] : {}) };
+          for (const [ext, on] of Object.entries(exts)) {
+            if (!/^[A-Za-z0-9_]{1,40}$/.test(ext) || typeof on !== 'boolean') {
+              bump(key, 'skipped');
+              continue;
+            }
+            if (!(ext in m)) {
+              m[ext] = on;
+              bump(key, 'added');
+              touched = true;
+            } else if (m[ext] === on) bump(key, 'same');
+            else if (conflict === 'replace') {
+              m[ext] = on;
+              bump(key, 'replaced');
+              touched = true;
+            } else bump(key, 'kept');
+          }
+          merged[ver] = m;
+        }
+      } else {
+        for (const [domain, val] of Object.entries(src)) {
+          if (BAD_KEY(domain) || !DOMAIN_RE.test(domain)) {
+            bump(key, 'skipped');
+            continue;
+          }
+          const c = cleanSiteValue(key, domain, val, { ...cur, ...next });
+          if (c.skip) {
+            bump(key, 'skipped');
+            stats.skippedList.push(`${key}: ${domain} (${c.skip})`);
+            continue;
+          }
+          if (!(domain in merged)) {
+            merged[domain] = c.v;
+            bump(key, 'added');
+            touched = true;
+          } else if (JSON.stringify(merged[domain]) === JSON.stringify(c.v)) bump(key, 'same');
+          else if (conflict === 'replace') {
+            merged[domain] = c.v;
+            bump(key, 'replaced');
+            touched = true;
+          } else bump(key, 'kept');
+        }
+      }
+      if (touched) next[key] = merged;
+    }
+    return { next, stats };
+  }
+
+  async function restoreSettings(opts) {
+    if (restoring) return { ok: false, message: tr('আরেকটা restore চলছে', 'Another restore is running') };
+    if (running) return { ok: false, message: tr('একটা backup চলছে, শেষ হলে চেষ্টা করুন', 'A backup is running, try again when it has finished') };
+    const info = restoreSettingsInfo(opts && opts.dir);
+    if (!info.ok) return info;
+    const wantCerts = opts.certs !== false;
+    const wantSites = opts.sites !== false;
+    if (!wantCerts && !wantSites) return { ok: false, message: tr('কিছু বাছা হয়নি', 'Nothing selected') };
+    const conflict = opts.conflict === 'replace' ? 'replace' : 'keep';
+    const password = typeof opts.password === 'string' ? opts.password : '';
+    if (info.encrypted && !password) return { ok: false, needPassword: true, message: tr('এই backup পাসওয়ার্ড দিয়ে encrypted, পাসওয়ার্ড দিন', 'This backup is encrypted, enter the password') };
+    const sevenZ = find7z();
+    const is7z = /\.7z$/i.test(info.archive);
+    if (is7z && !sevenZ) return { ok: false, message: tr('7-Zip নেই; Backup পেজ থেকে ইনস্টল করুন', '7-Zip is missing; install it from the Backup page') };
+    const wrongPw = (x) => /wrong password|cannot open encrypted archive|can not open encrypted archive|data error in encrypted/i.test(x);
+    const stamp = stampOf();
+    const tmp = path.join(tmpRoot(), 'restore-settings-' + stamp);
+    const warnings = [];
+    const res = { ok: false, certs: null, sites: null, warnings };
+    restoring = true;
+    try {
+      fs.mkdirSync(tmp, { recursive: true });
+      log(`Restore settings: ${info.archive} (certs=${wantCerts}, sites=${wantSites}, conflict=${conflict})`);
+      if (ctx.onProgress) ctx.onProgress('Restore: reading settings archive');
+      const exDir = path.join(tmp, 'x');
+      fs.mkdirSync(exDir, { recursive: true });
+      if (sevenZ) {
+        const xr = await run(sevenZ, ['x', info.archive, '-o' + exDir, '-y', ...(password ? ['-p' + password] : [])], { timeout: 3600 * 1000 });
+        const xout = xr.stdout + xr.stderr;
+        if (!xr.ok && xr.code !== 1) {
+          if (wrongPw(xout)) return { ok: false, wrongPassword: true, message: tr('পাসওয়ার্ড ভুল', 'Wrong password') };
+          return { ok: false, message: `7z extract failed (exit code ${xr.code}): ` + xout.trim().slice(-300) };
+        }
+        if (xr.code === 1) warnings.push(tr('7-Zip সতর্কতা দিয়েছে, বিস্তারিত log-এ', '7-Zip reported warnings, see the log'));
+      } else {
+        const r = await run(ctx.tarExe || (win ? 'tar.exe' : 'tar'), ['-xf', info.archive, '-C', exDir], {});
+        if (!r.ok) return { ok: false, message: ('tar failed: ' + r.stderr).slice(0, 400) };
+      }
+      const root = findSecretsRoot(exDir, 2);
+      if (!root) return { ok: false, message: tr('আর্কাইভে certs বা settings.json পাওয়া যায়নি', 'Neither certs nor settings.json was found in the archive') };
+
+      // ১) সার্টিফিকেট
+      if (wantCerts) {
+        const cs = path.join(root, 'certs');
+        if (!fs.existsSync(cs)) warnings.push(tr('এই backup-এ certs ফোল্ডার নেই', 'This backup has no certs folder'));
+        else {
+          const dst = ctx.certsDir();
+          fs.mkdirSync(dst, { recursive: true });
+          res.certs = { ...copyCerts(cs, dst), dir: dst };
+          log(`  certificates: ${res.certs.copied.length} copied, ${res.certs.same.length} already there, ${res.certs.kept.length} kept (different file with the same name)`);
+          if (res.certs.kept.length) warnings.push(tr('একই নামে আলাদা সার্টিফিকেট ফাইল আগে থেকে ছিল, সেগুলো বদলানো হয়নি: ' + res.certs.kept.join(', '), 'Certificate files with the same name but different content already existed and were not replaced: ' + res.certs.kept.join(', ')));
+        }
+      }
+
+      // ২) প্রতি-সাইট সেটিংস
+      if (wantSites) {
+        const sf = path.join(root, 'settings.json');
+        let bs = null;
+        try {
+          bs = JSON.parse(fs.readFileSync(sf, 'utf8'));
+        } catch (e) {
+          warnings.push(tr('settings.json পড়া গেল না: ', 'Could not read settings.json: ') + e.message);
+        }
+        if (isObj(bs)) {
+          const cur = ctx.settings();
+          const { next, stats } = mergeSiteSettings(bs, cur, conflict);
+          res.sites = stats;
+          if (Object.keys(next).length) {
+            const sp = ctx.settingsPath();
+            try {
+              if (fs.existsSync(sp)) {
+                const bak = path.join(path.dirname(sp), 'settings.before-restore-' + stamp + '.json');
+                fs.copyFileSync(sp, bak);
+                res.settingsBackup = bak;
+              }
+            } catch (e) {
+              return { ok: false, message: tr('বর্তমান settings-এর কপি রাখা গেল না, তাই কিছু বদলানো হয়নি: ', 'Could not save a copy of the current settings, nothing was changed: ') + e.message };
+            }
+            Object.assign(cur, next);
+            ctx.save(cur);
+            res.changed = true;
+          }
+          log(`  site settings: ${stats.added} added, ${stats.replaced} replaced, ${stats.kept} kept (differ), ${stats.same} same, ${stats.skipped} skipped`);
+          for (const x of stats.skippedList.slice(0, 20)) log('    skipped ' + x);
+          warnings.push(tr('settings.json-এর install/www ফোল্ডার, পোর্ট, ডাটাবেস পাসওয়ার্ড আর LAN share আমদানি করা হয়নি (এই PC-র নিজের মান থাকে)', 'The install/www folders, ports, database passwords and LAN sharing from settings.json were NOT imported (this PC keeps its own values)'));
+        }
+      }
+      if (!info.complete) warnings.push(tr('এই backup আংশিক (complete নয়): ' + (info.failedSteps.join(', ') || '?'), 'This backup is partial (not complete): ' + (info.failedSteps.join(', ') || '?')));
+      res.ok = !!(res.certs || res.sites);
+      if (!res.ok && !res.message) res.message = tr('কিছুই আমদানি হয়নি', 'Nothing was imported');
+      return res;
+    } catch (e) {
+      return { ok: false, message: e.message };
+    } finally {
+      restoring = false;
+      try {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+
+  return { getConfig, setConfig, runBackup, isRunning, lastStatus, tailLog, find7z, ensure7z, listBackups, restoreWwwInfo, restoreWww, restoreDbInfo, restoreMysql, restorePgInfo, restorePg, restoreOtherInfo, restoreOther, restoreSettingsInfo, restoreSettings, dirs: { baseDir, logsDir } };
 }
 
-module.exports = { createBackup, stampOf, STAMP_RE, snapshotChanged, pruneVersions, moveToVersions, folderSize, renameDirRetry };
+module.exports = { createBackup, stampOf, STAMP_RE, snapshotChanged, pruneVersions, moveToVersions, folderSize, renameDirRetry, runWithFile };

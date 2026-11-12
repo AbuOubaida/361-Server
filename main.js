@@ -4649,6 +4649,8 @@ const backup = createBackup({
   pgPort: () => getDbPort('postgres'),
   mysqlEnv: () => mysqlEnv(),
   pgEnv: () => pgEnv(),
+  phpVersions: () => phpVersionList().map((x) => x.version),
+  nodeVersions: () => nodeVersionList().map((x) => x.version),
   secret: {
     enc: (t) => (safeStorage.isEncryptionAvailable() ? 'ss:' + safeStorage.encryptString(t).toString('base64') : 'b64:' + Buffer.from(t, 'utf8').toString('base64')),
     dec: (v) => {
@@ -4775,6 +4777,157 @@ ipcMain.handle('restore:www', async (_e, opts) => {
     } else {
       sendStatus(tr('Restore www: ব্যর্থ বা বাতিল', 'Restore www: failed or cancelled'));
     }
+  } catch (_) {}
+  return res;
+});
+
+// Restore ধাপ ৩: MySQL ডাটাবেস ফেরত আনা। restore:dbInfo শুধু পড়ে (MySQL চালু থাকলে নামের মিল দেখে); restore:db ডাটাবেসে লেখে।
+// নাম মিললে ব্যবহারকারী প্রতিটার জন্য বাছে: নতুন নামে রাখা (<নাম>_restored) বা overwrite (আগে পুরনোটার safety dump `<ROOT>\backup\pre-restore\<stamp>`-এ)।
+ipcMain.handle('restore:dbInfo', async (_e, dir) => {
+  try {
+    return await backup.restoreDbInfo(typeof dir === 'string' ? dir : '');
+  } catch (err) {
+    return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+});
+ipcMain.handle('restore:db', async (_e, opts) => {
+  let res;
+  try {
+    if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+    const o = opts && typeof opts === 'object' ? opts : {};
+    res = await backup.restoreMysql({
+      dir: typeof o.dir === 'string' ? o.dir : '',
+      password: typeof o.password === 'string' ? o.password : '',
+      picks: Array.isArray(o.picks) ? o.picks.map((p) => ({ name: String(p && p.name), mode: p && p.mode === 'overwrite' ? 'overwrite' : 'rename' })) : [],
+    });
+  } catch (err) {
+    res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+  try {
+    if (res && res.ok) {
+      const n = Array.isArray(res.results) ? res.results.filter((x) => x.ok).length : 0;
+      sendStatus(tr(`Restore MySQL: শেষ (${n}টা ডাটাবেস)`, `Restore MySQL: finished (${n} database(s))`));
+    } else {
+      sendStatus(tr('Restore MySQL: ব্যর্থ বা বাতিল', 'Restore MySQL: failed or cancelled'));
+    }
+  } catch (_) {}
+  return res;
+});
+
+// Restore ধাপ ৩b: PostgreSQL ডাটাবেস ফেরত আনা। restore:pgInfo আর্কাইভ খুলে (পাসওয়ার্ড দিয়ে) ডাটাবেসের তালিকা পড়ে, কিছু বদলায় না; restore:pg ডাটাবেসে লেখে।
+// নাম মিললে: নতুন নামে (<নাম>_restored) বা overwrite (আগে pg_dump safety copy `<ROOT>\\backup\\pre-restore\\<stamp>`-এ)। role ফেরত আসে না।
+ipcMain.handle('restore:pgInfo', async (_e, opts) => {
+  try {
+    if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+    const o = opts && typeof opts === 'object' ? opts : {};
+    return await backup.restorePgInfo({ dir: typeof o.dir === 'string' ? o.dir : '', password: typeof o.password === 'string' ? o.password : '' });
+  } catch (err) {
+    return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+});
+ipcMain.handle('restore:pg', async (_e, opts) => {
+  let res;
+  try {
+    if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+    const o = opts && typeof opts === 'object' ? opts : {};
+    res = await backup.restorePg({
+      dir: typeof o.dir === 'string' ? o.dir : '',
+      password: typeof o.password === 'string' ? o.password : '',
+      picks: Array.isArray(o.picks) ? o.picks.map((p) => ({ name: String(p && p.name), mode: p && p.mode === 'overwrite' ? 'overwrite' : 'rename' })) : [],
+    });
+  } catch (err) {
+    res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+  try {
+    if (res && res.ok) {
+      const n = Array.isArray(res.results) ? res.results.filter((x) => x.ok).length : 0;
+      sendStatus(tr(`Restore PostgreSQL: শেষ (${n}টা ডাটাবেস)`, `Restore PostgreSQL: finished (${n} database(s))`));
+    } else {
+      sendStatus(tr('Restore PostgreSQL: ব্যর্থ বা বাতিল', 'Restore PostgreSQL: failed or cancelled'));
+    }
+  } catch (_) {}
+  return res;
+});
+
+// Restore ধাপ ৪a: নিজের ফোল্ডার (extra-N আর্কাইভ) ও plain copy (files\\<label>) ফেরত আনা। restore:otherInfo শুধু পড়ে; restore:other ফাইল বসায়।
+// কিছু মোছে না; extra-N যায় <ROOT>\\restored\\<নাম>-<stamp>-এ; copy মূল পথে (না থাকলে) / <পথ>_restored-এ / merge।
+ipcMain.handle('restore:otherInfo', (_e, dir) => {
+  try {
+    return backup.restoreOtherInfo(typeof dir === 'string' ? dir : '');
+  } catch (err) {
+    return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+});
+ipcMain.handle('restore:other', async (_e, opts) => {
+  let res;
+  try {
+    if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+    const o = opts && typeof opts === 'object' ? opts : {};
+    res = await backup.restoreOther({
+      dir: typeof o.dir === 'string' ? o.dir : '',
+      password: typeof o.password === 'string' ? o.password : '',
+      picks: Array.isArray(o.picks)
+        ? o.picks.map((p) =>
+            p && p.kind === 'extra'
+              ? { kind: 'extra', n: Number(p.n) }
+              : { kind: 'copy', label: String(p && p.label), mode: p && p.mode === 'overwrite' ? 'overwrite' : 'rename' }
+          )
+        : [],
+    });
+  } catch (err) {
+    res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+  try {
+    if (res && res.ok) {
+      const n = Array.isArray(res.results) ? res.results.filter((x) => x.ok).length : 0;
+      sendStatus(tr(`Restore ফোল্ডার: শেষ (${n}টা)`, `Restore folders: finished (${n})`));
+    } else {
+      sendStatus(tr('Restore ফোল্ডার: ব্যর্থ বা বাতিল', 'Restore folders: failed or cancelled'));
+    }
+  } catch (_) {}
+  return res;
+});
+
+// Restore ধাপ ৪b: settings.7z = সার্টিফিকেট + প্রতি-সাইট সেটিংস। restore:settingsInfo শুধু পড়ে; restore:settings সার্টিফিকেট কপি করে (আগের ফাইল বদলায় না)
+// আর settings.json থেকে শুধু সাদা-তালিকার সাইট-সেটিংস মেশায় (পথ, পোর্ট, পাসওয়ার্ড আসে না)। তারপর সাইট স্ক্যান + hosts + চলতি ওয়েব সার্ভার reload।
+ipcMain.handle('restore:settingsInfo', (_e, dir) => {
+  try {
+    return backup.restoreSettingsInfo(typeof dir === 'string' ? dir : '');
+  } catch (err) {
+    return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+});
+ipcMain.handle('restore:settings', async (_e, opts) => {
+  let res;
+  try {
+    if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+    const o = opts && typeof opts === 'object' ? opts : {};
+    res = await backup.restoreSettings({
+      dir: typeof o.dir === 'string' ? o.dir : '',
+      password: typeof o.password === 'string' ? o.password : '',
+      certs: o.certs !== false,
+      sites: o.sites !== false,
+      conflict: o.conflict === 'replace' ? 'replace' : 'keep',
+    });
+    if (res && res.ok && (res.changed || (res.certs && res.certs.copied.length)) && !busy) {
+      busy = true;
+      try {
+        const sites = withToolSites(scanSites());
+        const h = await syncHosts(sites);
+        await reloadRunning(sites);
+        if (!h.ok) res.hostsNote = hostsFailNote(h);
+      } catch (err) {
+        res.warnings = (res.warnings || []).concat(tr('সাইট রিফ্রেশে সমস্যা: ', 'Site refresh problem: ') + err.message);
+      } finally {
+        busy = false;
+      }
+    }
+  } catch (err) {
+    res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+  try {
+    if (res && res.ok) sendStatus(tr('Restore settings: শেষ', 'Restore settings: finished'));
+    else sendStatus(tr('Restore settings: ব্যর্থ বা বাতিল', 'Restore settings: failed or cancelled'));
   } catch (_) {}
   return res;
 });
