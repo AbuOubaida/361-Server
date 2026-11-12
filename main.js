@@ -4694,6 +4694,16 @@ ipcMain.handle('backup:chooseFolder', async () => {
   const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
   return r.canceled || !r.filePaths[0] ? '' : r.filePaths[0];
 });
+// ফোল্ডারের সাইজ (Backup পেজে নিজের ফোল্ডার যোগ করার সময় দেখানো ও mode সাজেস্ট করতে); শুধু পড়ে, সর্বোচ্চ ৬০ সেকেন্ড
+ipcMain.handle('backup:folderSize', async (_e, dir) => {
+  try {
+    if (typeof dir !== 'string' || !dir || !fs.statSync(dir).isDirectory()) return { ok: false };
+    const r = await require('./backup').folderSize(dir, 60000);
+    return { ok: true, bytes: r.bytes, files: r.files, partial: r.partial };
+  } catch {
+    return { ok: false };
+  }
+});
 ipcMain.handle('backup:openLogs', () => shell.openPath(backup.dirs.logsDir()));
 
 // ---------- Backup: Windows Task Scheduler (অ্যাপ বন্ধ থাকলেও) ----------

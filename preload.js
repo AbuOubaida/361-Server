@@ -113,6 +113,7 @@ contextBridge.exposeInMainWorld('api', {
   backupStatus: () => ipcRenderer.invoke('backup:status'),
   backupEnsure7z: () => ipcRenderer.invoke('backup:ensure7z'),
   backupChooseFolder: () => ipcRenderer.invoke('backup:chooseFolder'),
+  backupFolderSize: (dir) => ipcRenderer.invoke('backup:folderSize', dir),
   backupOpenLogs: () => ipcRenderer.invoke('backup:openLogs'),
   backupTaskState: () => ipcRenderer.invoke('backup:taskState'),
   backupTaskInstall: (user, pw) => ipcRenderer.invoke('backup:taskInstall', user, pw),

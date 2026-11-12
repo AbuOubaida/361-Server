@@ -1364,6 +1364,7 @@ function bkRenderExtra() {
         'div',
         { className: 'row' },
         el('span', { className: 'pathbox', textContent: it.path, style: 'flex:1; margin:0' }),
+        bkSizeLabel(it),
         bkModeSelect(it),
         ...(it.mode === 'copy' ? [bkCleanInput(it), bkKeepInput(it)] : []),
         el('button', {
@@ -1380,12 +1381,61 @@ function bkRenderExtra() {
   }
 }
 
+// ফোল্ডারের সাইজ: path ধরে cache, মাপা হয় main-এ (সর্বোচ্চ ৬০ সেকেন্ড), UI আটকায় না
+const BK_BIG_BYTES = 5 * 1024 ** 3; // এর বেশি হলে নতুন যোগ করা ফোল্ডারে Incremental কপি আগে থেকে বাছা হয়
+const bkSizeCache = new Map(); // path -> {bytes, files, partial} | {fail:true} | {pending:Promise}
+function bkFmtBytes(n) {
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return (i === 0 ? String(n) : n.toFixed(1)) + ' ' + u[i];
+}
+function bkSizeText(s) {
+  if (!s || s.pending) return t('bk.extra.size.calc');
+  if (s.fail) return t('bk.extra.size.fail');
+  return t(s.partial ? 'bk.extra.size.partial' : 'bk.extra.size.val', bkFmtBytes(s.bytes), s.files.toLocaleString());
+}
+function bkSizeLabel(it) {
+  const span = el('span', { className: 'hint', style: 'margin:0; white-space:nowrap' });
+  const cached = bkSizeCache.get(it.path);
+  if (cached && !cached.pending) {
+    span.textContent = bkSizeText(cached);
+    return span;
+  }
+  span.textContent = bkSizeText(null);
+  let p = cached && cached.pending;
+  if (!p) {
+    p = window.api
+      .backupFolderSize(it.path)
+      .then((r) => (r && r.ok ? { bytes: r.bytes, files: r.files, partial: !!r.partial } : { fail: true }))
+      .catch(() => ({ fail: true }));
+    bkSizeCache.set(it.path, { pending: p });
+    p.then((res) => bkSizeCache.set(it.path, res));
+  }
+  p.then((res) => {
+    span.textContent = bkSizeText(res);
+    // শুধু এইমাত্র যোগ করা ফোল্ডারে, আর ব্যবহারকারী mode ছোঁয়নি: বড় (>= ৫ GB) হলে Incremental কপি আগে থেকে বেছে দেওয়া (ব্যাকআপের সময় নিজে নিজে mode বদলায় না)
+    if (it._new && !it._touched && it.mode !== 'copy' && !res.fail && res.bytes >= BK_BIG_BYTES && bk.what.extra.includes(it)) {
+      it._new = false;
+      it.mode = 'copy';
+      setStatus(t('bk.extra.suggest', bkFmtBytes(res.bytes), it.path));
+      bkRenderExtra();
+    }
+    it._new = false;
+  });
+  return span;
+}
+
 // প্রতিটা নিজের ফোল্ডারের মোড: আর্কাইভ (.7z) বা Incremental কপি (robocopy-র মতো)
 function bkModeSelect(it) {
   const sel = el('select', {}, el('option', { value: 'archive', textContent: t('bk.extra.mode.archive') }), el('option', { value: 'copy', textContent: t('bk.extra.mode.copy') }));
   sel.value = it.mode === 'copy' ? 'copy' : 'archive';
   sel.addEventListener('change', () => {
     it.mode = sel.value;
+    it._touched = true; // নিজে বেছে নিলে সাইজ-ভিত্তিক সাজেশন আর বদলাবে না
     if (it.mode !== 'copy') { it.cleanDays = 0; it.keepDays = 0; }
     bkRenderExtra(); // Incremental কপি হলে "N দিন পর মোছা" ঘরটা দেখানো/লুকানো
   });
@@ -1525,7 +1575,7 @@ $('bkLocalPick').addEventListener('click', async () => {
 $('bkExtraAdd').addEventListener('click', async () => {
   const p = await window.api.backupChooseFolder();
   if (p && !bk.what.extra.some((x) => x.path === p)) {
-    bk.what.extra.push({ path: p, label: bkBase(p) });
+    bk.what.extra.push({ path: p, label: bkBase(p), _new: true });
     bkRenderExtra();
   }
 });

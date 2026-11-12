@@ -94,6 +94,67 @@ function pruneVersions(dst, days) {
   return removed;
 }
 
+// ফোল্ডারের মোট সাইজ মাপা (UI-তে দেখানো ও mode সাজেস্ট করার জন্য, শুধু পড়ে, কিছু বদলায় না)। symlink/junction এড়ানো (robocopy /XJ-এর মতো)।
+// timeoutMs পার হলে থেমে partial:true দেয় (বিশাল ফোল্ডারে UI আটকে না থাকার জন্য)।
+async function folderSize(dir, timeoutMs = 60000) {
+  const fsp = fs.promises;
+  const deadline = Date.now() + timeoutMs;
+  const res = { bytes: 0, files: 0, partial: false, errors: 0 };
+  const stack = [dir];
+  while (stack.length) {
+    if (Date.now() > deadline) {
+      res.partial = true;
+      break;
+    }
+    const cur = stack.pop();
+    let ents;
+    try {
+      ents = await fsp.readdir(cur, { withFileTypes: true });
+    } catch {
+      res.errors++;
+      continue;
+    }
+    const files = [];
+    for (const e of ents) {
+      if (e.isSymbolicLink()) continue;
+      if (e.isDirectory()) stack.push(path.join(cur, e.name));
+      else if (e.isFile()) files.push(path.join(cur, e.name));
+    }
+    for (let i = 0; i < files.length; i += 64) {
+      await Promise.all(
+        files.slice(i, i + 64).map((f) =>
+          fsp.lstat(f).then(
+            (st) => {
+              res.bytes += st.size;
+              res.files++;
+            },
+            () => {
+              res.errors++;
+            }
+          )
+        )
+      );
+    }
+  }
+  return res;
+}
+
+// নেটওয়ার্ক শেয়ারে (SMB) নতুন লেখা ফাইল অ্যান্টিভাইরাস/ইনডেক্সার কিছুক্ষণ খোলা ধরে রাখলে ফোল্ডার rename EPERM/EBUSY/EACCES দেয়; তাই কয়েকবার অপেক্ষা করে আবার চেষ্টা
+async function renameDirRetry(from, to, tries = 6, delayMs = 5000) {
+  let last;
+  for (let i = 1; i <= tries; i++) {
+    try {
+      fs.renameSync(from, to);
+      return { ok: true, attempts: i };
+    } catch (e) {
+      last = e;
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) throw e;
+      if (i < tries) await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return { ok: false, attempts: tries, error: last };
+}
+
 function run(exe, args, opts = {}) {
   return new Promise((resolve) => {
     const ch = execFile(
@@ -758,7 +819,22 @@ function createBackup(ctx) {
           fs.rmSync(part, { recursive: true, force: true });
           fs.mkdirSync(part, { recursive: true });
           for (const f of fs.readdirSync(packDir)) fs.copyFileSync(path.join(packDir, f), path.join(part, f));
-          fs.renameSync(part, path.join(d.root, stamp));
+          const finalDir = path.join(d.root, stamp);
+          const rr = await renameDirRetry(part, finalDir);
+          if (!rr.ok) {
+            // rename বারবার ব্যর্থ: সরাসরি চূড়ান্ত ফোল্ডারে আবার কপি (manifest.json সবার শেষে, যাতে অসম্পূর্ণ কপি সম্পূর্ণ দেখায় না), তারপর .part মোছার চেষ্টা
+            log(`  rename of the .part folder failed ${rr.attempts} times (${rr.error.code}), copying straight into ${finalDir} instead ...`);
+            fs.mkdirSync(finalDir, { recursive: true });
+            const names = fs.readdirSync(packDir).sort((a, b) => (a === 'manifest.json') - (b === 'manifest.json'));
+            for (const f of names) fs.copyFileSync(path.join(packDir, f), path.join(finalDir, f));
+            try {
+              fs.rmSync(part, { recursive: true, force: true });
+            } catch (e) {
+              log(`  could not remove the leftover ${part}: ${e.message} (delete it by hand)`);
+            }
+          } else if (rr.attempts > 1) {
+            log(`  rename of the .part folder worked on attempt ${rr.attempts}`);
+          }
           step('Copy to ' + label, true, d.root);
           okDest++;
           try {
@@ -858,10 +934,10 @@ function createBackup(ctx) {
       run('eventcreate', ['/T', 'ERROR', '/ID', '100', '/L', 'APPLICATION', '/SO', 'Server 360 Backup', '/D', last || 'Backup failed'], { timeout: 15000 });
     }
     pruneLogs();
-    return { ok: !failed, status, message: failed ? tr('Backup-এ সমস্যা হয়েছে, log দেখুন', 'Backup finished with errors, see the log') : warnings ? tr('Backup হয়েছে, কিন্তু সতর্কতা আছে (যেমন কোনো ডাটাবেস dump হয়নি), log দেখুন', 'Backup done, but with warnings (for example a database was not dumped), see the log') : tr('Backup সম্পূর্ণ', 'Backup completed') };
+    return { ok: !failed, status, message: failed ? tr('Backup-এ সমস্যা হয়েছে, log দেখুন', 'Backup finished with errors, see the log') : warnings ? tr('Backup হয়েছে, কিন্তু সতর্কতা আছে (যেমন কোনো ডাটাবেস dump হয়নি, বা কোনো গন্তব্যে কপি হয়নি, বা কোনো ফোল্ডার পাওয়া যায়নি), log দেখুন', 'Backup done, but with warnings (for example a database was not dumped, a destination copy failed, or a folder was not found), see the log') : tr('Backup সম্পূর্ণ', 'Backup completed') };
   }
 
   return { getConfig, setConfig, runBackup, isRunning, lastStatus, tailLog, find7z, ensure7z, dirs: { baseDir, logsDir } };
 }
 
-module.exports = { createBackup, stampOf, STAMP_RE, snapshotChanged, pruneVersions, moveToVersions };
+module.exports = { createBackup, stampOf, STAMP_RE, snapshotChanged, pruneVersions, moveToVersions, folderSize, renameDirRetry };
