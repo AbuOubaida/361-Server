@@ -4725,6 +4725,58 @@ ipcMain.handle('restore:wwwInfo', (_e, dir) => {
     return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
   }
 });
+// Restore-এর পর "-restored" কপির কনফিগ পুরোনো নামে রয়ে গেছে কিনা শুধু পড়ে বলে দেয় (কোনো ফাইল বদলায় না)।
+function restoredConfigHints(origName, finalName) {
+  const out = [];
+  const dir = path.join(WWW_DIR, finalName);
+  const slug = siteSlug(finalName);
+  const unq = (v) => String(v).trim().replace(/^(['"])(.*)\1$/, '$2');
+  try {
+    const envFile = path.join(dir, '.env');
+    if (fs.existsSync(envFile)) {
+      const env = {};
+      for (const line of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
+        const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$/);
+        if (m && !(m[1] in env)) env[m[1]] = unq(m[2]);
+      }
+      if (env.DB_DATABASE && env.DB_CONNECTION !== 'sqlite') {
+        out.push(
+          tr(
+            `${finalName}: .env-এ DB_DATABASE=${env.DB_DATABASE} আছে, মানে এই কপি আর মূল সাইট একই ডাটাবেস ব্যবহার করছে। আলাদা ডাটাবেস চাইলে ডাটাবেস restore-এ "দুটোই রাখুন" করে .env-এ নতুন নাম বসান।`,
+            `${finalName}: .env has DB_DATABASE=${env.DB_DATABASE}, so this copy and the original site use the same database. For a separate one, restore the database with "keep both" and put the new name in .env.`
+          )
+        );
+      }
+      if (env.APP_URL) {
+        let host = '';
+        try {
+          host = new URL(env.APP_URL).hostname.toLowerCase();
+        } catch (_) {}
+        if (host.endsWith('.test') && host !== slug + '.test') {
+          out.push(
+            tr(
+              `${finalName}: .env-এর APP_URL=${env.APP_URL} পুরোনো নামের। এই কপির ঠিকানা http://${slug}.test, চাইলে APP_URL বদলান।`,
+              `${finalName}: APP_URL=${env.APP_URL} in .env is the old name. This copy opens at http://${slug}.test; change APP_URL if you need to.`
+            )
+          );
+        }
+      }
+    }
+    const wp = path.join(dir, 'wp-config.php');
+    if (fs.existsSync(wp)) {
+      const m = fs.readFileSync(wp, 'utf8').match(/define\(\s*['"]DB_NAME['"]\s*,\s*['"]([^'"]*)['"]/);
+      if (m) {
+        out.push(
+          tr(
+            `${finalName}: wp-config.php-এ DB_NAME=${m[1]} আছে, মানে মূল সাইটের ডাটাবেসই ব্যবহার হচ্ছে। WordPress-এর সাইট URL ডাটাবেসের ভেতরে থাকে, তাই সেটাও পুরোনো ঠিকানার থাকবে।`,
+            `${finalName}: wp-config.php has DB_NAME=${m[1]}, so the original site's database is used. WordPress keeps its site URL inside the database, so it still points to the old address.`
+          )
+        );
+      }
+    }
+  } catch (_) {}
+  return out;
+}
 // স্ট্যাটাস বারে শেষ লেখাটা (Restore www 99%, npm install চলছে...) বাসি থেকে যেত; কাজ শেষে একটা চূড়ান্ত বার্তা পাঠাই।
 async function restoreWwwRun(opts) {
   try {
@@ -4736,6 +4788,13 @@ async function restoreWwwRun(opts) {
       picks: Array.isArray(o.picks) ? o.picks.map((p) => ({ name: String(p && p.name), mode: p && p.mode === 'overwrite' ? 'overwrite' : 'rename' })) : [],
     });
     if (!r.ok || !r.folders || !r.folders.length) return r;
+    try {
+      for (const x of r.results || []) {
+        if (x.ok && x.action === 'renamed') {
+          for (const h of restoredConfigHints(x.name, x.final)) (r.warnings = r.warnings || []).push(h);
+        }
+      }
+    } catch (_) {}
     if (!busy) {
       busy = true;
       try {

@@ -1701,6 +1701,19 @@ function rsRender(r) {
   }
 }
 // ---------- Restore ধাপ ২: www সাইট ফেরত আনা ----------
+// Restore তালিকায় "সব বাছুন / সব বাদ দিন" বোতাম (বন্ধ করা checkbox বদলায় না; rows পরে ভরলেও চলে, ক্লিকের সময় পড়ে)
+function rsSelectBar(rows) {
+  const set = (v) =>
+    rows.forEach((x) => {
+      if (!x.cb.disabled) x.cb.checked = v;
+    });
+  const a = el('button', { className: 'btn sm', type: 'button', textContent: t('rs.selAll') });
+  const b = el('button', { className: 'btn sm', type: 'button', textContent: t('rs.selNone') });
+  a.addEventListener('click', () => set(true));
+  b.addEventListener('click', () => set(false));
+  return el('div', { style: 'margin:4px 0 6px;display:flex;gap:6px;flex-wrap:wrap' }, a, b);
+}
+
 function rsWwwButton(it, card) {
   const panel = el('div', { style: 'margin-top:8px' });
   const btn = el('button', { className: 'btn sm', textContent: t('rs.www.btn'), style: 'margin-top:6px' });
@@ -1731,6 +1744,7 @@ async function rsWwwOpen(it, panel) {
   }
   panel.appendChild(rsLine(t('rs.www.pick'), 'info'));
   const rows = [];
+  panel.appendChild(rsSelectBar(rows));
   for (const s of info.sites) {
     const cb = el('input', { type: 'checkbox', checked: true });
     const sel = s.exists
@@ -1819,6 +1833,7 @@ async function rsDbOpen(it, panel) {
   if (!info.mysqlRunning && info.mysqlInstalled) panel.appendChild(rsLine(t('rs.db.unknown')));
   panel.appendChild(rsLine(t('rs.db.pick'), 'info'));
   const rows = [];
+  panel.appendChild(rsSelectBar(rows));
   for (const d of info.dbs) {
     const cb = el('input', { type: 'checkbox', checked: true });
     const sel =
@@ -1922,6 +1937,7 @@ async function rsPgList(it, pw, box) {
   if (!info.pgRunning && info.pgInstalled) box.appendChild(rsLine(t('rs.pg.unknown')));
   box.appendChild(rsLine(t('rs.db.pick'), 'info'));
   const rows = [];
+  box.appendChild(rsSelectBar(rows));
   for (const d of info.dbs) {
     const cb = el('input', { type: 'checkbox', checked: true });
     const sel =
@@ -2002,6 +2018,7 @@ async function rsOtherOpen(it, panel) {
     panel.appendChild(el('div', {}, pw));
   }
   const rows = [];
+  if (info.extras.length || info.copies.length) panel.appendChild(rsSelectBar(rows));
   if (info.extras.length) {
     panel.appendChild(rsLine(t('rs.ot.pickExtra'), 'info'));
     for (const x of info.extras) {
