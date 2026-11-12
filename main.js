@@ -4725,6 +4725,43 @@ ipcMain.handle('restore:wwwInfo', (_e, dir) => {
     return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
   }
 });
+// 5b: ডাটাবেস "_restored" নামে ফিরলে, কোন সাইট এখনো মূল ডাটাবেস ব্যবহার করছে (.env DB_DATABASE / wp-config.php DB_NAME) শুধু পড়ে বলে দেয়; কিছু বদলায় না।
+function dbHintsForRenamed(results) {
+  try {
+    const renamed = (results || []).filter((x) => x && x.ok && x.action === 'renamed' && x.name && x.final);
+    if (!renamed.length || !fs.existsSync(WWW_DIR)) return;
+    const unq = (v) => String(v).trim().replace(/^(['"])(.*)\1$/, '$2');
+    const used = []; // { folder, db }
+    for (const e of fs.readdirSync(WWW_DIR, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const dir = path.join(WWW_DIR, e.name);
+      let db = '';
+      try {
+        const envFile = path.join(dir, '.env');
+        if (fs.existsSync(envFile)) {
+          const m = fs.readFileSync(envFile, 'utf8').match(/^\s*DB_DATABASE\s*=\s*(.*)$/m);
+          if (m) db = unq(m[1]);
+        }
+        if (!db && fs.existsSync(path.join(dir, 'wp-config.php'))) {
+          const m = fs.readFileSync(path.join(dir, 'wp-config.php'), 'utf8').match(/define\(\s*['"]DB_NAME['"]\s*,\s*['"]([^'"]*)['"]/);
+          if (m) db = m[1];
+        }
+      } catch (_) {}
+      if (db) used.push({ folder: e.name, db });
+    }
+    for (const x of renamed) {
+      const sites = used.filter((u) => u.db === x.name).map((u) => u.folder);
+      if (!sites.length) continue;
+      x.notes = (x.notes || []).concat(
+        tr(
+          `সাইট ${sites.join(', ')} এখনো মূল "${x.name}" ডাটাবেস ব্যবহার করছে; এই কপি ("${x.final}") কোনো সাইটে জোড়া নেই। কপি ব্যবহার করতে ওই সাইটের .env-এ DB_DATABASE=${x.final} (WordPress হলে wp-config.php-এর DB_NAME) বসান।`,
+          `Site ${sites.join(', ')} still uses the original "${x.name}" database; this copy ("${x.final}") is not wired to any site. To use the copy, set DB_DATABASE=${x.final} in that site's .env (DB_NAME in wp-config.php for WordPress).`
+        )
+      );
+    }
+  } catch (_) {}
+}
+
 // Restore-এর পর "-restored" কপির কনফিগ পুরোনো নামে রয়ে গেছে কিনা শুধু পড়ে বলে দেয় (কোনো ফাইল বদলায় না)।
 function restoredConfigHints(origName, finalName) {
   const out = [];
@@ -4862,6 +4899,7 @@ ipcMain.handle('restore:db', async (_e, opts) => {
   } catch (err) {
     res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
   }
+  if (res && res.ok) dbHintsForRenamed(res.results);
   try {
     if (res && res.ok) {
       const n = Array.isArray(res.results) ? res.results.filter((x) => x.ok).length : 0;
@@ -4897,6 +4935,7 @@ ipcMain.handle('restore:pg', async (_e, opts) => {
   } catch (err) {
     res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
   }
+  if (res && res.ok) dbHintsForRenamed(res.results);
   try {
     if (res && res.ok) {
       const n = Array.isArray(res.results) ? res.results.filter((x) => x.ok).length : 0;
@@ -4936,6 +4975,25 @@ ipcMain.handle('restore:other', async (_e, opts) => {
   } catch (err) {
     res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
   }
+  try {
+    if (res && res.ok && !busy) {
+      const wr = path.resolve(WWW_DIR).toLowerCase() + path.sep;
+      const inWww = (res.results || []).some((x) => x && x.ok && x.target && (path.resolve(String(x.target)).toLowerCase() + path.sep).startsWith(wr));
+      if (inWww) {
+        busy = true;
+        try {
+          const sites = withToolSites(scanSites());
+          const h = await syncHosts(sites);
+          await reloadRunning(sites);
+          if (!h.ok) res.hostsNote = hostsFailNote(h);
+        } catch (err) {
+          res.warnings = (res.warnings || []).concat(tr('সাইট রিফ্রেশে সমস্যা: ', 'Site refresh problem: ') + err.message);
+        } finally {
+          busy = false;
+        }
+      }
+    }
+  } catch (_) {}
   try {
     if (res && res.ok) {
       const n = Array.isArray(res.results) ? res.results.filter((x) => x.ok).length : 0;

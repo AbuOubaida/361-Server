@@ -2073,6 +2073,12 @@ async function rsOtherOpen(it, panel) {
         for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));
       }
       for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
+      if (res.hostsNote) out.appendChild(rsLine('⚠ ' + res.hostsNote));
+      if (typeof refreshAll === 'function') {
+        try {
+          refreshAll();
+        } catch {}
+      }
     })
   );
   panel.appendChild(go);
