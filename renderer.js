@@ -1639,6 +1639,167 @@ $('bkRun').addEventListener('click', (e) =>
   })
 );
 $('bkOpenLogs').addEventListener('click', () => window.api.backupOpenLogs());
+
+// ---------- Restore (ধাপ ১: শুধু তালিকা; কিছু বদলায় না) ----------
+let rsLast = null; // সর্বশেষ তালিকা (পরের ধাপে restore এটা ব্যবহার করবে)
+const rsSrcName = (src) => t(src === 'local' ? 'rs.src.local' : src === 'share' ? 'rs.src.share' : 'rs.src.custom');
+function rsDate(it) {
+  const d = it.created ? new Date(it.created) : null;
+  if (d && !isNaN(d.getTime())) return d.toLocaleString();
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(it.stamp);
+  return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}` : it.stamp;
+}
+const rsLine = (text, cls) => el('div', { className: cls || 'hint', textContent: text, style: 'margin:2px 0' });
+function rsItem(it) {
+  const names = it.files.map((f) => f.name);
+  const has = (re) => names.some((n) => re.test(n));
+  let status;
+  if (!it.manifest) status = '⚠ ' + t('rs.nomanifest');
+  else if (!it.complete) status = '⚠ ' + t('rs.partial', it.failedSteps.join(', ') || '?');
+  else status = '✓ ' + t('rs.complete');
+  if (it.encrypted) status += ' · 🔒 ' + t('rs.encrypted');
+  const card = el(
+    'div',
+    { className: 'card', style: 'margin:10px 0 0' },
+    el('div', { className: 'row first' }, el('b', { textContent: rsDate(it) }), el('span', { className: 'hint', style: 'margin:0', textContent: '· ' + rsSrcName(it.source) + ' · ' + it.stamp })),
+    rsLine(status, 'info')
+  );
+  const db = [];
+  if (it.mysqlDbs.length) db.push('MySQL (' + it.mysqlDbs.join(', ') + ')');
+  if (it.postgres) db.push('PostgreSQL');
+  if (db.length) card.appendChild(rsLine(t('rs.has.db', db.join(', '))));
+  if (has(/^www\./i)) card.appendChild(rsLine(t('rs.has.www', it.sites.length)));
+  if (has(/^settings\./i)) card.appendChild(rsLine(t('rs.has.settings')));
+  if (it.extras.length) card.appendChild(rsLine(t('rs.has.extra', it.extras.map((x) => x.label).join(', '))));
+  if (it.files.length) card.appendChild(rsLine(t('rs.files', it.files.map((f) => (f.exists ? f.name + ' (' + bkFmtBytes(f.size) + ')' : t('rs.missingFile', f.name))).join(', '))));
+  card.appendChild(rsLine(it.dir));
+  if (it.manifest && has(/^www\./i)) rsWwwButton(it, card);
+  return card;
+}
+function rsRender(r) {
+  const box = $('rsBox');
+  box.textContent = '';
+  const info = $('rsInfo');
+  if (!r || !r.ok) {
+    info.textContent = (r && r.message) || '';
+    return;
+  }
+  if (r.noDest) {
+    info.textContent = t('rs.noDest');
+    return;
+  }
+  info.textContent = r.items.length ? t('rs.count', r.items.length) : t('rs.none');
+  for (const e of r.errors) box.appendChild(rsLine('⚠ ' + t('rs.errors', e.label + ': ' + e.message), 'info'));
+  for (const it of r.items) box.appendChild(rsItem(it));
+  if (r.copies.length) {
+    box.appendChild(el('div', { className: 'section-title', textContent: t('rs.copies'), style: 'margin-top:14px' }));
+    for (const c of r.copies) box.appendChild(rsLine(c.label + ' · ' + rsSrcName(c.source) + (c.versions ? ' · ' + t('rs.versions', c.versions) : '') + ' · ' + c.dir));
+  }
+}
+// ---------- Restore ধাপ ২: www সাইট ফেরত আনা ----------
+function rsWwwButton(it, card) {
+  const panel = el('div', { style: 'margin-top:8px' });
+  const btn = el('button', { className: 'btn sm', textContent: t('rs.www.btn'), style: 'margin-top:6px' });
+  btn.addEventListener('click', (e) => work(e.currentTarget, () => rsWwwOpen(it, panel)));
+  card.appendChild(btn);
+  card.appendChild(panel);
+}
+async function rsWwwOpen(it, panel) {
+  panel.textContent = '';
+  let info;
+  try {
+    info = await window.api.restoreWwwInfo(it.dir);
+  } catch (err) {
+    info = { ok: false, message: String(err && err.message ? err.message : err) };
+  }
+  if (!info || !info.ok) {
+    panel.appendChild(rsLine('⚠ ' + ((info && info.message) || ''), 'info'));
+    return;
+  }
+  if (!info.complete) panel.appendChild(rsLine('⚠ ' + t('rs.www.partial'), 'info'));
+  if (info.archive && /\.7z$/i.test(info.archive) && !info.sevenZip) panel.appendChild(rsLine('⚠ ' + t('rs.www.nosevenzip'), 'info'));
+  panel.appendChild(rsLine(t('rs.www.auto')));
+  if (info.excluded.length) panel.appendChild(rsLine(t('rs.www.excl', info.excluded.join(', '))));
+  let pw = null;
+  if (info.encrypted) {
+    pw = el('input', { type: 'password', placeholder: t('rs.www.pw'), style: 'margin:6px 0;width:300px;max-width:100%' });
+    panel.appendChild(el('div', {}, pw));
+  }
+  panel.appendChild(rsLine(t('rs.www.pick'), 'info'));
+  const rows = [];
+  for (const s of info.sites) {
+    const cb = el('input', { type: 'checkbox', checked: true });
+    const sel = s.exists
+      ? el(
+          'select',
+          { style: 'margin-left:8px;max-width:300px' },
+          el('option', { value: 'rename', textContent: t('rs.www.mode.rename') }),
+          el('option', { value: 'overwrite', textContent: t('rs.www.mode.over') })
+        )
+      : null;
+    const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cb, el('b', { textContent: s.name }), el('span', { className: 'hint', style: 'margin:0', textContent: s.exists ? t('rs.www.exists') : t('rs.www.new') }));
+    panel.appendChild(el('div', { style: 'margin:3px 0' }, label, sel));
+    rows.push({ name: s.name, cb, sel });
+  }
+  const out = el('div', {});
+  const go = el('button', { className: 'btn sm primary', textContent: t('rs.www.go'), style: 'margin-top:8px' });
+  go.addEventListener('click', (e) =>
+    work(e.currentTarget, async () => {
+      const picks = rows.filter((x) => x.cb.checked).map((x) => ({ name: x.name, mode: x.sel ? x.sel.value : 'rename' }));
+      if (!picks.length) {
+        out.textContent = '';
+        out.appendChild(rsLine(t('rs.www.none'), 'info'));
+        return;
+      }
+      if (!confirm(t('rs.www.confirm', picks.length))) return;
+      out.textContent = '';
+      out.appendChild(rsLine(t('rs.www.running'), 'info'));
+      let res;
+      try {
+        res = await window.api.restoreWww({ dir: it.dir, password: pw ? pw.value : '', picks });
+      } catch (err) {
+        res = { ok: false, message: String(err && err.message ? err.message : err) };
+      }
+      out.textContent = '';
+      if (res.message) out.appendChild(rsLine((res.ok ? '' : '⚠ ') + res.message, 'info'));
+      for (const x of res.results || []) {
+        if (!x.ok) out.appendChild(rsLine('✗ ' + t('rs.www.res.fail', x.name, x.message || ''), 'info'));
+        else {
+          out.appendChild(rsLine('✓ ' + (x.action === 'renamed' ? t('rs.www.res.renamed', x.name, x.final) : x.action === 'merged' ? t('rs.www.res.merged', x.name) : t('rs.www.res.new', x.name)), 'info'));
+          for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));
+        }
+      }
+      for (const n of res.npm || []) out.appendChild(rsLine((n.ok ? '✓ ' + t('rs.www.npm.ok', n.site) : '✗ ' + t('rs.www.npm.fail', n.site, n.message)), 'info'));
+      for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
+      if (res.hostsNote) out.appendChild(rsLine('⚠ ' + res.hostsNote));
+      if (typeof loadSites === 'function') {
+        try {
+          loadSites();
+        } catch {}
+      }
+    })
+  );
+  panel.appendChild(go);
+  panel.appendChild(out);
+}
+
+async function rsLoad(customDir) {
+  $('rsBox').textContent = '';
+  $('rsInfo').textContent = t('rs.loading');
+  try {
+    rsLast = await window.api.restoreList(customDir || '');
+  } catch (err) {
+    rsLast = { ok: false, message: String(err && err.message ? err.message : err) };
+  }
+  rsRender(rsLast);
+}
+$('rsBtnList').addEventListener('click', (e) => work(e.currentTarget, () => rsLoad('')));
+$('rsBtnPick').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    const p = await window.api.backupChooseFolder();
+    if (p) await rsLoad(p);
+  })
+);
 setInterval(() => {
   if (currentPage === 'backup') bkStatus();
 }, 4000);

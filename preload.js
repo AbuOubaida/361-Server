@@ -118,6 +118,9 @@ contextBridge.exposeInMainWorld('api', {
   backupTaskState: () => ipcRenderer.invoke('backup:taskState'),
   backupTaskInstall: (user, pw) => ipcRenderer.invoke('backup:taskInstall', user, pw),
   backupTaskRemove: () => ipcRenderer.invoke('backup:taskRemove'),
+  restoreList: (customDir) => ipcRenderer.invoke('restore:list', customDir),
+  restoreWwwInfo: (dir) => ipcRenderer.invoke('restore:wwwInfo', dir),
+  restoreWww: (opts) => ipcRenderer.invoke('restore:www', opts),
 
   // অ্যাপ চালু থাকা / অটো-স্টার্ট (ট্রে)
   appGetBehavior: () => ipcRenderer.invoke('app:getBehavior'),

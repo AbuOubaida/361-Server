@@ -15,8 +15,8 @@ const dayOf = (d = new Date()) => stampOf(d).slice(0, 8);
 
 const SYSTEM_MYSQL_DBS = new Set(['information_schema', 'performance_schema', 'sys', 'mysql']);
 // www আর্কাইভে বাদ: নির্ভরতা/বিল্ড-ক্যাশ যা আবার তৈরি করা যায় (npm install, build) এবং Laravel লগ/ক্যাশ/সেশন/কম্পাইল-করা view।
-// vendor ইচ্ছে করে বাদ দেওয়া হয়নি (composer অফলাইনে না-ও চলতে পারে)। path-সহ প্যাটার্ন (storage\\logs) 7-Zip-এর -xr! দিয়ে মেলে।
-const WWW_EXCLUDES = ['node_modules', '.git', '.next', 'storage\\logs', 'storage\\framework\\cache', 'storage\\framework\\sessions', 'storage\\framework\\views'];
+// vendor ইচ্ছে করে বাদ দেওয়া হয়নি (composer অফলাইনে না-ও চলতে পারে)। path-সহ প্যাটার্নে শুরুতে *\\ লাগে (Windows-এ টেস্টে প্রমাণিত 2026-11-12: -xr!*\\storage\\logs মেলে, -xr!storage\\logs মেলে না)।
+const WWW_EXCLUDES = ['node_modules', '.git', '.next', '*\\storage\\logs', '*\\storage\\framework\\cache', '*\\storage\\framework\\sessions', '*\\storage\\framework\\views'];
 
 // ---- পুরনো version রাখা (copy ফোল্ডার, ঐচ্ছিক) ----
 // robocopy বদলানো ফাইল ওভাররাইট করে, তাই কপির আগে Node-এ তুলনা করে (size বা mtime আলাদা, 2 সেকেন্ড সহনশীলতা - robocopy-র মতোই)
@@ -544,12 +544,12 @@ function createBackup(ctx) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // শেয়ারে যুক্ত হওয়া: প্রথমে 445 পোর্ট দেখা, তারপর net use (২৫ সেকেন্ড করে, সর্বোচ্চ ৩ বার, মাঝে ১০ সেকেন্ড বিরতি)
-  async function connectShare(d, cfg) {
+  async function connectShare(d, cfg, tries = 3) {
     if (!win || !cfg.share.user) return { ok: true, connected: false };
     const m = /^\\\\([^\\/]+)/.exec(d.unc);
     const host = m ? m[1] : '';
     let last = '';
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= tries; attempt++) {
       if (host && !(await probeSmb(host))) {
         last = `cannot reach ${host} on port 445 (PC off/asleep, network down, or firewall)`;
       } else {
@@ -557,8 +557,8 @@ function createBackup(ctx) {
         if (r.ok) return { ok: true, connected: true };
         last = ('net use failed: ' + ((r.stdout + r.stderr).trim() || 'no answer within 25 s')).slice(0, 250);
       }
-      log(`    share attempt ${attempt}/3 failed: ${last}`);
-      if (attempt < 3) await sleep(10000);
+      log(`    share attempt ${attempt}/${tries} failed: ${last}`);
+      if (attempt < tries) await sleep(10000);
     }
     return { ok: false, message: last };
   }
@@ -667,6 +667,129 @@ function createBackup(ctx) {
       }
     }
     return removed;
+  }
+
+
+  // ---------- Restore, step 1: list backups (READ ONLY, nothing is changed) ----------
+  // One entry per backup folder (<root>\<YYYYMMDD-HHMMSS>\ with manifest.json). A folder without a readable manifest.json is still listed (manifest:false).
+  function readBackupDir(dir, source) {
+    const item = { dir, stamp: path.basename(dir), source, manifest: true, complete: false, encrypted: false, created: '', files: [], missing: [], mysqlDbs: [], postgres: false, sites: [], extras: [], failedSteps: [], note: '' };
+    let m = null;
+    try {
+      m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+    } catch (e) {
+      item.manifest = false;
+      item.note = e.code === 'ENOENT' ? 'no manifest.json' : 'manifest.json unreadable: ' + e.message;
+    }
+    let names = [];
+    if (m && typeof m === 'object') {
+      item.complete = m.complete !== false;
+      item.encrypted = !!m.encrypted;
+      item.created = typeof m.created === 'string' ? m.created : '';
+      item.mysqlDbs = Array.isArray(m.mysqlDbs) ? m.mysqlDbs.map(String) : [];
+      item.postgres = !!m.postgres;
+      item.sites = Array.isArray(m.sites) ? m.sites.map(String) : [];
+      item.failedSteps = Array.isArray(m.failedSteps) ? m.failedSteps.map(String) : [];
+      for (const k of Object.keys(m)) {
+        const x = /^extra(\d+)$/.exec(k);
+        if (x) item.extras.push({ n: Number(x[1]), label: String(m[k]) });
+      }
+      item.extras.sort((a, b) => a.n - b.n);
+      names = Array.isArray(m.files) ? m.files.map(String) : [];
+    } else {
+      try {
+        names = fs.readdirSync(dir).filter((n) => /\.(7z|zip|sql)$/i.test(n));
+      } catch {}
+    }
+    item.files = names.map((name) => {
+      let size = -1;
+      try {
+        size = fs.statSync(path.join(dir, name)).size;
+      } catch {}
+      return { name, size, exists: size >= 0 };
+    });
+    item.missing = item.files.filter((f) => !f.exists).map((f) => f.name);
+    return item;
+  }
+
+  function scanRoot(root, source) {
+    const items = [];
+    for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+      if (e.isDirectory() && STAMP_RE.test(e.name)) items.push(readBackupDir(path.join(root, e.name), source));
+    }
+    return items;
+  }
+
+  // plain copies: <root>\files\<label> (+ how many old-version folders are under .versions)
+  function scanCopies(root, source) {
+    const out = [];
+    const fd = path.join(root, 'files');
+    let list;
+    try {
+      list = fs.readdirSync(fd, { withFileTypes: true });
+    } catch {
+      return out;
+    }
+    for (const e of list) {
+      if (!e.isDirectory()) continue;
+      let versions = 0;
+      try {
+        versions = fs.readdirSync(path.join(fd, e.name, '.versions'), { withFileTypes: true }).filter((v) => v.isDirectory() && STAMP_RE.test(v.name)).length;
+      } catch {}
+      out.push({ label: e.name, dir: path.join(fd, e.name), versions, source, root });
+    }
+    return out;
+  }
+
+  // opts.customDir: scan that folder only (a backup folder itself, or a folder that holds backup folders); otherwise the enabled destinations (Local / Network share)
+  async function listBackups(opts = {}) {
+    const out = { ok: true, items: [], copies: [], errors: [], noDest: false };
+    const connected = [];
+    try {
+      if (opts.customDir) {
+        const dir = String(opts.customDir);
+        let st;
+        try {
+          st = fs.statSync(dir);
+        } catch (e) {
+          return { ok: false, message: tr('ফোল্ডার পড়া যায়নি: ', 'Cannot read the folder: ') + e.message };
+        }
+        if (!st.isDirectory()) return { ok: false, message: tr('এটা ফোল্ডার নয়: ', 'Not a folder: ') + dir };
+        if (fs.existsSync(path.join(dir, 'manifest.json'))) {
+          out.items.push(readBackupDir(dir, 'custom'));
+        } else {
+          out.items.push(...scanRoot(dir, 'custom'));
+          for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+            // renamed backup folders (not a stamp name) that still have a manifest.json
+            if (e.isDirectory() && !STAMP_RE.test(e.name) && fs.existsSync(path.join(dir, e.name, 'manifest.json'))) out.items.push(readBackupDir(path.join(dir, e.name), 'custom'));
+          }
+          out.copies.push(...scanCopies(dir, 'custom'));
+        }
+      } else {
+        const cfg = getConfig();
+        const dests = destinations(cfg);
+        if (!dests.length) return { ...out, noDest: true };
+        for (const d of dests) {
+          const label = d.kind === 'local' ? 'Local' : 'Network share';
+          try {
+            if (d.kind === 'share') {
+              const c = await connectShare(d, cfg, 1);
+              if (!c.ok) throw new Error(c.message);
+              // do not drop a connection that a running backup is using
+              if (c.connected && !running) connected.push(d);
+            }
+            out.items.push(...scanRoot(d.root, d.kind));
+            out.copies.push(...scanCopies(d.root, d.kind));
+          } catch (e) {
+            out.errors.push({ label, message: e.message });
+          }
+        }
+      }
+      out.items.sort((a, b) => (a.stamp < b.stamp ? 1 : a.stamp > b.stamp ? -1 : 0));
+      return out;
+    } finally {
+      for (const d of connected) await run('net', ['use', d.unc, '/delete', '/y'], { timeout: 30000 });
+    }
   }
 
   // ---------- মূল রান ----------
@@ -937,7 +1060,203 @@ function createBackup(ctx) {
     return { ok: !failed, status, message: failed ? tr('Backup-এ সমস্যা হয়েছে, log দেখুন', 'Backup finished with errors, see the log') : warnings ? tr('Backup হয়েছে, কিন্তু সতর্কতা আছে (যেমন কোনো ডাটাবেস dump হয়নি, বা কোনো গন্তব্যে কপি হয়নি, বা কোনো ফোল্ডার পাওয়া যায়নি), log দেখুন', 'Backup done, but with warnings (for example a database was not dumped, a destination copy failed, or a folder was not found), see the log') : tr('Backup সম্পূর্ণ', 'Backup completed') };
   }
 
-  return { getConfig, setConfig, runBackup, isRunning, lastStatus, tailLog, find7z, ensure7z, dirs: { baseDir, logsDir } };
+  // ---------- Restore, step 2: www সাইট ফেরত আনা ----------
+  // নিরাপত্তা: আগে লোকাল tmp-এ extract, তারপর সাইট ধরে জায়গায় বসানো (আংশিক ব্যর্থ হলে পুরনো সাইট অক্ষত থাকে)।
+  // নাম মিললে: 'rename' (ডিফল্ট, <নাম>-restored) বা 'overwrite' (পুরনো ফোল্ডারের উপরে merge; archive-এ যা নেই, যেমন node_modules/.git, থেকে যায়)।
+  // বাদ-যাওয়া ফোল্ডার (node_modules, Laravel storage ইত্যাদি) এখানে বানানো হয় না, শুধু Laravel-এর ফাঁকা ফোল্ডার ও wwwExclude-এর ফাঁকা path আবার বানাই;
+  // npm install ইত্যাদি main.js করে (restore:www)।
+  let restoring = false;
+  const SAFE_SITE = (n) => typeof n === 'string' && !!n && n !== '.' && n !== '..' && !/[\\/:*?"<>|]/.test(n);
+  const LARAVEL_DIRS = ['storage/logs', 'storage/framework/cache/data', 'storage/framework/sessions', 'storage/framework/views', 'storage/app/public', 'bootstrap/cache'];
+
+  function wwwArchiveOf(item) {
+    const f = item.files.find((x) => x.exists && /^www\.(7z|zip)$/i.test(x.name));
+    return f ? path.join(item.dir, f.name) : '';
+  }
+  function restoreWwwInfo(dir) {
+    if (typeof dir !== 'string' || !dir) return { ok: false, message: tr('ফোল্ডার দেওয়া হয়নি', 'No folder given') };
+    const item = readBackupDir(dir, 'custom');
+    if (!item.manifest) return { ok: false, message: tr('manifest.json নেই বা পড়া যায় না, তাই www restore করা যাবে না', 'manifest.json is missing or unreadable, so www cannot be restored') };
+    const archive = wwwArchiveOf(item);
+    if (!archive) return { ok: false, message: tr('এই backup-এ www আর্কাইভ নেই', 'This backup has no www archive') };
+    let m = {};
+    try {
+      m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')) || {};
+    } catch {}
+    const www = ctx.wwwDir();
+    const sites = item.sites.filter(SAFE_SITE).map((name) => ({ name, exists: !!www && fs.existsSync(path.join(www, name)) }));
+    return {
+      ok: true,
+      archive,
+      encrypted: item.encrypted,
+      complete: item.complete,
+      failedSteps: item.failedSteps,
+      sites,
+      excluded: Array.isArray(m.wwwExcluded) ? m.wwwExcluded.map(String) : [],
+      copyFolders: Array.isArray(m.copyFolders) ? m.copyFolders.map((c) => String(c && c.label)) : [],
+      wwwDir: www || '',
+      sevenZip: !!find7z(),
+    };
+  }
+
+  async function moveDir(from, to) {
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    try {
+      fs.renameSync(from, to);
+    } catch {
+      await fs.promises.cp(from, to, { recursive: true, force: true });
+      await fs.promises.rm(from, { recursive: true, force: true });
+    }
+  }
+  // সাইট চলার উপযোগী করা: Laravel-এর ফাঁকা ফোল্ডার, আর wwwExclude-এ থাকা (এই সাইটের ভেতরের) ফাঁকা path
+  function makeRunnable(www, origName, finalName, excluded) {
+    const notes = [];
+    const dir = path.join(www, finalName);
+    if (fs.existsSync(path.join(dir, 'artisan'))) {
+      const made = LARAVEL_DIRS.filter((rel) => {
+        const p = path.join(dir, ...rel.split('/'));
+        if (fs.existsSync(p)) return false;
+        try {
+          fs.mkdirSync(p, { recursive: true });
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (made.length) notes.push(tr('Laravel-এর ' + made.length + 'টা ফাঁকা ফোল্ডার আবার বানানো হয়েছে (storage, cache)', made.length + ' empty Laravel folder(s) recreated (storage, cache)'));
+    }
+    let madeEx = 0;
+    for (const rel of excluded) {
+      const seg = String(rel).split(/[\\/]+/).filter(Boolean);
+      if (seg.length < 2 || seg.includes('..') || seg[0].toLowerCase() !== origName.toLowerCase()) continue;
+      const p = path.join(www, finalName, ...seg.slice(1));
+      if (!fs.existsSync(p)) {
+        try {
+          fs.mkdirSync(p, { recursive: true });
+          madeEx++;
+        } catch {}
+      }
+    }
+    if (madeEx) notes.push(tr(madeEx + 'টা বাদ-দেওয়া ফোল্ডার ফাঁকা অবস্থায় বানানো হয়েছে (ভেতরের ফাইল আলাদা copy থেকে আসে, ধাপ ৪)', madeEx + ' left-out folder(s) created empty (their files come from the plain copy, step 4)'));
+    return notes;
+  }
+
+  async function restoreWww(opts) {
+    if (restoring) return { ok: false, message: tr('আরেকটা restore চলছে', 'Another restore is running') };
+    if (running) return { ok: false, message: tr('একটা backup চলছে, শেষ হলে চেষ্টা করুন', 'A backup is running, try again when it has finished') };
+    const info = restoreWwwInfo(opts && opts.dir);
+    if (!info.ok) return info;
+    const www = ctx.wwwDir();
+    if (!www) return { ok: false, message: tr('www ফোল্ডার ঠিক করা নেই', 'The www folder is not set') };
+    const valid = new Set(info.sites.map((s) => s.name));
+    const picks = (Array.isArray(opts.picks) ? opts.picks : []).filter((p) => p && valid.has(p.name));
+    if (!picks.length) return { ok: false, message: tr('কোনো সাইট বাছা হয়নি', 'No site selected') };
+    const password = typeof opts.password === 'string' ? opts.password : '';
+    if (info.encrypted && !password) return { ok: false, needPassword: true, message: tr('এই backup পাসওয়ার্ড দিয়ে encrypted, পাসওয়ার্ড দিন', 'This backup is encrypted, enter the password') };
+    const sevenZ = find7z();
+    const is7z = /\.7z$/i.test(info.archive);
+    if (is7z && !sevenZ) return { ok: false, message: tr('7-Zip নেই; Backup পেজ থেকে ইনস্টল করুন', '7-Zip is missing; install it from the Backup page') };
+    const wrongPw = (s) => /wrong password|cannot open encrypted archive|can not open encrypted archive|data error in encrypted/i.test(s);
+    const pwArgs = password ? ['-p' + password] : [];
+    const tmp = path.join(tmpRoot(), 'restore-' + stampOf());
+    const results = [];
+    const warnings = [];
+    restoring = true;
+    try {
+      fs.mkdirSync(www, { recursive: true });
+      fs.mkdirSync(tmp, { recursive: true });
+      log(`Restore www: ${info.archive} -> ${picks.length} site(s): ${picks.map((p) => p.name + '(' + (p.mode || 'rename') + ')').join(', ')}`);
+      let top = '';
+      if (sevenZ) {
+        if (ctx.onProgress) ctx.onProgress('Restore: reading archive');
+        const lr = await run(sevenZ, ['l', '-slt', ...pwArgs, info.archive], { timeout: 30 * 60000 });
+        const lout = lr.stdout + lr.stderr;
+        if (!lr.ok) {
+          if (wrongPw(lout)) return { ok: false, wrongPassword: true, message: tr('পাসওয়ার্ড ভুল', 'Wrong password') };
+          return { ok: false, message: '7z list failed: ' + lout.trim().slice(-300) };
+        }
+        const idx = lout.indexOf('----------');
+        const counts = {};
+        const re = /^Path = (.*)$/gm;
+        let mm;
+        const body = idx >= 0 ? lout.slice(idx) : lout;
+        while ((mm = re.exec(body))) {
+          const first = mm[1].trim().split(/[\\/]/)[0];
+          if (first) counts[first] = (counts[first] || 0) + 1;
+        }
+        top = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || '';
+        if (!top) return { ok: false, message: tr('আর্কাইভের ভেতরে কিছু পাওয়া যায়নি', 'The archive is empty') };
+        let lastP = -20;
+        const xr = await run(sevenZ, ['x', info.archive, '-o' + tmp, '-y', '-bsp1', ...pwArgs, ...picks.map((p) => top + '\\' + p.name)], {
+          timeout: 6 * 3600 * 1000,
+          onData: (chunk) => {
+            const m = chunk.match(/(\d{1,3})%/g);
+            if (!m) return;
+            const p = parseInt(m[m.length - 1], 10);
+            if (ctx.onProgress) ctx.onProgress(`Restore www ${p}%`);
+            if (p >= lastP + 20) {
+              lastP = p;
+              log(`  restore extract: ${p}%`);
+            }
+          },
+        });
+        const xout = xr.stdout + xr.stderr;
+        if (!xr.ok && xr.code !== 1) {
+          if (wrongPw(xout)) return { ok: false, wrongPassword: true, message: tr('পাসওয়ার্ড ভুল', 'Wrong password') };
+          return { ok: false, message: `7z extract failed (exit code ${xr.code}): ` + xout.trim().slice(-300) };
+        }
+        if (xr.code === 1) warnings.push(tr('7-Zip সতর্কতা দিয়েছে (কিছু ফাইল এড়ানো হতে পারে), বিস্তারিত log-এ', '7-Zip reported warnings (some files may have been skipped), see the log'));
+      } else {
+        const tarExe = ctx.tarExe || (win ? 'tar.exe' : 'tar');
+        const r = await run(tarExe, ['-xf', info.archive, '-C', tmp], {});
+        if (!r.ok) return { ok: false, message: ('tar failed: ' + r.stderr).slice(0, 400) };
+        const dirs = fs.readdirSync(tmp, { withFileTypes: true }).filter((e) => e.isDirectory());
+        top = dirs.length ? dirs[0].name : '';
+        if (!top) return { ok: false, message: tr('আর্কাইভের ভেতরে কিছু পাওয়া যায়নি', 'The archive is empty') };
+      }
+      const wwwRoot = path.join(tmp, top);
+      const taken = (n) => fs.existsSync(path.join(www, n));
+      for (const p of picks) {
+        const src = path.join(wwwRoot, p.name);
+        if (!fs.existsSync(src)) {
+          results.push({ name: p.name, ok: false, message: tr('আর্কাইভে পাওয়া যায়নি', 'not found in the archive') });
+          continue;
+        }
+        let finalName = p.name;
+        let action = 'new';
+        if (taken(p.name)) {
+          if (p.mode === 'overwrite') action = 'merged';
+          else {
+            finalName = p.name + '-restored';
+            for (let i = 2; taken(finalName); i++) finalName = `${p.name}-restored-${i}`;
+            action = 'renamed';
+          }
+        }
+        try {
+          if (action === 'merged') await fs.promises.cp(src, path.join(www, finalName), { recursive: true, force: true });
+          else await moveDir(src, path.join(www, finalName));
+          const notes = makeRunnable(www, p.name, finalName, info.excluded);
+          results.push({ name: p.name, final: finalName, action, ok: true, notes });
+          log(`  restored ${p.name} -> ${finalName} (${action})`);
+        } catch (e) {
+          results.push({ name: p.name, ok: false, message: e.message });
+          log(`  [FAIL] restore ${p.name}: ${e.message}`);
+        }
+      }
+      if (!info.complete) warnings.push(tr('এই backup আংশিক (complete নয়): ' + (info.failedSteps.join(', ') || '?'), 'This backup is partial (not complete): ' + (info.failedSteps.join(', ') || '?')));
+      if (info.copyFolders.length) warnings.push(tr('আলাদা copy হিসেবে রাখা ফোল্ডার (' + info.copyFolders.join(', ') + ') এখানে ফেরত আসে না, ধাপ ৪-এ আসবে', 'Folders kept as plain copies (' + info.copyFolders.join(', ') + ') are not restored here, step 4 will do that'));
+      return { ok: results.some((r) => r.ok), results, warnings, folders: results.filter((r) => r.ok).map((r) => r.final) };
+    } catch (e) {
+      return { ok: false, message: e.message };
+    } finally {
+      restoring = false;
+      try {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+
+  return { getConfig, setConfig, runBackup, isRunning, lastStatus, tailLog, find7z, ensure7z, listBackups, restoreWwwInfo, restoreWww, dirs: { baseDir, logsDir } };
 }
 
 module.exports = { createBackup, stampOf, STAMP_RE, snapshotChanged, pruneVersions, moveToVersions, folderSize, renameDirRetry };

@@ -4705,6 +4705,79 @@ ipcMain.handle('backup:folderSize', async (_e, dir) => {
   }
 });
 ipcMain.handle('backup:openLogs', () => shell.openPath(backup.dirs.logsDir()));
+// Restore ধাপ ১: backup-এর তালিকা (শুধু পড়ে, কিছু বদলায় না); customDir খালি হলে চালু গন্তব্যগুলো, নইলে শুধু ওই ফোল্ডার
+ipcMain.handle('restore:list', async (_e, customDir) => {
+  try {
+    return await backup.listBackups({ customDir: typeof customDir === 'string' ? customDir : '' });
+  } catch (err) {
+    return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+});
+
+// Restore ধাপ ২: www সাইট ফেরত আনা। restore:wwwInfo শুধু পড়ে; restore:www ফাইল বসায়, তারপর সাইট স্ক্যান + hosts + ওয়েব সার্ভার reload,
+// আর Node সাইটের node_modules না থাকলে npm install নিজে চালায় (বাদ-দেওয়া ফোল্ডার আবার তৈরি হয়ে সাইট চলার উপযোগী হয়)।
+ipcMain.handle('restore:wwwInfo', (_e, dir) => {
+  try {
+    return backup.restoreWwwInfo(typeof dir === 'string' ? dir : '');
+  } catch (err) {
+    return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+});
+// স্ট্যাটাস বারে শেষ লেখাটা (Restore www 99%, npm install চলছে...) বাসি থেকে যেত; কাজ শেষে একটা চূড়ান্ত বার্তা পাঠাই।
+async function restoreWwwRun(opts) {
+  try {
+    if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+    const o = opts && typeof opts === 'object' ? opts : {};
+    const r = await backup.restoreWww({
+      dir: typeof o.dir === 'string' ? o.dir : '',
+      password: typeof o.password === 'string' ? o.password : '',
+      picks: Array.isArray(o.picks) ? o.picks.map((p) => ({ name: String(p && p.name), mode: p && p.mode === 'overwrite' ? 'overwrite' : 'rename' })) : [],
+    });
+    if (!r.ok || !r.folders || !r.folders.length) return r;
+    if (!busy) {
+      busy = true;
+      try {
+        const sites = withToolSites(scanSites());
+        const h = await syncHosts(sites);
+        await reloadRunning(sites);
+        if (!h.ok) r.hostsNote = hostsFailNote(h);
+      } catch (err) {
+        r.warnings = (r.warnings || []).concat(tr('সাইট রিফ্রেশে সমস্যা: ', 'Site refresh problem: ') + err.message);
+      } finally {
+        busy = false;
+      }
+    }
+    r.npm = [];
+    for (const f of r.folders) {
+      try {
+        const slug = f.toLowerCase().replace(/\s+/g, '-');
+        const s = scanSites().find((x) => x.name === slug && x.node);
+        if (s && !fs.existsSync(path.join(WWW_DIR, f, 'node_modules'))) {
+          const ir = await installNodeDeps(s.domain);
+          r.npm.push({ site: f, ok: !!ir.ok, message: ir.message || '' });
+        }
+      } catch (err) {
+        r.npm.push({ site: f, ok: false, message: err.message });
+      }
+    }
+    return r;
+  } catch (err) {
+    return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+}
+
+ipcMain.handle('restore:www', async (_e, opts) => {
+  const res = await restoreWwwRun(opts);
+  try {
+    if (res && res.ok) {
+      const n = Array.isArray(res.folders) ? res.folders.length : 0;
+      sendStatus(tr(`Restore www: শেষ (${n}টা সাইট)`, `Restore www: finished (${n} site(s))`));
+    } else {
+      sendStatus(tr('Restore www: ব্যর্থ বা বাতিল', 'Restore www: failed or cancelled'));
+    }
+  } catch (_) {}
+  return res;
+});
 
 // ---------- Backup: Windows Task Scheduler (অ্যাপ বন্ধ থাকলেও) ----------
 // প্রতিটা সময়ের জন্য একটা task: "Server 360 - Backup HHMM", রোজ চলে, ইউজারের Windows পাসওয়ার্ড দিয়ে (লগআউট থাকলেও)।
