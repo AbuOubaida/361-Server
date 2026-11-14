@@ -5,6 +5,7 @@
 //   Apache: epoch|status|bytes|মাইক্রোসেকেন্ড|GET /path HTTP/1.1|UA  (৬ ঘর; ধাপ ৩a-র প্রথম সংস্করণের পুরনো লাইনে Nginx-এর মতো ৭ ঘর)
 // মনিটরের নিজের পরীক্ষা (UA = Server360-Monitor) গোনা হয় না। ? এর পরের অংশ কখনো পড়া/রাখা হয় না (আমরা path-ই রাখি না)।
 // প্রতিটা লগের কত byte পর্যন্ত পড়া হয়েছে তা traffic.json-এ থাকে; অ্যাপ বন্ধ থাকলেও লগের নিজের সময় ধরে পরে গোনা হয়।
+// ধাপ ৩c: দিন ধরে Top URL (শুধু পথ, ? ছাড়া, সর্বোচ্চ ২০০ অক্ষর; সাইট প্রতি দিনে সর্বোচ্চ ১০০টা পথ রাখা হয়, ছাপিয়ে গেলে সেরা ৫০টা রেখে বাকি বাদ) এবং isRead/forget (main.js ২০ MB-র বেশি log সরানোর আগে জানতে চায় পুরোটা পড়া হয়েছে কিনা)।
 // জমা: মিনিট-বাকেট শেষ ২৪ ঘণ্টা, ঘণ্টা-বাকেট keepDays (monitor.keepDays) দিন। বাকেট = [হিট, bytes, 4xx, 5xx, সাড়ার-সময়ের-যোগফল ms]।
 const fs = require('fs');
 
@@ -14,8 +15,15 @@ const CHUNK = 2 * 1024 * 1024; // এক ফাইল থেকে এক রা
 const SAVE_MS = 60000;
 const MIN_BUCKETS_H = 24; // মিনিট-বাকেট কত ঘণ্টা
 const DAY = 86400;
+const PATH_MAX = 200;
+const DAY_PATHS = 100; // এর বেশি হলে সেরা ৫০টা রেখে বাকি ফেলা হয়
+const DAY_KEEP = 50;
+const dayKey = (tsSec) => {
+  const d = new Date(tsSec * 1000);
+  return String(d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate());
+};
 
-// এক লাইন -> { ts(সেকেন্ড), status, bytes, ms, mon } অথবা null (পড়া যায়নি)
+// এক লাইন -> { ts(সেকেন্ড), status, bytes, ms, mon, path } অথবা null (পড়া যায়নি); path = ? ও # ছাড়া, '/' দিয়ে শুরু, নইলে ''
 function parseLine(kind, line) {
   if (!line) return null;
   const f = line.split('|');
@@ -30,15 +38,23 @@ function parseLine(kind, line) {
   if (!Number.isFinite(tm) || tm < 0) tm = 0;
   const ms = kind === 'apache' ? tm / 1000 : tm * 1000;
   let ua;
-  if (String(f[4]).includes(' ')) ua = f.slice(5).join('|'); // Apache: "GET /x HTTP/1.1" এক ঘরে
-  else if (f.length >= 7) ua = f.slice(6).join('|');
-  else return null; // "-" (খারাপ অনুরোধ) ইত্যাদি
-  return { ts, status, bytes, ms, mon: ua.startsWith('Server360-Monitor') };
+  let target;
+  if (String(f[4]).includes(' ')) {
+    ua = f.slice(5).join('|'); // Apache: "GET /x HTTP/1.1" এক ঘরে
+    target = String(f[4]).split(' ')[1] || '';
+  } else if (f.length >= 7) {
+    ua = f.slice(6).join('|');
+    target = String(f[5]);
+  } else return null; // "-" (খারাপ অনুরোধ) ইত্যাদি
+  let path = target.split('?')[0].split('#')[0];
+  if (!path.startsWith('/')) path = '';
+  if (path.length > PATH_MAX) path = path.slice(0, PATH_MAX);
+  return { ts, status, bytes, ms, mon: ua.startsWith('Server360-Monitor'), path };
 }
 
 // deps: { ipcMain, getSettings(), saveSettings(), dataFile(), getLogFiles() -> [{domain, kind:'nginx'|'apache', file, own}], send(ch, p) }
 function init(deps) {
-  let st = { v: 1, files: {}, minutes: {}, hours: {} };
+  let st = { v: 1, files: {}, minutes: {}, hours: {}, top: {} };
   let timer = null;
   let busy = false;
   let stopped = false;
@@ -50,7 +66,7 @@ function init(deps) {
     try {
       const j = JSON.parse(fs.readFileSync(deps.dataFile(), 'utf8'));
       if (j && typeof j === 'object') {
-        st = { v: 1, files: j.files || {}, minutes: j.minutes || {}, hours: j.hours || {} };
+        st = { v: 1, files: j.files || {}, minutes: j.minutes || {}, hours: j.hours || {}, top: j.top || {} };
       }
     } catch {}
   }
@@ -87,11 +103,35 @@ function init(deps) {
       else d[key] = row.slice();
     };
     if (p.ts >= nowSec - MIN_BUCKETS_H * 3600) put('minutes', String(Math.floor(p.ts / 60)));
-    if (p.ts >= nowSec - keepDays * DAY) put('hours', String(Math.floor(p.ts / 3600)));
+    if (p.ts >= nowSec - keepDays * DAY) {
+      put('hours', String(Math.floor(p.ts / 3600)));
+      if (p.path) {
+        const td = (st.top[domain] = st.top[domain] || {});
+        const day = (td[dayKey(p.ts)] = td[dayKey(p.ts)] || {});
+        const e = day[p.path];
+        if (e) {
+          e[0] += 1;
+          e[1] += p.bytes;
+        } else {
+          day[p.path] = [1, p.bytes];
+          const keys = Object.keys(day);
+          if (keys.length > DAY_PATHS) {
+            keys.sort((a, b) => day[b][0] - day[a][0]);
+            for (const k of keys.slice(DAY_KEEP)) delete day[k];
+          }
+        }
+      }
+    }
     dirty = true;
   }
 
   function trim(nowSec, keepDays) {
+    const dayCut = Number(dayKey(nowSec - keepDays * DAY));
+    for (const dom of Object.keys(st.top)) {
+      const d = st.top[dom];
+      for (const k of Object.keys(d)) if (Number(k) < dayCut) delete d[k];
+      if (!Object.keys(d).length) delete st.top[dom];
+    }
     const minCut = Math.floor(nowSec / 60) - MIN_BUCKETS_H * 60;
     const hourCut = Math.floor(nowSec / 3600) - keepDays * 24;
     for (const [grp, cut] of [['minutes', minCut], ['hours', hourCut]]) {
@@ -256,10 +296,66 @@ function init(deps) {
     return { size, points: [...out].map(([t, a]) => ({ t: t * 1000, hits: a[0], bytes: a[1], e4: a[2], e5: a[3] })) };
   }
 
+  // hours <= 24: আজ, নইলে শেষ ৭ দিন। domain '*' = সব সাইট মিলিয়ে। ফেরত: সেরা ২০ পথ
+  function top(domain, hours) {
+    const days = Number(hours) > 24 ? 7 : 1;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const keys = new Set();
+    for (let i = 0; i < days; i++) keys.add(dayKey(nowSec - i * DAY));
+    const doms = domain === '*' ? Object.keys(st.top) : [String(domain)];
+    const acc = new Map();
+    for (const dom of doms) {
+      const d = st.top[dom];
+      if (!d) continue;
+      for (const k of keys) {
+        const day = d[k];
+        if (!day) continue;
+        for (const [p, v] of Object.entries(day)) {
+          const a = acc.get(p) || [0, 0];
+          a[0] += v[0];
+          a[1] += v[1];
+          acc.set(p, a);
+        }
+      }
+    }
+    const items = [...acc].map(([path, a]) => ({ path, hits: a[0], bytes: a[1] }));
+    items.sort((a, b) => b.hits - a.hits || a.path.localeCompare(b.path));
+    return { days, items: items.slice(0, 20) };
+  }
+  // সংখ্যা মুছে ফেলা; কোন log কতদূর পড়া হয়েছে (offset) থাকে, তাই পুরনো লাইন আবার গোনা হয় না
+  function reset() {
+    st.minutes = {};
+    st.hours = {};
+    st.top = {};
+    dirty = true;
+    save();
+  }
+  // ২০ MB-র বেশি log সরানোর আগে main.js জিজ্ঞেস করে: পুরোটা পড়া হয়েছে? (গোনা বন্ধ থাকলে কেউ পড়ছে না, তাই true)
+  function isRead(file) {
+    if (!cfg().enabled) return true;
+    try {
+      const stt = fs.statSync(file);
+      const rec = st.files[file];
+      if (!rec) return stt.size === 0;
+      return rec.bt === Math.round(stt.birthtimeMs || 0) && rec.off >= stt.size;
+    } catch {
+      return false;
+    }
+  }
+  function forget(file) {
+    delete st.files[file];
+    dirty = true;
+  }
+
   load();
   const { ipcMain } = deps;
   ipcMain.handle('traffic:get', (_e, hours) => get(hours));
   ipcMain.handle('traffic:history', (_e, domain, hours) => history(String(domain || '*'), hours));
+  ipcMain.handle('traffic:top', (_e, domain, hours) => top(String(domain || '*'), hours));
+  ipcMain.handle('traffic:reset', (_e, hours) => {
+    reset();
+    return get(hours);
+  });
   ipcMain.handle('traffic:setConfig', (_e, c) => {
     c = c || {};
     const m = cfg();
@@ -274,6 +370,10 @@ function init(deps) {
     round,
     get,
     history,
+    top,
+    reset,
+    isRead,
+    forget,
     stop() {
       stopped = true;
       clearTimeout(timer);

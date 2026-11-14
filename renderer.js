@@ -158,6 +158,7 @@ function applyStatic() {
     monRender(); // গতিশীল লেখা (টেবিল, ঘটনা) নতুন ভাষায়
     resRender();
     trfRender();
+    trfTop();
   }
 }
 
@@ -1717,11 +1718,28 @@ async function trfGraph() {
   g.textAlign = 'right';
   g.fillText(fmtT(pts[pts.length - 1].t), W - padR, H - padB + 6);
 }
+async function trfTop() {
+  let items = [];
+  let days = 1;
+  try {
+    const r = await window.api.trafficTop($('trfGraphSite').value || '*', trfRange());
+    items = r.items;
+    days = r.days;
+  } catch {}
+  $('trfTopTitle').textContent = t('trf.top.title') + ' (' + t(days > 1 ? 'trf.top.week' : 'trf.top.today') + ')';
+  $('trfTopNone').hidden = items.length > 0;
+  const body = $('trfTopBody');
+  body.textContent = '';
+  for (const it of items) {
+    body.append(el('tr', {}, el('td', { textContent: it.path, style: 'word-break:break-all' }), el('td', { textContent: String(it.hits) }), el('td', { textContent: trfFmtBytes(it.bytes) })));
+  }
+}
 async function trfLoad() {
   try {
     trfData = await window.api.trafficGet(trfRange());
     trfRender();
     await trfGraph();
+    await trfTop();
   } catch {}
 }
 function trfSave() {
@@ -1736,7 +1754,19 @@ function trfSave() {
 }
 $('trfOn').addEventListener('change', trfSave);
 $('trfRange').addEventListener('change', trfLoad);
-$('trfGraphSite').addEventListener('change', trfGraph);
+$('trfGraphSite').addEventListener('change', () => {
+  trfGraph();
+  trfTop();
+});
+$('trfReset').addEventListener('click', async () => {
+  if (!confirm(t('trf.reset.confirm'))) return;
+  try {
+    trfData = await window.api.trafficReset(trfRange());
+    trfRender();
+    await trfGraph();
+    await trfTop();
+  } catch {}
+});
 window.api.onTrafficUpdate(() => {
   if (currentPage === 'monitor') trfLoad();
 });

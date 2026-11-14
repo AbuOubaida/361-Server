@@ -154,6 +154,8 @@ contextBridge.exposeInMainWorld('api', {
   // সাইট ধরে হিট (R1 ধাপ ৩b)
   trafficGet: (hours) => ipcRenderer.invoke('traffic:get', hours),
   trafficHistory: (domain, hours) => ipcRenderer.invoke('traffic:history', domain, hours),
+  trafficTop: (domain, hours) => ipcRenderer.invoke('traffic:top', domain, hours),
+  trafficReset: (hours) => ipcRenderer.invoke('traffic:reset', hours),
   trafficSetConfig: (cfg) => ipcRenderer.invoke('traffic:setConfig', cfg),
   onTrafficUpdate: (callback) => ipcRenderer.on('monitor:traffic', () => callback()),
 

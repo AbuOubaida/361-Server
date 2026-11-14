@@ -720,11 +720,30 @@ const NG_LOG_FORMAT = [
 ];
 // Apache: %U DirectoryIndex-এর পর ভেতরের পথ (/index.php) দেয়, তাই আসল অনুরোধ-লাইন %r ("GET /path?q HTTP/1.1") লেখা হয়; ৩b-র পার্সার method ও পথ এখান থেকে ভাঙবে এবং ? এর পরের অংশ ফেলবে। ৫ম ঘর একটাই (Nginx-এ method ও path আলাদা দুই ঘর)।
 const AP_LOG_FORMAT = ['<IfModule log_config_module>', '  LogFormat "%{sec}t|%>s|%B|%D|%r|%{User-Agent}i" s360', '</IfModule>'];
+// ধাপ ৩c: log ২০ MB পার হলে .1 নামে সরানো (আগের .1 মোছে)। শুধু সার্ভার চলছে না এমন সময় (Windows-এ চলা সার্ভার ফাইল ধরে রাখে, নাম বদলালেও সে পুরনো ফাইলেই লিখত) এবং শুধু যদি পুরোটা পড়া হয়ে থাকে।
+const LOG_MAX = 20 * 1024 * 1024;
+function rotateBigLogs(svcId) {
+  try {
+    const dir = path.join(SERVICES[svcId].dir, 'logs', 'sites');
+    for (const n of fs.readdirSync(dir)) {
+      if (!n.endsWith('.access.log')) continue;
+      const f = path.join(dir, n);
+      try {
+        if (fs.statSync(f).size < LOG_MAX) continue;
+        if (trafficApi && !trafficApi.isRead(f)) continue;
+        fs.rmSync(f + '.1', { force: true });
+        fs.renameSync(f, f + '.1');
+        if (trafficApi) trafficApi.forget(f);
+      } catch {}
+    }
+  } catch {}
+}
 function ensureSiteLogDir(svcId) {
   try {
     const svc = SERVICES[svcId];
     if (!svc || !svc.dir) return false;
     fs.mkdirSync(path.join(svc.dir, 'logs', 'sites'), { recursive: true });
+    if (!running || running.id !== svcId) rotateBigLogs(svcId);
     return true;
   } catch {
     return false;
