@@ -702,7 +702,35 @@ function createBackup(ctx) {
       };
       await prune(dst, true).catch(() => {});
     }
-    return { ok: true, removed, marked, pending: Object.keys(next).length, total: files.length, sample };
+    return { ok: true, removed, toVersions: !!vdir, marked, pending: Object.keys(next).length, total: files.length, sample };
+  }
+
+  // গন্তব্যের ফোল্ডারে আগের ব্যর্থ/থেমে যাওয়া রানের পড়ে থাকা <stamp>.part ফোল্ডার মোছা (শুধু নাম ঠিক <YYYYMMDD-HHMMSS>.part আর শেষ বদল PART_MAX_AGE_MS-এর আগে; এই রানের নিজের stamp বাদ)
+  // Removes leftover <stamp>.part folders of earlier failed/aborted runs. Only exact names, only directories, only if untouched for PART_MAX_AGE_MS
+  // (so a backup that another PC is writing into the same share right now is not touched). Never throws.
+  const PART_RE = /^\d{8}-\d{6}\.part$/;
+  const PART_MAX_AGE_MS = 3 * 3600 * 1000;
+  function cleanPartFolders(root, currentStamp) {
+    const res = { removed: [], failed: [] };
+    let entries = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      return res;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || !PART_RE.test(e.name) || e.name === currentStamp + '.part') continue;
+      const dir = path.join(root, e.name);
+      try {
+        if (Date.now() - fs.statSync(dir).mtimeMs < PART_MAX_AGE_MS) continue;
+        fs.rmSync(dir, { recursive: true, force: true });
+        if (fs.existsSync(dir)) res.failed.push(e.name + ': still exists after removal');
+        else res.removed.push(e.name);
+      } catch (err) {
+        res.failed.push(e.name + ': ' + err.message);
+      }
+    }
+    return res;
   }
 
   function applyRetention(root, days) {
@@ -990,6 +1018,10 @@ function createBackup(ctx) {
             if (c.connected) connected.push(d);
           }
           fs.mkdirSync(d.root, { recursive: true });
+          // আগের রানের পড়ে থাকা .part ফোল্ডার আগে মোছা (ফাঁকা জায়গা বাড়ে, ফাঁকা-জায়গা পরীক্ষার আগেই)
+          const pc = cleanPartFolders(d.root, stamp);
+          if (pc.removed.length) log(`  removed ${pc.removed.length} leftover .part folder(s) on ${label}: ${pc.removed.join(', ')}`);
+          if (pc.failed.length) step('Clean .part ' + label, 'warn', `could not remove: ${pc.failed.join('; ')} (delete by hand)`);
           const free = freeBytes(d.root);
           if (free !== null && free < need + cfg.minFreeGb * 1073741824) throw new Error(`not enough free space (${Math.round(free / 1048576)} MB free, ${Math.round(need / 1048576)} MB needed)`);
           const part = path.join(d.root, stamp + '.part');
@@ -1053,7 +1085,11 @@ function createBackup(ctx) {
                   const cl = await cleanGone(it.path, to, it.cleanDays, vdir).catch((e) => ({ warn: true, message: 'cleanup error: ' + e.message }));
                   const cn = `Clean ${it.label} on ${label}`;
                   if (cl.warn) step(cn, 'warn', cl.message);
-                  else step(cn, true, `${cl.removed} file(s) removed, ${cl.pending} missing from the source and waiting (limit ${it.cleanDays} days), ${cl.marked} newly noticed, ${cl.total} checked` + (cl.sample.length ? `; removed e.g. ${cl.sample.join(', ')}` : ''));
+                  else {
+                    // keepDays > 0 হলে ফাইল আসলে মোছা হয় না, .versions-এ সরানো হয়: লগেও তাই লেখা
+                    const verb = cl.toVersions ? 'moved to .versions' : 'removed';
+                    step(cn, true, `${cl.removed} file(s) ${verb}, ${cl.pending} missing from the source and waiting (limit ${it.cleanDays} days), ${cl.marked} newly noticed, ${cl.total} checked` + (cl.sample.length ? `; ${verb} e.g. ${cl.sample.join(', ')}` : ''));
+                  }
                 }
                 if (it.keepDays > 0) {
                   try {
@@ -1101,6 +1137,11 @@ function createBackup(ctx) {
     }
 
     const warnings = steps.filter((x) => x.ok === 'warn').length;
+    // Clean-up ধাপের WARN হলে বার্তায় নাম লিখে লগের [WARN] লাইনের দিকে আঙুল দেখানো (কারণ শুধু লগে থাকে, যেমন "source folder is empty, nothing removed")
+    const cleanWarn = steps.filter((x) => x.ok === 'warn' && /^Clean /.test(x.name)).map((x) => x.name);
+    const cleanHint = cleanWarn.length
+      ? tr(`. Clean-up ধাপে সতর্কতা: ${cleanWarn.join(', ')}. কারণ log-এর [WARN] লাইনে লেখা আছে (সোর্স পাওয়া না গেলে বা ফাঁকা দেখালে নিরাপত্তার জন্য clean-up কিছু মোছে না).`, `. Clean-up warning: ${cleanWarn.join(', ')}. The reason is on the [WARN] line in the log (when the source looks missing or empty, clean-up does not delete anything as a safety rule).`)
+      : '';
     const status = { ok: !failed, warnings, stamp, started: started.toISOString(), finished: new Date().toISOString(), source: opts.source || 'manual', steps };
     try {
       fs.writeFileSync(statusFile(), JSON.stringify(status, null, 2));
@@ -1111,7 +1152,7 @@ function createBackup(ctx) {
       run('eventcreate', ['/T', 'ERROR', '/ID', '100', '/L', 'APPLICATION', '/SO', 'Server 360 Backup', '/D', last || 'Backup failed'], { timeout: 15000 });
     }
     pruneLogs();
-    return { ok: !failed, status, message: failed ? tr('Backup-এ সমস্যা হয়েছে, log দেখুন', 'Backup finished with errors, see the log') : warnings ? tr('Backup হয়েছে, কিন্তু সতর্কতা আছে (যেমন কোনো ডাটাবেস dump হয়নি, বা কোনো গন্তব্যে কপি হয়নি, বা কোনো ফোল্ডার পাওয়া যায়নি), log দেখুন', 'Backup done, but with warnings (for example a database was not dumped, a destination copy failed, or a folder was not found), see the log') : tr('Backup সম্পূর্ণ', 'Backup completed') };
+    return { ok: !failed, status, message: failed ? tr('Backup-এ সমস্যা হয়েছে, log দেখুন', 'Backup finished with errors, see the log') : warnings ? tr('Backup হয়েছে, কিন্তু সতর্কতা আছে (যেমন কোনো ডাটাবেস dump হয়নি, বা কোনো গন্তব্যে কপি হয়নি, বা কোনো ফোল্ডার পাওয়া যায়নি), log দেখুন', 'Backup done, but with warnings (for example a database was not dumped, a destination copy failed, or a folder was not found), see the log') + cleanHint : tr('Backup সম্পূর্ণ', 'Backup completed') };
   }
 
   // ---------- Restore, step 2: www সাইট ফেরত আনা ----------
