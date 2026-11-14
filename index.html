@@ -547,6 +547,49 @@
             <div class="hint" data-i18n="mon.graph.legend">নীল রেখা = গড় সাড়া (ms)। লাল দাগ = ওই সময়ে সাড়া পাওয়া যায়নি। প্রতি সাইটে কত হিট এসেছে তার গ্রাফ পরের ধাপে আসবে।</div>
           </div>
 
+          <div class="card" id="resCard">
+            <div class="card-title" data-i18n="res.title">CPU ও RAM</div>
+            <div class="card-sub" data-i18n="res.sub">চালু থাকা অংশগুলোর (ওয়েব সার্ভার, PHP, Node, ডাটাবেস) মোট ব্যবহার। প্রতি ৩০ সেকেন্ডে নতুন হিসাব।</div>
+            <div class="row">
+              <label class="switch"><input type="checkbox" id="resOn"><i></i><b data-i18n="res.on">CPU/RAM দেখুন</b></label>
+              <span class="mon-lbl" data-i18n="res.cpuMax">CPU সীমা</span>
+              <select id="resCpuMax" style="width:auto">
+                <option value="0" data-i18n="res.off">বন্ধ</option>
+                <option value="50">50%</option>
+                <option value="70">70%</option>
+                <option value="90">90%</option>
+              </select>
+              <span class="mon-lbl" data-i18n="res.ramMax">RAM সীমা (প্রতি অংশ)</span>
+              <select id="resRamMax" style="width:auto">
+                <option value="0" data-i18n="res.off">বন্ধ</option>
+                <option value="512">512 MB</option>
+                <option value="1024">1 GB</option>
+                <option value="2048">2 GB</option>
+                <option value="4096">4 GB</option>
+              </select>
+            </div>
+            <div class="hint warn" id="resFail" hidden data-i18n="res.fail">tasklist চালানো যায়নি, তাই CPU/RAM দেখানো যাচ্ছে না।</div>
+            <div class="hint" id="resEmpty" hidden data-i18n="res.none">এখন কোনো সার্ভার চালু নেই। Start চাপলে এখানে দেখা যাবে।</div>
+            <div style="overflow-x:auto; margin-top:8px">
+              <table>
+                <thead><tr><th data-i18n="res.col.name">অংশ</th><th style="width:100px" data-i18n="res.col.n">প্রসেস</th><th style="width:100px">CPU</th><th style="width:110px">RAM</th></tr></thead>
+                <tbody id="resBody"></tbody>
+              </table>
+            </div>
+            <div class="row">
+              <select id="resGraphGroup" style="width:auto"></select>
+              <select id="resGraphMetric" style="width:auto">
+                <option value="cpu">CPU %</option>
+                <option value="ram">RAM (MB)</option>
+              </select>
+            </div>
+            <div style="position:relative; margin-top:12px">
+              <canvas id="resCanvas" height="160" style="width:100%; height:160px; display:block"></canvas>
+              <div class="hint mon-empty" id="resGraphEmpty" hidden data-i18n="mon.graph.empty">এখনো যথেষ্ট তথ্য নেই</div>
+            </div>
+            <div class="hint" data-i18n="res.hint">CPU = পুরো পিসির (সব কোর মিলিয়ে) কত শতাংশ। একই নামের অন্য প্রোগ্রামের প্রসেসও (যেমন অন্য mysqld) গোনা হয়। সীমার ওপরে প্রায় ১.৫ মিনিট থাকলে একবার জানানো হয় (উপরের "বন্ধ হলে জানান" চালু থাকলে)। গ্রাফে শেষ ২ ঘণ্টা; অ্যাপ বন্ধ করলে মুছে যায়।</div>
+          </div>
+
           <div class="card">
             <div class="card-title" data-i18n="mon.url.title">বাইরের URL</div>
             <div class="card-sub" data-i18n="mon.url.sub">অন্য পিসির বা ইন্টারনেটের সাইটও দেখা যায় (শুধু চালু/বন্ধ, কোড ও সাড়ার সময়)</div>

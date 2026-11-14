@@ -11,6 +11,7 @@ const { EventEmitter } = require('events');
 const os = require('os');
 const dns = require('dns');
 const monitor = require('./monitor'); // R1: সাইট মনিটরিং (ধাপ ১)
+const resources = require('./resources'); // R1 ধাপ ২: প্রসেস গ্রুপ ধরে CPU/RAM
 
 // ====== এখানে আপনার লিংক বসান ======
 const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
@@ -709,6 +710,33 @@ const extrasDir = (svc, domain) => path.join(sitesEnabledDir(svc), `${domain}.d`
 const nginxExtraInclude = (domain) => `    include sites-enabled/${domain}.d/*.conf;`;
 const apacheExtraInclude = (domain) => '  IncludeOptional "${SRVROOT}/conf/sites-enabled/' + domain + '.d/*.conf"';
 
+// R1 ধাপ ৩a: প্রতিটা সাইটের নিজের access log (logs\sites\<domain>.access.log), ধাপ ৩b-র পার্সার এখান থেকে হিট গুনবে।
+// লাইনের ফরম্যাট (| দিয়ে আলাদা, User-Agent সবশেষে): epoch-সেকেন্ড|status|পাঠানো bytes|সাড়ার সময়|method|পথ (? ছাড়া)|User-Agent
+// Nginx-এর সময় সেকেন্ডে ($request_time), Apache-র %D মাইক্রোসেকেন্ডে। ফোল্ডার না বানানো গেলে লগের লাইন বসে না (চালু হওয়া আটকায় না)।
+const NG_LOG_FORMAT = [
+  '  map $request_uri $s360_path { ~^(?<p>[^?]*) $p; default $request_uri; }',
+  "  log_format s360 '$msec|$status|$bytes_sent|$request_time|$request_method|$s360_path|$http_user_agent';",
+];
+// Apache: %U DirectoryIndex-এর পর ভেতরের পথ (/index.php) দেয়, তাই আসল অনুরোধ-লাইন %r ("GET /path?q HTTP/1.1") লেখা হয়; ৩b-র পার্সার method ও পথ এখান থেকে ভাঙবে এবং ? এর পরের অংশ ফেলবে। ৫ম ঘর একটাই (Nginx-এ method ও path আলাদা দুই ঘর)।
+const AP_LOG_FORMAT = ['<IfModule log_config_module>', '  LogFormat "%{sec}t|%>s|%B|%D|%r|%{User-Agent}i" s360', '</IfModule>'];
+function ensureSiteLogDir(svcId) {
+  try {
+    const svc = SERVICES[svcId];
+    if (!svc || !svc.dir) return false;
+    fs.mkdirSync(path.join(svc.dir, 'logs', 'sites'), { recursive: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+// kind = 'nginx' | 'apache'; সাইটের server/VirtualHost ব্লকের ভেতরে বসানোর লাইন (খালি = লগ নেই)
+function siteLogLines(kind, domain, logOk) {
+  if (!logOk || !/^[A-Za-z0-9._-]+$/.test(domain)) return [];
+  const file = `logs/sites/${domain}.access.log`;
+  if (kind === 'nginx') return [`    access_log ${file} s360;`];
+  return ['  <IfModule log_config_module>', `    CustomLog "${file}" s360`, '  </IfModule>'];
+}
+
 function writeSiteFiles(svc, entries, sites) {
   syncUserIni(sites);
   const dir = sitesEnabledDir(svc);
@@ -850,12 +878,13 @@ const AP_LAN_ONLY = ['  <If "%{REMOTE_ADDR} !~ /^(127\\.|10\\.|192\\.168\\.|172\
 
 function nginxEntries(sites, webPort, upOf) {
   const defUp = phpUpstream(defaultPhpVersion());
+  const logOk = ensureSiteLogDir('nginx');
   return [
     { file: '00-default.conf', extras: 'localhost', text: nginxServer('localhost', WWW_DIR, defUp, true, webPort, false, [...toolLocations(defUp), ...publicRedirects(sites, webPort, 'nginx', upOf), ...disabledBlocks(sites, 'nginx'), nginxExtraInclude('localhost'), ...(hasPublicSites(sites) ? NG_LAN_ONLY : [])]) + (webPort === 80 && anyTlsSites(sites) ? '\n' + NG_TLS_CATCHALL : '') },
     ...sites
       .filter((s) => !s.disabled)
       .map((s) => {
-        const mk = (port, shared = false) => (s.node ? nginxNodeServer(s.domain, nodePortOf(s.domain), port, [nginxExtraInclude(s.domain)], shared ? s.domain : '') : nginxServer(s.domain, s.root, upOf(s), false, port, !!s.system, s.system ? [] : [nginxExtraInclude(s.domain)], s.system ? 0 : siteSessionMin(s.domain)));
+        const mk = (port, shared = false) => (s.node ? nginxNodeServer(s.domain, nodePortOf(s.domain), port, [nginxExtraInclude(s.domain), ...siteLogLines('nginx', s.domain, logOk)], shared ? s.domain : '') : nginxServer(s.domain, s.root, upOf(s), false, port, !!s.system, s.system ? [] : [nginxExtraInclude(s.domain), ...siteLogLines('nginx', s.domain, logOk)], s.system ? 0 : siteSessionMin(s.domain)));
         // LAN শেয়ার চালু থাকলে একই সাইটের আরেকটা server ব্লক শেয়ার-পোর্টে
         return { file: `${s.domain}.conf`, extras: s.system ? '' : s.domain, text: shareable(s) ? pubN(mk(webPort), s) + '\n' + mk(sharePortOf(s.domain), true) : pubN(mk(webPort), s) };
       }),
@@ -890,12 +919,13 @@ function apacheAliasLines() {
 
 function apacheEntries(sites, webPort) {
   const defVer = defaultPhpVersion();
+  const logOk = ensureSiteLogDir('apache');
   return [
     { file: '00-default.conf', extras: 'localhost', text: apacheServer('localhost', WWW_DIR, defVer, webPort, false, [...apacheAliasLines(), ...publicRedirects(sites, webPort, 'apache'), ...disabledBlocks(sites, 'apache'), apacheExtraInclude('localhost'), ...(hasPublicSites(sites) ? AP_LAN_ONLY : [])]) },
     ...sites
       .filter((x) => !x.disabled)
       .map((x) => {
-        const mk = (port, shared = false) => (x.node ? apacheNodeServer(x.domain, nodePortOf(x.domain), port, [apacheExtraInclude(x.domain)], shared ? x.domain : '') : apacheServer(x.domain, x.root, phpOfSite(x), port, !!x.system, x.system ? [] : [apacheExtraInclude(x.domain)], x.system ? 0 : siteSessionMin(x.domain)));
+        const mk = (port, shared = false) => (x.node ? apacheNodeServer(x.domain, nodePortOf(x.domain), port, [apacheExtraInclude(x.domain), ...siteLogLines('apache', x.domain, logOk)], shared ? x.domain : '') : apacheServer(x.domain, x.root, phpOfSite(x), port, !!x.system, x.system ? [] : [apacheExtraInclude(x.domain), ...siteLogLines('apache', x.domain, logOk)], x.system ? 0 : siteSessionMin(x.domain)));
         return { file: `${x.domain}.conf`, extras: x.system ? '' : x.domain, text: shareable(x) ? pubN(mk(webPort), x) + '\n' + mk(sharePortOf(x.domain), true) : pubN(mk(webPort), x) };
       }),
   ];
@@ -961,6 +991,8 @@ function writeApacheConf(svc, _phpPorts, sites, webPort) {
     'AddType application/x-httpd-php .php',
     `Action application/x-httpd-php "/server360-php-${phpSlug(defVer)}/php-cgi.exe"`,
     '',
+    // R1 ধাপ ৩a: সাইটের access log-এর ফরম্যাট (নাম s360)
+    ...AP_LOG_FORMAT,
     // LAN-এ শেয়ার করা সাইটের পোর্ট
     ...sharedPorts(sites).map((p) => `Listen ${p}`),
     // প্রতিটা সাইটের VirtualHost আলাদা ফাইলে: conf\sites-enabled\*.conf (00-default.conf আগে লোড হয়, তাই localhost ডিফল্ট)
@@ -997,6 +1029,7 @@ function writeNginxConf(svc, phpPorts, sites = [], webPort = 80) {
     '  server_names_hash_bucket_size 64;',
     // Node.js সাইটের WebSocket-এর জন্য
     "  map $http_upgrade $connection_upgrade { default upgrade; '' close; }",
+    ...NG_LOG_FORMAT,
     ...upstreams,
     // প্রতিটা সাইটের server ব্লক আলাদা ফাইলে: conf\sites-enabled\*.conf (00-default.conf-এ localhost)
     '  include sites-enabled/*.conf;',
@@ -1444,6 +1477,19 @@ function notifyUser(title, body) {
   } catch {}
 }
 let monitorApi = null;
+let resApi = null;
+// ধাপ ২: এখন কোন প্রসেস গ্রুপ চালু আছে (নাম -> .exe)। একই নামের অন্য প্রোগ্রামের প্রসেসও গোনা হয় (tasklist-এ parent নেই)
+function resGroups() {
+  const g = [];
+  if (running) {
+    g.push({ id: 'web', name: running.id === 'apache' ? 'Apache' : 'Nginx', images: [running.id === 'apache' ? 'httpd.exe' : 'nginx.exe'] });
+    if (Object.keys(running.phpPorts || {}).length) g.push({ id: 'php', name: 'PHP', images: ['php-cgi.exe'] });
+  }
+  if (Object.values(nodeRun).some((r) => r && r.task === 'run')) g.push({ id: 'node', name: 'Node.js', images: ['node.exe'] });
+  if (dbRun.mysql) g.push({ id: 'mysql', name: 'MySQL', images: ['mysqld.exe'] });
+  if (dbRun.postgres) g.push({ id: 'postgres', name: 'PostgreSQL', images: ['postgres.exe'] });
+  return g;
+}
 function applyLoginItem() {
   try {
     app.setLoginItemSettings({
@@ -5287,6 +5333,23 @@ app.whenReady().then(() => {
   } catch (err) {
     monitorApi = null; // মনিটরিং না চললেও বাকি অ্যাপ যেন ঠিক চলে
   }
+  // R1 ধাপ ২: CPU/RAM (আলাদা try/catch: এটা না চললেও বাকি সব চলবে)
+  try {
+    resApi = resources.init({
+      ipcMain,
+      getSettings: () => settings,
+      saveSettings: () => saveSettings(settings),
+      tr,
+      getGroups: resGroups,
+      notify: notifyUser,
+      status: sendStatus,
+      send: (ch, p) => {
+        if (win && !win.isDestroyed()) win.webContents.send(ch, p);
+      },
+    });
+  } catch (err) {
+    resApi = null;
+  }
   if (!settings.wwwDir) {
     win.webContents.once('did-finish-load', () => askWwwFolderFirstRun());
   } else {
@@ -5307,6 +5370,9 @@ app.on('before-quit', () => {
   quitting = true;
   try {
     if (monitorApi) monitorApi.stop();
+  } catch {}
+  try {
+    if (resApi) resApi.stop();
   } catch {}
   if (running) running.procs.forEach((p) => killTree(p.pid));
   for (const r of Object.values(nodeRun)) killTree(r.proc.pid); // Node অ্যাপগুলোও বন্ধ

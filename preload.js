@@ -145,6 +145,12 @@ contextBridge.exposeInMainWorld('api', {
   monitorAddUrl: (url) => ipcRenderer.invoke('monitor:addUrl', url),
   monitorRemoveUrl: (url) => ipcRenderer.invoke('monitor:removeUrl', url),
   onMonitorUpdate: (callback) => ipcRenderer.on('monitor:update', () => callback()),
+  // CPU/RAM (R1 ধাপ ২)
+  resGet: () => ipcRenderer.invoke('res:get'),
+  resHistory: (id) => ipcRenderer.invoke('res:history', id),
+  resNow: () => ipcRenderer.invoke('res:now'),
+  resSetConfig: (cfg) => ipcRenderer.invoke('res:setConfig', cfg),
+  onResUpdate: (callback) => ipcRenderer.on('monitor:res', () => callback()),
 
   // ভাষা
   getLang: () => ipcRenderer.invoke('lang:get'),

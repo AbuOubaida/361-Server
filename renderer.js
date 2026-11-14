@@ -154,7 +154,10 @@ function applyStatic() {
   const meta = PAGES[currentPage];
   $('pageTitle').textContent = t(meta[0]);
   $('pageSub').textContent = t(meta[1]);
-  if (currentPage === 'monitor') monRender(); // গতিশীল লেখা (টেবিল, ঘটনা) নতুন ভাষায়
+  if (currentPage === 'monitor') {
+    monRender(); // গতিশীল লেখা (টেবিল, ঘটনা) নতুন ভাষায়
+    resRender();
+  }
 }
 
 async function setLang(lang) {
@@ -1544,6 +1547,7 @@ async function monLoad() {
     monRender();
     await monGraph();
   } catch {}
+  resLoad();
 }
 function monSave() {
   window.api
@@ -1591,11 +1595,150 @@ $('monUrl').addEventListener('keydown', (e) => {
 window.addEventListener('resize', () => {
   if (currentPage !== 'monitor') return;
   clearTimeout(monResizeT);
-  monResizeT = setTimeout(monGraph, 150);
+  monResizeT = setTimeout(() => {
+    monGraph();
+    resGraph();
+  }, 150);
 });
-$('themeBtn').addEventListener('click', () => setTimeout(() => currentPage === 'monitor' && monGraph(), 100));
+$('themeBtn').addEventListener('click', () =>
+  setTimeout(() => {
+    if (currentPage === 'monitor') {
+      monGraph();
+      resGraph();
+    }
+  }, 100)
+);
 window.api.onMonitorUpdate(() => {
   if (currentPage === 'monitor') monLoad();
+});
+
+// ---------- CPU ও RAM (R1 ধাপ ২) ----------
+let resData = null;
+function resFmtRam(mb) {
+  return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
+}
+function resRender() {
+  const d = resData;
+  if (!d) return;
+  const c = d.cfg;
+  if ($('resOn').checked !== c.enabled) $('resOn').checked = c.enabled;
+  if ($('resCpuMax').value !== String(c.cpuMax)) $('resCpuMax').value = String(c.cpuMax);
+  if ($('resRamMax').value !== String(c.ramMaxMB)) $('resRamMax').value = String(c.ramMaxMB);
+  $('resFail').hidden = d.ok;
+  $('resEmpty').hidden = !d.ok || d.groups.length > 0;
+  const body = $('resBody');
+  body.textContent = '';
+  for (const g of d.groups) {
+    const cpuHigh = c.cpuMax && g.cpu !== null && g.cpu >= c.cpuMax;
+    const ramHigh = c.ramMaxMB && g.ramMB >= c.ramMaxMB;
+    const cpuTd = el('td', { textContent: g.n === 0 ? '—' : g.cpu === null ? t('res.wait') : g.cpu + '%' });
+    const ramTd = el('td', { textContent: g.n === 0 ? '—' : resFmtRam(g.ramMB) });
+    if (cpuHigh) cpuTd.style.color = 'var(--danger)';
+    if (ramHigh) ramTd.style.color = 'var(--danger)';
+    body.append(el('tr', {}, el('td', { textContent: g.name }), el('td', { textContent: String(g.n) }), cpuTd, ramTd));
+  }
+  const sel = $('resGraphGroup');
+  const ids = d.groups.map((g) => g.id);
+  if ([...sel.options].map((o) => o.value).join('|') !== ids.join('|')) {
+    const keep = sel.value;
+    sel.textContent = '';
+    for (const g of d.groups) sel.append(el('option', { value: g.id, textContent: g.name }));
+    sel.value = ids.includes(keep) ? keep : ids[0] || '';
+  }
+}
+async function resGraph() {
+  const cv = $('resCanvas');
+  const id = $('resGraphGroup').value;
+  const metric = $('resGraphMetric').value;
+  let pts = [];
+  if (id) {
+    try {
+      pts = (await window.api.resHistory(id)).points;
+    } catch {}
+  }
+  const css = getComputedStyle(document.documentElement);
+  const col = (n, f) => css.getPropertyValue(n).trim() || f;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 600;
+  const H = 160;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const vals = pts.map((p) => ({ t: p.t, v: metric === 'cpu' ? p.cpu : p.ram })).filter((p) => p.v !== null && p.v !== undefined);
+  $('resGraphEmpty').hidden = vals.length >= 2;
+  if (vals.length < 2) return;
+  const limit = resData && resData.cfg ? (metric === 'cpu' ? resData.cfg.cpuMax : resData.cfg.ramMaxMB) : 0;
+  const padL = 52, padR = 10, padT = 10, padB = 22;
+  const pw = W - padL - padR;
+  const ph = H - padT - padB;
+  const rawMax = Math.max(...vals.map((p) => p.v), limit || 0, metric === 'cpu' ? 10 : 64);
+  const p10 = Math.pow(10, Math.floor(Math.log10(rawMax)));
+  let top = [1, 2, 5, 10].map((k) => k * p10).find((v) => v >= rawMax);
+  if (metric === 'cpu') top = Math.min(100, top);
+  const t0 = vals[0].t;
+  const t1 = vals[vals.length - 1].t;
+  const X = (ts) => padL + (t1 > t0 ? ((ts - t0) / (t1 - t0)) * pw : 0);
+  const Y = (v) => padT + ph - (Math.min(v, top) / top) * ph;
+  const fmt = (v) => (metric === 'cpu' ? Math.round(v * 10) / 10 + '%' : resFmtRam(v));
+  g.font = '11px sans-serif';
+  g.fillStyle = col('--muted', '#64748b');
+  g.strokeStyle = col('--border', '#e2e8f0');
+  g.lineWidth = 1;
+  g.textAlign = 'right';
+  g.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const v = (top * i) / 4;
+    g.beginPath();
+    g.moveTo(padL, Math.round(Y(v)) + 0.5);
+    g.lineTo(W - padR, Math.round(Y(v)) + 0.5);
+    g.stroke();
+    g.fillText(fmt(v), padL - 6, Y(v));
+  }
+  g.textBaseline = 'top';
+  g.textAlign = 'left';
+  g.fillText(monTime(t0), padL, H - padB + 6);
+  g.textAlign = 'right';
+  g.fillText(monTime(t1), W - padR, H - padB + 6);
+  if (limit) {
+    g.strokeStyle = col('--danger', '#dc2626');
+    g.setLineDash([4, 4]);
+    g.beginPath();
+    g.moveTo(padL, Math.round(Y(limit)) + 0.5);
+    g.lineTo(W - padR, Math.round(Y(limit)) + 0.5);
+    g.stroke();
+    g.setLineDash([]);
+  }
+  g.strokeStyle = col('--accent', '#2563eb');
+  g.lineWidth = 2;
+  g.lineJoin = 'round';
+  g.beginPath();
+  vals.forEach((p, k) => (k ? g.lineTo(X(p.t), Y(p.v)) : g.moveTo(X(p.t), Y(p.v))));
+  g.stroke();
+}
+async function resLoad() {
+  try {
+    resData = await window.api.resGet();
+    resRender();
+    await resGraph();
+  } catch {}
+}
+function resSave() {
+  window.api
+    .resSetConfig({ enabled: $('resOn').checked, cpuMax: Number($('resCpuMax').value), ramMaxMB: Number($('resRamMax').value) })
+    .then((d) => {
+      resData = d;
+      resRender();
+      resGraph();
+    })
+    .catch(() => {});
+}
+['resOn', 'resCpuMax', 'resRamMax'].forEach((id) => $(id).addEventListener('change', resSave));
+$('resGraphGroup').addEventListener('change', resGraph);
+$('resGraphMetric').addEventListener('change', resGraph);
+window.api.onResUpdate(() => {
+  if (currentPage === 'monitor') resLoad();
 });
 
 // ---------- শুরুতে ----------
