@@ -547,6 +547,35 @@
             <div class="hint" data-i18n="mon.graph.legend">নীল রেখা = গড় সাড়া (ms)। লাল দাগ = ওই সময়ে সাড়া পাওয়া যায়নি। প্রতি সাইটে কত হিট এসেছে তার গ্রাফ পরের ধাপে আসবে।</div>
           </div>
 
+          <div class="card" id="trfCard">
+            <div class="card-title" data-i18n="trf.title">সাইট ধরে হিট</div>
+            <div class="card-sub" data-i18n="trf.sub">প্রতিটা সাইটে কত অনুরোধ এসেছে, কত MB গেছে, কতগুলো 4xx/5xx আর গড় সাড়া। ওয়েব সার্ভারের access log থেকে, প্রতি ১০ সেকেন্ডে নতুন অংশ পড়া হয়।</div>
+            <div class="row">
+              <label class="switch"><input type="checkbox" id="trfOn"><i></i><b data-i18n="trf.on">হিট গুনুন</b></label>
+              <select id="trfRange" style="width:auto">
+                <option value="1" data-i18n="mon.range.1">১ ঘণ্টা</option>
+                <option value="24" data-i18n="mon.range.24" selected>২৪ ঘণ্টা</option>
+                <option value="168" data-i18n="mon.range.168">৭ দিন</option>
+              </select>
+            </div>
+            <div class="hint warn" id="trfFail" hidden data-i18n="trf.fail">log ফাইল পড়া যায়নি।</div>
+            <div class="hint" id="trfEmpty" hidden data-i18n="trf.none">কোনো সাইট নেই।</div>
+            <div style="overflow-x:auto; margin-top:8px">
+              <table>
+                <thead><tr><th data-i18n="mon.col.site">সাইট / URL</th><th style="width:90px" data-i18n="trf.col.hits">হিট</th><th style="width:100px" data-i18n="trf.col.sent">পাঠানো</th><th style="width:70px">4xx</th><th style="width:70px">5xx</th><th style="width:100px" data-i18n="trf.col.ms">গড় সাড়া (ms)</th></tr></thead>
+                <tbody id="trfBody"></tbody>
+              </table>
+            </div>
+            <div class="row">
+              <select id="trfGraphSite" style="width:auto; max-width:100%"></select>
+            </div>
+            <div style="position:relative; margin-top:12px">
+              <canvas id="trfCanvas" height="180" style="width:100%; height:180px; display:block"></canvas>
+              <div class="hint mon-empty" id="trfGraphEmpty" hidden data-i18n="trf.graph.empty">এই সময়ে কোনো হিট নেই</div>
+            </div>
+            <div class="hint" data-i18n="trf.hint">নীল দাগ = হিটের সংখ্যা, লাল অংশ = তার মধ্যে 5xx (সার্ভারের ভুল)। css/js/ছবির অনুরোধও গোনা হয়। অ্যাপের নিজের পরীক্ষা (Server360-Monitor) গোনা হয় না, ? এর পরের অংশ (query) কখনো রাখা হয় না। শুধু এই পিসির সাইট। Web server একবার Stop করে Start করলে তবেই নতুন সাইট log লেখা শুরু করে।</div>
+          </div>
+
           <div class="card" id="resCard">
             <div class="card-title" data-i18n="res.title">CPU ও RAM</div>
             <div class="card-sub" data-i18n="res.sub">চালু থাকা অংশগুলোর (ওয়েব সার্ভার, PHP, Node, ডাটাবেস) মোট ব্যবহার। প্রতি ৩০ সেকেন্ডে নতুন হিসাব।</div>

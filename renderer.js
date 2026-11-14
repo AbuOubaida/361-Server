@@ -157,6 +157,7 @@ function applyStatic() {
   if (currentPage === 'monitor') {
     monRender(); // গতিশীল লেখা (টেবিল, ঘটনা) নতুন ভাষায়
     resRender();
+    trfRender();
   }
 }
 
@@ -1548,6 +1549,7 @@ async function monLoad() {
     await monGraph();
   } catch {}
   resLoad();
+  trfLoad();
 }
 function monSave() {
   window.api
@@ -1598,6 +1600,7 @@ window.addEventListener('resize', () => {
   monResizeT = setTimeout(() => {
     monGraph();
     resGraph();
+    trfGraph();
   }, 150);
 });
 $('themeBtn').addEventListener('click', () =>
@@ -1605,11 +1608,137 @@ $('themeBtn').addEventListener('click', () =>
     if (currentPage === 'monitor') {
       monGraph();
       resGraph();
+      trfGraph();
     }
   }, 100)
 );
 window.api.onMonitorUpdate(() => {
   if (currentPage === 'monitor') monLoad();
+});
+
+// ---------- সাইট ধরে হিট (R1 ধাপ ৩b) ----------
+let trfData = null;
+function trfFmtBytes(b) {
+  if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB';
+  if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+  if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+  return Math.round(b) + ' B';
+}
+function trfRange() {
+  return Number($('trfRange').value) || 24;
+}
+function trfRender() {
+  const d = trfData;
+  if (!d) return;
+  if ($('trfOn').checked !== d.cfg.enabled) $('trfOn').checked = d.cfg.enabled;
+  $('trfFail').hidden = d.ok;
+  $('trfEmpty').hidden = d.sites.length > 0;
+  const body = $('trfBody');
+  body.textContent = '';
+  for (const s of d.sites) {
+    if (s.own) {
+      body.append(el('tr', {}, el('td', { textContent: s.domain }), el('td', { colSpan: 5, textContent: t('trf.own'), style: 'color:var(--muted)' })));
+      continue;
+    }
+    const e5 = el('td', { textContent: String(s.e5) });
+    if (s.e5 > 0) e5.style.color = 'var(--danger)';
+    body.append(
+      el('tr', {}, el('td', { textContent: s.domain }), el('td', { textContent: String(s.hits) }), el('td', { textContent: trfFmtBytes(s.bytes) }), el('td', { textContent: String(s.e4) }), e5, el('td', { textContent: s.avgMs === null ? '—' : String(s.avgMs) }))
+    );
+  }
+  const sel = $('trfGraphSite');
+  const ids = ['*', ...d.sites.filter((s) => !s.own).map((s) => s.domain)];
+  if ([...sel.options].map((o) => o.value).join('|') !== ids.join('|')) {
+    const keep = sel.value;
+    sel.textContent = '';
+    for (const id of ids) sel.append(el('option', { value: id, textContent: id === '*' ? '' : id }));
+    sel.value = ids.includes(keep) ? keep : '*';
+  }
+  sel.options[0].textContent = t('trf.all');
+}
+async function trfGraph() {
+  const cv = $('trfCanvas');
+  let pts = [];
+  try {
+    pts = (await window.api.trafficHistory($('trfGraphSite').value || '*', trfRange())).points;
+  } catch {}
+  const css = getComputedStyle(document.documentElement);
+  const col = (n, f) => css.getPropertyValue(n).trim() || f;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 600;
+  const H = 180;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const maxHits = pts.reduce((m, p) => Math.max(m, p.hits), 0);
+  $('trfGraphEmpty').hidden = maxHits > 0;
+  if (!pts.length || maxHits <= 0) return;
+  const padL = 46, padR = 10, padT = 10, padB = 22;
+  const pw = W - padL - padR;
+  const ph = H - padT - padB;
+  const need = Math.max(1, Math.ceil(maxHits / 4));
+  const p10 = Math.pow(10, Math.floor(Math.log10(need)));
+  const step = [1, 2, 5, 10].map((k) => k * p10).find((v) => v >= need);
+  const top = step * 4;
+  const Y = (v) => padT + ph - (v / top) * ph;
+  g.font = '11px sans-serif';
+  g.fillStyle = col('--muted', '#64748b');
+  g.strokeStyle = col('--border', '#e2e8f0');
+  g.lineWidth = 1;
+  g.textAlign = 'right';
+  g.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const v = step * i;
+    g.beginPath();
+    g.moveTo(padL, Math.round(Y(v)) + 0.5);
+    g.lineTo(W - padR, Math.round(Y(v)) + 0.5);
+    g.stroke();
+    g.fillText(String(v), padL - 6, Y(v));
+  }
+  const slot = pw / pts.length;
+  const bw = Math.max(1, slot - (slot > 4 ? 1 : 0));
+  pts.forEach((p, k) => {
+    if (!p.hits) return;
+    const x = padL + k * slot;
+    g.fillStyle = col('--accent', '#2563eb');
+    g.fillRect(x, Y(p.hits), bw, Y(0) - Y(p.hits));
+    if (p.e5) {
+      g.fillStyle = col('--danger', '#dc2626');
+      g.fillRect(x, Y(p.e5), bw, Y(0) - Y(p.e5));
+    }
+  });
+  const fmtT = (ts) => (trfRange() > 24 ? new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+  g.fillStyle = col('--muted', '#64748b');
+  g.textBaseline = 'top';
+  g.textAlign = 'left';
+  g.fillText(fmtT(pts[0].t), padL, H - padB + 6);
+  g.textAlign = 'right';
+  g.fillText(fmtT(pts[pts.length - 1].t), W - padR, H - padB + 6);
+}
+async function trfLoad() {
+  try {
+    trfData = await window.api.trafficGet(trfRange());
+    trfRender();
+    await trfGraph();
+  } catch {}
+}
+function trfSave() {
+  window.api
+    .trafficSetConfig({ enabled: $('trfOn').checked, hours: trfRange() })
+    .then((d) => {
+      trfData = d;
+      trfRender();
+      trfGraph();
+    })
+    .catch(() => {});
+}
+$('trfOn').addEventListener('change', trfSave);
+$('trfRange').addEventListener('change', trfLoad);
+$('trfGraphSite').addEventListener('change', trfGraph);
+window.api.onTrafficUpdate(() => {
+  if (currentPage === 'monitor') trfLoad();
 });
 
 // ---------- CPU ও RAM (R1 ধাপ ২) ----------

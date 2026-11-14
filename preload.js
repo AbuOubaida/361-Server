@@ -151,6 +151,11 @@ contextBridge.exposeInMainWorld('api', {
   resNow: () => ipcRenderer.invoke('res:now'),
   resSetConfig: (cfg) => ipcRenderer.invoke('res:setConfig', cfg),
   onResUpdate: (callback) => ipcRenderer.on('monitor:res', () => callback()),
+  // সাইট ধরে হিট (R1 ধাপ ৩b)
+  trafficGet: (hours) => ipcRenderer.invoke('traffic:get', hours),
+  trafficHistory: (domain, hours) => ipcRenderer.invoke('traffic:history', domain, hours),
+  trafficSetConfig: (cfg) => ipcRenderer.invoke('traffic:setConfig', cfg),
+  onTrafficUpdate: (callback) => ipcRenderer.on('monitor:traffic', () => callback()),
 
   // ভাষা
   getLang: () => ipcRenderer.invoke('lang:get'),

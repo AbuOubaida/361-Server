@@ -12,6 +12,7 @@ const os = require('os');
 const dns = require('dns');
 const monitor = require('./monitor'); // R1: সাইট মনিটরিং (ধাপ ১)
 const resources = require('./resources'); // R1 ধাপ ২: প্রসেস গ্রুপ ধরে CPU/RAM
+const traffic = require('./traffic'); // R1 ধাপ ৩b: সাইট ধরে হিট (access log থেকে)
 
 // ====== এখানে আপনার লিংক বসান ======
 const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
@@ -1478,6 +1479,7 @@ function notifyUser(title, body) {
 }
 let monitorApi = null;
 let resApi = null;
+let trafficApi = null;
 // ধাপ ২: এখন কোন প্রসেস গ্রুপ চালু আছে (নাম -> .exe)। একই নামের অন্য প্রোগ্রামের প্রসেসও গোনা হয় (tasklist-এ parent নেই)
 function resGroups() {
   const g = [];
@@ -1489,6 +1491,39 @@ function resGroups() {
   if (dbRun.mysql) g.push({ id: 'mysql', name: 'MySQL', images: ['mysqld.exe'] });
   if (dbRun.postgres) g.push({ id: 'postgres', name: 'PostgreSQL', images: ['postgres.exe'] });
   return g;
+}
+// ধাপ ৩b: কোন সাইটের কোন log ফাইল পড়া হবে। ফেরত: [{domain, kind, file, own}]
+// log ফাইল আছে = পড়া হবে (Nginx ও Apache দুই সার্ভারের ফোল্ডারই দেখা হয়, সার্ভার বদলালেও ইতিহাস থাকে);
+// ফাইল নেই + সাইটের conf ব্যবহারকারীর নিজের (marker মোছা) = own (পরিসংখ্যান নেই); ফাইল নেই + conf অ্যাপের = এখনো হিট আসেনি (শূন্য সারি)
+function trafficLogFiles() {
+  const out = [];
+  let sites = [];
+  try {
+    sites = scanSites().filter((s) => !s.disabled && /^[A-Za-z0-9._-]+$/.test(s.domain));
+  } catch {
+    return out;
+  }
+  for (const s of sites) {
+    let found = false;
+    let custom = false;
+    for (const id of ['nginx', 'apache']) {
+      const svc = SERVICES[id];
+      if (!svc || !svc.dir) continue;
+      try {
+        const file = path.join(svc.dir, 'logs', 'sites', `${s.domain}.access.log`);
+        if (fs.existsSync(file)) {
+          out.push({ domain: s.domain, kind: id, file, own: false });
+          found = true;
+        }
+        const cf = path.join(sitesEnabledDir(svc), `${s.domain}.conf`);
+        if (fs.existsSync(cf) && !fs.readFileSync(cf, 'utf8').startsWith(AUTO_MARK)) custom = true;
+      } catch {}
+    }
+    if (found) continue;
+    if (custom) out.push({ domain: s.domain, kind: 'nginx', file: '', own: true });
+    else out.push({ domain: s.domain, kind: 'nginx', file: path.join(SERVICES.nginx && SERVICES.nginx.dir ? SERVICES.nginx.dir : ROOT_DIR, 'logs', 'sites', `${s.domain}.access.log`), own: false });
+  }
+  return out;
 }
 function applyLoginItem() {
   try {
@@ -5350,6 +5385,21 @@ app.whenReady().then(() => {
   } catch (err) {
     resApi = null;
   }
+  // R1 ধাপ ৩b: সাইট ধরে হিট (আলাদা try/catch)
+  try {
+    trafficApi = traffic.init({
+      ipcMain,
+      getSettings: () => settings,
+      saveSettings: () => saveSettings(settings),
+      dataFile: () => path.join(ROOT_DIR, 'data', 'traffic.json'),
+      getLogFiles: trafficLogFiles,
+      send: (ch, p) => {
+        if (win && !win.isDestroyed()) win.webContents.send(ch, p);
+      },
+    });
+  } catch (err) {
+    trafficApi = null;
+  }
   if (!settings.wwwDir) {
     win.webContents.once('did-finish-load', () => askWwwFolderFirstRun());
   } else {
@@ -5373,6 +5423,9 @@ app.on('before-quit', () => {
   } catch {}
   try {
     if (resApi) resApi.stop();
+  } catch {}
+  try {
+    if (trafficApi) trafficApi.stop();
   } catch {}
   if (running) running.procs.forEach((p) => killTree(p.pid));
   for (const r of Object.values(nodeRun)) killTree(r.proc.pid); // Node অ্যাপগুলোও বন্ধ
