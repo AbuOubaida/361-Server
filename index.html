@@ -280,6 +280,14 @@
     table { width: 100%; border-collapse: collapse; }
     th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 8px 12px; }
     td { padding: 12px; border-top: 1px solid var(--border); vertical-align: middle; }
+    .mdot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+    .mdot.up { background: var(--ok); box-shadow: 0 0 0 3px rgba(34, 197, 94, .22); }
+    .mdot.down { background: var(--danger); box-shadow: 0 0 0 3px rgba(220, 38, 38, .22); }
+    .mon-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; margin: 0; }
+    .hint.mon-empty[hidden] { display: none; }
+    .mon-lbl { color: var(--muted); font-size: 13px; }
+    .mon-ev { padding: 4px 0; border-top: 1px solid var(--border); }
+    .mon-ev:first-child { border-top: 0; }
     td.path { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; color: var(--muted); word-break: break-all; min-width: 200px; }
     a.link { color: var(--accent); cursor: pointer; text-decoration: none; font-weight: 600; }
     a.link:hover { text-decoration: underline; }
@@ -370,6 +378,10 @@
       <button class="nav" data-page="sites">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
         <span data-i18n="nav.sites">সাইটসমূহ</span> <span class="count" id="siteCount">0</span>
+      </button>
+      <button class="nav" data-page="monitor">
+        <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        <span data-i18n="nav.monitor">মনিটরিং</span>
       </button>
       <button class="nav" data-page="tools">
         <svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
@@ -480,6 +492,74 @@
             <div class="card-title" data-i18n="node.title">Node.js অ্যাপ</div>
             <div class="hint" style="margin-top:6px" data-i18n-html="node.hint">www-র যে সাবফোল্ডারে package.json আছে সেটা Node অ্যাপ।</div>
             <div id="nodeList"></div>
+          </div>
+        </section>
+
+        <!-- ======== মনিটরিং (R1 ধাপ ১) ======== -->
+        <section id="page-monitor" class="page">
+          <div class="card">
+            <div class="row first">
+              <label class="switch"><input type="checkbox" id="monOn"><i></i><b data-i18n="mon.on">মনিটরিং চালু</b></label>
+              <label class="switch"><input type="checkbox" id="monAlerts"><i></i><b data-i18n="mon.alerts">বন্ধ হলে জানান</b></label>
+            </div>
+            <div class="row">
+              <span class="mon-lbl" data-i18n="mon.every">পরীক্ষা করুন প্রতি</span>
+              <select id="monInterval" style="width:auto">
+                <option value="30" data-i18n="mon.int.30">৩০ সেকেন্ড</option>
+                <option value="60" data-i18n="mon.int.60">১ মিনিট</option>
+                <option value="300" data-i18n="mon.int.300">৫ মিনিট</option>
+              </select>
+              <span class="mon-lbl" data-i18n="mon.keep">ইতিহাস রাখুন</span>
+              <select id="monKeep" style="width:auto">
+                <option value="1" data-i18n="mon.keep.1">১ দিন</option>
+                <option value="7" data-i18n="mon.keep.7">৭ দিন</option>
+                <option value="30" data-i18n="mon.keep.30">৩০ দিন</option>
+              </select>
+              <button id="monNow" class="btn sm accent" data-i18n="mon.now">↻ এখনই দেখুন</button>
+            </div>
+            <div class="hint warn" id="monWebOff" hidden data-i18n="mon.webOff">ওয়েব সার্ভার বন্ধ, তাই সাইট পরীক্ষা হচ্ছে না (শুধু বাইরের URL পরীক্ষা হয়)।</div>
+            <div class="hint" data-i18n="mon.hint">প্রতিটি চালু সাইটে অনুরোধ পাঠিয়ে দেখা হয় সাড়া দিচ্ছে কিনা। সার্ভার বা Node অ্যাপ বন্ধ রাখলে সেটা "বন্ধ করা" ধরা হয়, সতর্কবার্তা আসে না। পরপর ২ বার সাড়া না পেলে তবেই জানানো হয়।</div>
+          </div>
+
+          <div class="card" style="padding: 8px 8px 6px; overflow-x: auto;">
+            <table>
+              <thead><tr><th style="width:36px"></th><th data-i18n="mon.col.site">সাইট / URL</th><th style="width:90px" data-i18n="mon.col.state">অবস্থা</th><th style="width:90px" data-i18n="mon.col.code">কোড</th><th style="width:90px" data-i18n="mon.col.ms">সাড়া (ms)</th><th style="width:110px" data-i18n="mon.col.up">আপটাইম ২৪ ঘণ্টা</th><th style="width:130px" data-i18n="mon.col.last">শেষ পরীক্ষা</th><th style="width:80px"></th></tr></thead>
+              <tbody id="monBody"></tbody>
+            </table>
+            <div class="hint" id="monEmpty" hidden style="padding: 4px 12px 8px" data-i18n="mon.none">কোনো সাইট নেই। Sites পেজে সাইট বানান অথবা নিচে বাইরের URL যোগ করুন।</div>
+          </div>
+
+          <div class="card">
+            <div class="card-title" data-i18n="mon.graph.title">সাড়া দেওয়ার সময়</div>
+            <div class="row">
+              <select id="monGraphTarget" style="width:auto; max-width:100%"></select>
+              <select id="monGraphRange" style="width:auto">
+                <option value="1" data-i18n="mon.range.1">১ ঘণ্টা</option>
+                <option value="6" data-i18n="mon.range.6">৬ ঘণ্টা</option>
+                <option value="24" data-i18n="mon.range.24">২৪ ঘণ্টা</option>
+                <option value="168" data-i18n="mon.range.168">৭ দিন</option>
+              </select>
+            </div>
+            <div style="position:relative; margin-top:12px">
+              <canvas id="monCanvas" height="200" style="width:100%; height:200px; display:block"></canvas>
+              <div class="hint mon-empty" id="monGraphEmpty" hidden data-i18n="mon.graph.empty">এখনো যথেষ্ট তথ্য নেই</div>
+            </div>
+            <div class="hint" data-i18n="mon.graph.legend">নীল রেখা = গড় সাড়া (ms)। লাল দাগ = ওই সময়ে সাড়া পাওয়া যায়নি। প্রতি সাইটে কত হিট এসেছে তার গ্রাফ পরের ধাপে আসবে।</div>
+          </div>
+
+          <div class="card">
+            <div class="card-title" data-i18n="mon.url.title">বাইরের URL</div>
+            <div class="card-sub" data-i18n="mon.url.sub">অন্য পিসির বা ইন্টারনেটের সাইটও দেখা যায় (শুধু চালু/বন্ধ, কোড ও সাড়ার সময়)</div>
+            <div class="row">
+              <input id="monUrl" type="text" maxlength="200" placeholder="https://example.com" style="width:auto; flex:1; min-width:200px;">
+              <button id="monUrlAdd" class="btn sm primary" data-i18n="mon.url.add">+ যোগ করুন</button>
+            </div>
+            <div class="hint" id="monUrlMsg" hidden></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title" data-i18n="mon.events.title">সাম্প্রতিক ঘটনা</div>
+            <div id="monEvents" class="hint" style="margin-top:8px"></div>
           </div>
         </section>
 

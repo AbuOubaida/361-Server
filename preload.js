@@ -137,6 +137,15 @@ contextBridge.exposeInMainWorld('api', {
   appSetBehavior: (b) => ipcRenderer.invoke('app:setBehavior', b),
   onAutoStartAll: (callback) => ipcRenderer.on('auto:startAll', () => callback()),
 
+  // সাইট মনিটরিং (R1)
+  monitorGet: () => ipcRenderer.invoke('monitor:get'),
+  monitorHistory: (key, hours) => ipcRenderer.invoke('monitor:history', key, hours),
+  monitorProbeNow: () => ipcRenderer.invoke('monitor:probeNow'),
+  monitorSetConfig: (cfg) => ipcRenderer.invoke('monitor:setConfig', cfg),
+  monitorAddUrl: (url) => ipcRenderer.invoke('monitor:addUrl', url),
+  monitorRemoveUrl: (url) => ipcRenderer.invoke('monitor:removeUrl', url),
+  onMonitorUpdate: (callback) => ipcRenderer.on('monitor:update', () => callback()),
+
   // ভাষা
   getLang: () => ipcRenderer.invoke('lang:get'),
   setLang: (lang) => ipcRenderer.invoke('lang:set', lang),

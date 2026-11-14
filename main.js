@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog, shell, Tray, nativeImage } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, Tray, nativeImage, Notification } = require('electron');
 const { spawn, exec, execFile, execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const os = require('os');
 const dns = require('dns');
+const monitor = require('./monitor'); // R1: সাইট মনিটরিং (ধাপ ১)
 
 // ====== এখানে আপনার লিংক বসান ======
 const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
@@ -1430,6 +1431,19 @@ function buildTray() {
     tray = null; // ট্রে না থাকলে X চাপলে অ্যাপ আগের মতো বন্ধ হবে, যেন অ্যাপ হারিয়ে না যায়
   }
 }
+// মনিটরিং সতর্কবার্তা: ট্রে বেলুন (Windows-এ টোস্ট হয়ে আসে); ট্রে না থাকলে সাধারণ নোটিফিকেশন
+function notifyUser(title, body) {
+  try {
+    if (tray && !tray.isDestroyed()) {
+      tray.displayBalloon({ title, content: body });
+      return;
+    }
+  } catch {}
+  try {
+    if (Notification.isSupported()) new Notification({ title, body }).show();
+  } catch {}
+}
+let monitorApi = null;
 function applyLoginItem() {
   try {
     app.setLoginItemSettings({
@@ -5253,6 +5267,26 @@ app.whenReady().then(() => {
   createWindow();
   if (keepRunningOn()) buildTray();
   applyLoginItem();
+  // R1 ধাপ ১: সাইট মনিটরিং (প্রথম পরীক্ষা ৫ সেকেন্ড পর; অ্যাপ বন্ধ হলে before-quit-এ থামে)
+  try {
+    monitorApi = monitor.init({
+      ipcMain,
+      getSettings: () => settings,
+      saveSettings: () => saveSettings(settings),
+      dataFile: () => path.join(ROOT_DIR, 'data', 'monitor.json'),
+      tr,
+      getSites: () => scanSites().filter((s) => !s.disabled).map((s) => ({ name: s.name, domain: s.domain, node: !!s.node })),
+      getWeb: () => (running ? { port: running.webPort } : null),
+      nodeUp: (d) => !!(nodeRun[d] && nodeRun[d].task === 'run'),
+      notify: notifyUser,
+      send: (ch, p) => {
+        if (win && !win.isDestroyed()) win.webContents.send(ch, p);
+      },
+      status: sendStatus,
+    });
+  } catch (err) {
+    monitorApi = null; // মনিটরিং না চললেও বাকি অ্যাপ যেন ঠিক চলে
+  }
   if (!settings.wwwDir) {
     win.webContents.once('did-finish-load', () => askWwwFolderFirstRun());
   } else {
@@ -5271,6 +5305,9 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   quitting = true;
+  try {
+    if (monitorApi) monitorApi.stop();
+  } catch {}
   if (running) running.procs.forEach((p) => killTree(p.pid));
   for (const r of Object.values(nodeRun)) killTree(r.proc.pid); // Node অ্যাপগুলোও বন্ধ
   // ডাটাবেসকে আগে নিয়ম মেনে বন্ধ করার চেষ্টা (ডাটা নিরাপদ রাখতে)

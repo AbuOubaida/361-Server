@@ -154,6 +154,7 @@ function applyStatic() {
   const meta = PAGES[currentPage];
   $('pageTitle').textContent = t(meta[0]);
   $('pageSub').textContent = t(meta[1]);
+  if (currentPage === 'monitor') monRender(); // গতিশীল লেখা (টেবিল, ঘটনা) নতুন ভাষায়
 }
 
 async function setLang(lang) {
@@ -242,6 +243,7 @@ function setDisabled(btn, value) {
 const PAGES = {
   services: ['page.services', 'page.services.sub'],
   sites: ['page.sites', 'page.sites.sub'],
+  monitor: ['page.monitor', 'page.monitor.sub'],
   tools: ['page.tools', 'page.tools.sub'],
   backup: ['page.backup', 'page.backup.sub'],
   settings: ['page.settings', 'page.settings.sub'],
@@ -256,6 +258,7 @@ document.querySelectorAll('.nav').forEach((btn) =>
     $('pageTitle').textContent = t(PAGES[page][0]);
     $('pageSub').textContent = t(PAGES[page][1]);
     if (page === 'sites') loadSites();
+    if (page === 'monitor') monLoad();
     if (page === 'tools') loadTools();
     if (page === 'backup') bkLoad();
     if (page === 'settings') appBehaviorLoad();
@@ -1336,6 +1339,264 @@ function renderTools(tools) {
 async function loadTools() {
   renderTools(await window.api.listTools());
 }
+
+// ---------- সাইট মনিটরিং (R1 ধাপ ১) ----------
+// সব ডাটা main.js-এর monitor.js থেকে আসে; এখানে শুধু টেবিল, canvas গ্রাফ ও সেটিং। ব্যবহারকারীর লেখা (URL) শুধু textContent দিয়ে বসে।
+let monData = null;
+let monResizeT = null;
+
+const monTime = (ts) => (ts ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—');
+function monErr(err) {
+  if (!err) return '';
+  const k = 'mon.err.' + err;
+  const s = t(k);
+  return s === k ? err : s;
+}
+
+function monRender() {
+  const d = monData;
+  if (!d) return;
+  const c = d.cfg;
+  if ($('monOn').checked !== c.enabled) $('monOn').checked = c.enabled;
+  if ($('monAlerts').checked !== c.alerts) $('monAlerts').checked = c.alerts;
+  if ($('monInterval').value !== String(c.intervalSec)) $('monInterval').value = String(c.intervalSec);
+  if ($('monKeep').value !== String(c.keepDays)) $('monKeep').value = String(c.keepDays);
+  $('monWebOff').hidden = d.web;
+
+  const body = $('monBody');
+  body.textContent = '';
+  for (const x of d.targets) {
+    const live = x.state === 'up' || x.state === 'down';
+    const stateTd = el('td', { textContent: t('mon.state.' + x.state) });
+    if (x.state === 'down') stateTd.style.color = 'var(--danger)';
+    const nameTd = el('td', {}, x.name);
+    if (x.node) nameTd.append(el('span', { className: 'badge tool', textContent: t('mon.badge.node'), style: 'margin-left:8px' }));
+    const tr = el(
+      'tr',
+      {},
+      el('td', {}, el('span', { className: 'mdot' + (live ? ' ' + x.state : '') })),
+      nameTd,
+      stateTd,
+      el('td', { textContent: live ? (x.code > 0 ? String(x.code) : monErr(x.err) || '—') : '—' }),
+      el('td', { textContent: live && x.code > 0 ? String(x.ms) : '—', title: x.avg24 !== null ? '24h: ' + x.avg24 + ' ms' : '' }),
+      el('td', { textContent: x.up24 !== null ? x.up24 + '%' : '—' }),
+      el('td', { textContent: monTime(x.ts), style: 'white-space:nowrap' })
+    );
+    const act = el('td');
+    if (x.kind === 'url') {
+      const b = el('button', { className: 'btn sm danger', textContent: t('mon.remove') });
+      b.addEventListener('click', async () => {
+        try {
+          monData = await window.api.monitorRemoveUrl(x.url);
+          monRender();
+          monGraph();
+        } catch {}
+      });
+      act.append(b);
+    }
+    tr.append(act);
+    body.append(tr);
+  }
+  $('monEmpty').hidden = d.targets.length > 0;
+
+  // গ্রাফের সাইট-বাছাই (তালিকা বদলালেই নতুন করে বানানো, বাছাই ধরে রাখা)
+  const sel = $('monGraphTarget');
+  const keys = d.targets.map((x) => x.key);
+  if ([...sel.options].map((o) => o.value).join('|') !== keys.join('|')) {
+    const keep = sel.value;
+    sel.textContent = '';
+    for (const x of d.targets) sel.append(el('option', { value: x.key, textContent: x.name }));
+    sel.value = keys.includes(keep) ? keep : keys[0] || '';
+  }
+
+  const ev = $('monEvents');
+  ev.textContent = '';
+  if (!d.events.length) ev.textContent = t('mon.events.none');
+  for (const e of d.events) {
+    const msg = e.type === 'down' ? t('mon.ev.down', e.name, e.why || '') : t('mon.ev.up', e.name, e.mins);
+    ev.append(el('div', { className: 'mon-ev', textContent: new Date(e.ts).toLocaleString() + ' — ' + msg }));
+  }
+}
+
+async function monGraph() {
+  const cv = $('monCanvas');
+  const key = $('monGraphTarget').value;
+  const hours = Number($('monGraphRange').value) || 1;
+  let h = null;
+  if (key) {
+    try {
+      h = await window.api.monitorHistory(key, hours);
+    } catch {}
+  }
+  const css = getComputedStyle(document.documentElement);
+  const col = (n, f) => css.getPropertyValue(n).trim() || f;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 600;
+  const H = 200;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const empty = !h || !h.buckets.length;
+  $('monGraphEmpty').hidden = !empty;
+  if (empty) return;
+
+  const padL = 52, padR = 10, padT = 10, padB = 24;
+  const pw = W - padL - padR;
+  const ph = H - padT - padB;
+  // স্কেল: একটা ধীর অনুরোধে (যেমন php-cgi জেগে ওঠার প্রথম ২-৩ সেকেন্ড) বাকি রেখা মেঝেতে লেপ্টে না যায়,
+  // তাই অক্ষের মাথা বেশির ভাগ মানের (৮০ শতাংশ বিন্দুর) ২ গুণে আটকানো; তার চেয়ে বড় মান মাথায় ত্রিভুজ + আসল মান লিখে দেখানো
+  const vals = h.buckets.filter((b) => b.ms !== null).map((b) => b.ms).sort((x, y) => x - y);
+  const realMax = vals.length ? vals[vals.length - 1] : 0;
+  const q80 = vals.length ? vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.8))] : 0;
+  const maxMs = Math.max(20, Math.min(realMax, Math.max(20, q80 * 2)));
+  const p10 = Math.pow(10, Math.floor(Math.log10(maxMs)));
+  const top = [1, 2, 5, 10].map((k) => k * p10).find((v) => v >= maxMs);
+  const X = (ts) => padL + ((ts - h.from) / (h.to - h.from)) * pw;
+  const Y = (v) => padT + ph - (Math.min(v, top) / top) * ph;
+  const fmtMs = (v) => (v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms');
+  const muted = col('--muted', '#64748b');
+  g.font = '11px sans-serif';
+  g.fillStyle = muted;
+  g.strokeStyle = col('--border', '#e2e8f0');
+  g.lineWidth = 1;
+  g.textAlign = 'right';
+  g.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const v = (top * i) / 4;
+    g.beginPath();
+    g.moveTo(padL, Math.round(Y(v)) + 0.5);
+    g.lineTo(W - padR, Math.round(Y(v)) + 0.5);
+    g.stroke();
+    g.fillText(Math.round(v) + ' ms', padL - 6, Y(v));
+  }
+  g.textBaseline = 'top';
+  const lbl = (ts) => (h.to - h.from > 36 * 3600000 ? new Date(ts).toLocaleDateString([], { day: 'numeric', month: 'short' }) : new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+  g.textAlign = 'left';
+  g.fillText(lbl(h.from), padL, H - padB + 6);
+  g.textAlign = 'center';
+  g.fillText(lbl((h.from + h.to) / 2), padL + pw / 2, H - padB + 6);
+  g.textAlign = 'right';
+  g.fillText(lbl(h.to), W - padR, H - padB + 6);
+
+  // ব্যর্থতা: লাল দাগ
+  g.fillStyle = col('--danger', '#dc2626');
+  g.globalAlpha = 0.55;
+  for (const b of h.buckets) if (b.fail > 0) g.fillRect(Math.round(X(b.t + h.bucketMs / 2)) - 1, padT, 3, ph);
+  g.globalAlpha = 1;
+
+  // সাড়ার রেখা: ঝুড়িগুলোর সাধারণ (median) ব্যবধানের ৩ গুণের বেশি ফাঁক থাকলে (সার্ভার বন্ধ ছিল ইত্যাদি) রেখা ছিঁড়ে যায়
+  const steps = [];
+  for (let i = 1; i < h.buckets.length; i++) steps.push(h.buckets[i].t - h.buckets[i - 1].t);
+  steps.sort((a, b) => a - b);
+  const brk = Math.max(h.bucketMs, steps.length ? steps[Math.floor(steps.length / 2)] : 0) * 3;
+  g.strokeStyle = col('--accent', '#2563eb');
+  g.fillStyle = g.strokeStyle;
+  g.lineWidth = 2;
+  g.lineJoin = 'round';
+  let prev = null;
+  g.beginPath();
+  for (const b of h.buckets) {
+    if (b.ms === null) {
+      prev = null;
+      continue;
+    }
+    const x = X(b.t + h.bucketMs / 2);
+    const y = Y(b.ms);
+    if (prev === null || b.t - prev > brk) g.moveTo(x, y);
+    else g.lineTo(x, y);
+    prev = b.t;
+  }
+  g.stroke();
+  if (h.buckets.length <= 80) {
+    for (const b of h.buckets) {
+      if (b.ms === null || b.ms > top) continue;
+      g.beginPath();
+      g.arc(X(b.t + h.bucketMs / 2), Y(b.ms), 2.5, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+  // অক্ষের মাথার ওপরের মান: মাথায় ত্রিভুজ + আসল ms (সবচেয়ে বড় ৫টায় লেখা)
+  const clipped = h.buckets.filter((b) => b.ms !== null && b.ms > top);
+  const labelled = new Set([...clipped].sort((x, y) => y.ms - x.ms).slice(0, 5));
+  g.fillStyle = col('--danger', '#dc2626');
+  g.textBaseline = 'top';
+  for (const b of clipped) {
+    const x = X(b.t + h.bucketMs / 2);
+    g.beginPath();
+    g.moveTo(x, padT);
+    g.lineTo(x - 4, padT + 7);
+    g.lineTo(x + 4, padT + 7);
+    g.closePath();
+    g.fill();
+    if (labelled.has(b)) {
+      const right = x > W - padR - 48;
+      g.textAlign = right ? 'right' : 'left';
+      g.fillText(fmtMs(b.ms), right ? x - 6 : x + 6, padT + 1);
+    }
+  }
+}
+
+async function monLoad() {
+  try {
+    monData = await window.api.monitorGet();
+    monRender();
+    await monGraph();
+  } catch {}
+}
+function monSave() {
+  window.api
+    .monitorSetConfig({ enabled: $('monOn').checked, alerts: $('monAlerts').checked, intervalSec: Number($('monInterval').value), keepDays: Number($('monKeep').value) })
+    .then((d) => {
+      monData = d;
+      monRender();
+    })
+    .catch(() => {});
+}
+['monOn', 'monAlerts', 'monInterval', 'monKeep'].forEach((id) => $(id).addEventListener('change', monSave));
+$('monGraphTarget').addEventListener('change', monGraph);
+$('monGraphRange').addEventListener('change', monGraph);
+$('monNow').addEventListener('click', async () => {
+  const b = $('monNow');
+  b.disabled = true;
+  try {
+    monData = await window.api.monitorProbeNow();
+    monRender();
+    await monGraph();
+  } catch {}
+  b.disabled = false;
+});
+async function monAddUrl() {
+  const box = $('monUrl');
+  const msg = $('monUrlMsg');
+  if (!box.value.trim()) return;
+  try {
+    const r = await window.api.monitorAddUrl(box.value);
+    msg.hidden = false;
+    msg.classList.toggle('warn', !r.ok);
+    msg.textContent = r.ok ? t('mon.url.ok') : t('mon.url.' + r.reason);
+    if (r.ok) {
+      box.value = '';
+      monData = r.data;
+      monRender();
+      monGraph();
+    }
+  } catch {}
+}
+$('monUrlAdd').addEventListener('click', monAddUrl);
+$('monUrl').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') monAddUrl();
+});
+window.addEventListener('resize', () => {
+  if (currentPage !== 'monitor') return;
+  clearTimeout(monResizeT);
+  monResizeT = setTimeout(monGraph, 150);
+});
+$('themeBtn').addEventListener('click', () => setTimeout(() => currentPage === 'monitor' && monGraph(), 100));
+window.api.onMonitorUpdate(() => {
+  if (currentPage === 'monitor') monLoad();
+});
 
 // ---------- শুরুতে ----------
 window.api.onStatus(setStatus);
