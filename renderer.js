@@ -17,6 +17,123 @@ function el(tag, props = {}, ...children) {
   return node;
 }
 
+// ---------- R5: খোঁজার বাক্স (সারি শুধু লুকায়, কিছু মোছে না; একাধিক শব্দ = সব শব্দ মিলতে হবে) ----------
+// textOf: সারির দেখা-যাওয়া লেখা + select-এর বাছা মান + text/number ঘরের মান (লুকানো অংশ ও Node log বাদ)
+function textOf(node) {
+  let out = '';
+  (function walk(n) {
+    if (n.nodeType === 3) out += n.nodeValue + ' ';
+    else if (n.nodeType === 1) {
+      if (n.hidden || (n.classList && n.classList.contains('node-log'))) return;
+      if (n.tagName === 'SELECT') out += (n.options[n.selectedIndex] ? n.options[n.selectedIndex].text : '') + ' ';
+      else if (n.tagName === 'INPUT') {
+        if (n.type === 'text' || n.type === 'number') out += n.value + ' ';
+      } else n.childNodes.forEach(walk);
+    }
+  })(node);
+  return out.replace(/\s+/g, ' ').toLowerCase();
+}
+// getItems() = এখন খোঁজার আওতায় থাকা সারির element-এর তালিকা (প্রতিবার নতুন করে নেওয়া হয়)
+function makeSearch(getItems) {
+  const inp = el('input', { type: 'search', className: 'search-input', placeholder: t('search.ph') });
+  inp.dataset.i18nPh = 'search.ph';
+  const cnt = el('span', { className: 'search-count' });
+  // আইকন inline SVG (CSP-তে data: ছবি বন্ধ, তাই CSS background নয়)
+  const wrap = el('span', { className: 'search-wrap' });
+  wrap.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>';
+  wrap.appendChild(inp);
+  const box = el('div', { className: 'searchbar' }, wrap, cnt);
+  const apply = () => {
+    const words = inp.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const items = getItems();
+    if (!words.length) {
+      items.forEach((it) => (it.style.display = ''));
+      cnt.textContent = '';
+      return;
+    }
+    let shown = 0;
+    for (const it of items) {
+      const q = textOf(it);
+      const ok = words.every((w) => q.includes(w));
+      it.style.display = ok ? '' : 'none';
+      if (ok) shown++;
+    }
+    cnt.textContent = t('search.count', shown, items.length);
+  };
+  inp.addEventListener('input', apply);
+  return { box, apply, input: inp };
+}
+
+// ---------- R6: চেহারা (থিম: অটো/হালকা/গাঢ় + মূল রং) ----------
+// বাছাই localStorage-এ থাকে (ভাষার মতো)। data-theme সবসময় "light"/"dark" বসে ("অটো" হলে PC-র মান থেকে হিসাব)।
+const LOOK_ACCENTS = { blue: '#2563eb', green: '#16a34a', purple: '#7c3aed', orange: '#ea580c' };
+let lookMode = 'auto';
+let lookAccent = 'blue';
+const lookMq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+try {
+  const m = localStorage.getItem('themeMode');
+  if (m === 'auto' || m === 'light' || m === 'dark') lookMode = m;
+  const a = localStorage.getItem('accent');
+  if (a && LOOK_ACCENTS[a]) lookAccent = a;
+} catch {}
+const lookIsDark = () => lookMode === 'dark' || (lookMode === 'auto' && !!lookMq && lookMq.matches);
+function lookApply() {
+  const root = document.documentElement;
+  root.dataset.theme = lookIsDark() ? 'dark' : 'light';
+  if (lookAccent === 'blue') delete root.dataset.accent;
+  else root.dataset.accent = lookAccent;
+  lookSync();
+}
+function lookSet(mode, accent) {
+  if (mode) lookMode = mode;
+  if (accent) lookAccent = accent;
+  try {
+    localStorage.setItem('themeMode', lookMode);
+    localStorage.setItem('accent', lookAccent);
+  } catch {}
+  lookApply();
+}
+// সেটিংসের বোতাম ও সাইডবারের দ্রুত বোতাম: বাছা অবস্থা ও লেখা (ভাষা বদলালেও এখান থেকে নতুন হয়)
+function lookSync() {
+  const th = $('lookTheme');
+  const ac = $('lookAccent');
+  if (th && !th.children.length) {
+    for (const m of ['auto', 'light', 'dark']) {
+      const b = el('button', { type: 'button' });
+      b.dataset.mode = m;
+      b.addEventListener('click', () => lookSet(m, null));
+      th.appendChild(b);
+    }
+  }
+  if (ac && !ac.children.length) {
+    for (const k of Object.keys(LOOK_ACCENTS)) {
+      const b = el('button', { type: 'button', className: 'swatch' });
+      b.dataset.accent = k;
+      b.style.background = LOOK_ACCENTS[k];
+      b.addEventListener('click', () => lookSet(null, k));
+      ac.appendChild(b);
+    }
+  }
+  if (th) for (const b of th.children) {
+    b.textContent = t('look.' + b.dataset.mode);
+    b.classList.toggle('on', b.dataset.mode === lookMode);
+  }
+  if (ac) for (const b of ac.children) {
+    b.title = t('look.' + b.dataset.accent);
+    b.classList.toggle('on', b.dataset.accent === lookAccent);
+  }
+  const q = $('themeBtn');
+  if (q) {
+    const dark = lookIsDark();
+    q.firstChild.nodeValue = dark ? '☀ ' : '🌙 ';
+    $('themeBtnText').textContent = t(dark ? 'look.light' : 'look.dark');
+    q.title = t('look.quick');
+  }
+}
+if (lookMq) lookMq.addEventListener('change', () => lookMode === 'auto' && lookApply());
+lookApply();
+$('themeBtn').addEventListener('click', () => lookSet(lookIsDark() ? 'light' : 'dark', null));
+
 // ---------- ভাষা (i18n.js-এ LANG ও t()) ----------
 let statusIsDefault = true;
 function applyStatic() {
@@ -26,6 +143,7 @@ function applyStatic() {
   document.querySelectorAll('[data-i18n-ph]').forEach((n) => (n.placeholder = t(n.dataset.i18nPh)));
   $('langBtnText').textContent = t('lang.other');
   $('langSel').value = LANG;
+  lookSync();
   if (statusIsDefault) $('status').textContent = t('status.wait');
   const meta = PAGES[currentPage];
   $('pageTitle').textContent = t(meta[0]);
@@ -754,6 +872,15 @@ async function renderSites(sites, php) {
   if (sites.filter((s) => !s.system).length <= 1) {
     body.appendChild(el('tr', {}, el('td', { className: 'empty', colSpan: 8, textContent: t('sites.empty') })));
   }
+  ensureSitesSearch().apply(); // R5: খোঁজা থাকলে নতুন করে আঁকার পরও ফিল্টার ধরে রাখে
+}
+let sitesSearch = null;
+function ensureSitesSearch() {
+  if (sitesSearch) return sitesSearch;
+  const tbl = $('sitesBody').closest('table');
+  sitesSearch = makeSearch(() => Array.from($('sitesBody').rows).filter((r) => !r.querySelector('td.empty')));
+  tbl.parentNode.insertBefore(sitesSearch.box, tbl);
+  return sitesSearch;
 }
 async function loadSites() {
   const [sites, php] = await Promise.all([window.api.listSites(), window.api.listPhp()]);
@@ -934,7 +1061,13 @@ async function loadNodeSites() {
     }
     updateNodeApp(n);
   }
+  if (!nodeSearch) {
+    nodeSearch = makeSearch(() => Object.values(nodeUi).map((u) => u.box));
+    holder.parentNode.insertBefore(nodeSearch.box, holder);
+  }
+  nodeSearch.apply();
 }
+let nodeSearch = null;
 $('refreshSites').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
     setStatus(t('sites.searching'));
@@ -1703,15 +1836,19 @@ function rsRender(r) {
 // ---------- Restore ধাপ ২: www সাইট ফেরত আনা ----------
 // Restore তালিকায় "সব বাছুন / সব বাদ দিন" বোতাম (বন্ধ করা checkbox বদলায় না; rows পরে ভরলেও চলে, ক্লিকের সময় পড়ে)
 function rsSelectBar(rows) {
+  // R5: "সব বাছুন / সব বাদ দিন" শুধু দেখা-যাওয়া (খোঁজায় না-লুকানো) সারিতে কাজ করে
+  const rowEl = (x) => x.cb.closest('div');
   const set = (v) =>
     rows.forEach((x) => {
-      if (!x.cb.disabled) x.cb.checked = v;
+      const r = rowEl(x);
+      if (!x.cb.disabled && !(r && r.style.display === 'none')) x.cb.checked = v;
     });
   const a = el('button', { className: 'btn sm', type: 'button', textContent: t('rs.selAll') });
   const b = el('button', { className: 'btn sm', type: 'button', textContent: t('rs.selNone') });
   a.addEventListener('click', () => set(true));
   b.addEventListener('click', () => set(false));
-  return el('div', { style: 'margin:4px 0 6px;display:flex;gap:6px;flex-wrap:wrap' }, a, b);
+  const sb = makeSearch(() => rows.map(rowEl).filter(Boolean));
+  return el('div', { className: 'select-bar' }, a, b, sb.box);
 }
 
 function rsWwwButton(it, card) {

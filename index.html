@@ -25,8 +25,9 @@
       --sidebar-active: #1e293b;
       --radius: 12px;
     }
+    /* R6: data-theme="dark|light" (renderer.js সবসময় বসায়; "অটো" হলে PC-র মান থেকে হিসাব করে)। data-theme না থাকলে (JS চলার আগে) PC-র মান */
     @media (prefers-color-scheme: dark) {
-      :root {
+      :root:not([data-theme]) {
         --bg: #0b1220;
         --panel: #111a2e;
         --panel-2: #0f1729;
@@ -44,6 +45,45 @@
         --sidebar-active: #15203a;
       }
     }
+
+    :root[data-theme="light"] { color-scheme: light; }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #0b1220;
+      --panel: #111a2e;
+      --panel-2: #0f1729;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --border: #1f2a44;
+      --accent: #3b82f6;
+      --accent-soft: #1e3a8a;
+      --ok: #22c55e;
+      --ok-soft: #14532d;
+      --danger: #ef4444;
+      --warn-soft: #78350f;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+      --sidebar: #070d1a;
+      --sidebar-active: #15203a;
+    }
+    /* মূল রং (accent): নীল = ডিফল্ট (attribute নেই)। আগে হালকা, পরে গাঢ় থিমের মান (পরেরটার specificity বেশি) */
+    :root[data-accent="green"] { --accent: #16a34a; --accent-soft: #dcfce7; }
+    :root[data-accent="purple"] { --accent: #7c3aed; --accent-soft: #ede9fe; }
+    :root[data-accent="orange"] { --accent: #ea580c; --accent-soft: #ffedd5; }
+    :root[data-theme="dark"][data-accent="green"] { --accent: #22c55e; --accent-soft: #14532d; }
+    :root[data-theme="dark"][data-accent="purple"] { --accent: #8b5cf6; --accent-soft: #4c1d95; }
+    :root[data-theme="dark"][data-accent="orange"] { --accent: #f97316; --accent-soft: #7c2d12; }
+
+    /* সেটিংসের "চেহারা" কার্ড */
+    .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .seg button { font: inherit; font-size: 13px; padding: 6px 14px; border: 0; background: var(--panel-2); color: var(--text); cursor: pointer; }
+    .seg button + button { border-left: 1px solid var(--border); }
+    .seg button:hover:not(.on) { background: var(--accent-soft); }
+    .seg button.on { background: var(--accent); color: #fff; }
+    .swatches { display: inline-flex; gap: 12px; align-items: center; }
+    .swatch { width: 28px; height: 28px; border-radius: 50%; border: 0; padding: 0; cursor: pointer; box-shadow: 0 0 0 1px var(--border); }
+    .swatch:hover { transform: scale(1.1); }
+    .swatch.on { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--text); }
+    .look-label { min-width: 90px; font-weight: 600; }
 
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
@@ -175,6 +215,23 @@
     input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
     input:disabled { opacity: .6; }
 
+    /* খোঁজার বাক্স (R5): গোল কোণ, ভেতরে magnifier আইকন, পাশে "n/m" গোনা */
+    .searchbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
+    .search-wrap { position: relative; display: inline-flex; align-items: center; max-width: 100%; }
+    .search-wrap svg { position: absolute; left: 12px; width: 16px; height: 16px; stroke: var(--muted); fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+    .search-input {
+      -webkit-appearance: none; appearance: none;
+      font: inherit; font-size: 13px; color: var(--text); width: 300px; max-width: 100%;
+      background: var(--panel-2);
+      border: 1px solid var(--border); border-radius: 999px; padding: 8px 14px 8px 36px;
+    }
+    .search-input::placeholder { color: var(--muted); }
+    .search-input:focus { border-color: var(--accent); outline: 2px solid var(--accent-soft); outline-offset: 0; }
+    .search-count { font-size: 12px; color: var(--muted); background: var(--accent-soft); border-radius: 999px; padding: 2px 10px; }
+    .search-count:empty { display: none; }
+    .select-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; }
+    .select-bar .searchbar { margin: 0 0 0 auto; }
+
     /* সেগমেন্ট (Nginx | Apache) */
     .segment { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; padding: 3px; }
     .segment label { cursor: pointer; position: relative; }
@@ -207,7 +264,8 @@
     select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
     select:disabled { opacity: .6; }
     .lang-btn { margin: auto 8px 0; justify-content: center; background: transparent; color: var(--sidebar-text); border-color: rgba(148, 163, 184, .3); }
-    .lang-btn + .side-foot { margin-top: 8px; }
+    .lang-btn + .side-foot, .theme-btn + .side-foot { margin-top: 8px; }
+    .lang-btn + .theme-btn { margin-top: 6px; }
     .php-text { color: var(--muted); font-size: 12px; }
 
     /* ---------- টুলস ও ভার্সন ---------- */
@@ -327,6 +385,7 @@
       </button>
 
       <button class="btn sm lang-btn" id="langBtn" title="Language / ভাষা">🌐 <span id="langBtnText">English</span></button>
+      <button class="btn sm lang-btn theme-btn" id="themeBtn">🌙 <span id="themeBtnText">Dark</span></button>
       <div class="side-foot">
         Apache · Nginx · PHP<br>MySQL · PostgreSQL<br>Adminer · phpMyAdmin
       </div>
@@ -645,6 +704,14 @@
               <label class="switch"><input type="checkbox" id="appAuto"><i></i><b data-i18n="settings.app.auto">অ্যাপ খুললে নিজে Start All চালাক</b></label>
             </div>
             <div class="hint" data-i18n="settings.app.autoHint">যে ওয়েব সার্ভার বাছা আছে সেটা, আর Services পেজে "Start All-এ যুক্ত" টিক দেওয়া ডাটাবেস (backup-এর জন্য MySQL ও PostgreSQL-এ টিক দিন)।</div>
+          </div>
+
+          <div class="section-title" data-i18n="settings.look.section">চেহারা</div>
+          <div class="card">
+            <div class="card-title" data-i18n="settings.look.title">থিম ও রং</div>
+            <div class="card-sub" data-i18n="settings.look.sub">বাছাই এই PC-তে মনে থাকে, অ্যাপ বন্ধ করে খুললেও</div>
+            <div class="row"><span class="look-label" data-i18n="look.theme">থিম</span><div class="seg" id="lookTheme"></div></div>
+            <div class="row"><span class="look-label" data-i18n="look.accent">মূল রং</span><div class="swatches" id="lookAccent"></div></div>
           </div>
 
           <div class="section-title" data-i18n="settings.lang.section">ভাষা</div>
