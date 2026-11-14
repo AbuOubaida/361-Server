@@ -2079,6 +2079,12 @@ async function rsOtherOpen(it, panel) {
           refreshAll();
         } catch {}
       }
+      // 5c: ফোল্ডার www-এ গেলে Sites তালিকা ও ব্যাজ নতুন করে লোড (refreshAll এটা করে না)
+      if (res.ok && typeof loadSites === 'function') {
+        try {
+          await loadSites();
+        } catch {}
+      }
     })
   );
   panel.appendChild(go);

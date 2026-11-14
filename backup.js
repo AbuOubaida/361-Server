@@ -2011,10 +2011,16 @@ function createBackup(ctx) {
   //   rename (<পথ>_restored, পুরনো অক্ষত, ডিফল্ট) বা overwrite (merge: একই নামের ফাইল বদলায়, backup-এ নেই এমন ফাইল থেকে যায়)।
   // .versions আর .s360-state.json ফেরত আনা হয় না।
   const safeName = (s) => String(s).replace(/[\\/:*?"<>|\x00-\x1f]+/g, '_').trim().replace(/^\.+$/, '_') || 'folder';
+  // www-এর সরাসরি সাবফোল্ডার হলে নতুন নাম '-restored' (হাইফেন): সাইট-স্ক্যান শুধু [a-z0-9-] নাম নেয়, '_' থাকলে সাইট হয় না। বাইরে '_restored'।
   function freeDirName(base) {
     if (!fs.existsSync(base)) return base;
+    let direct = false;
+    try {
+      const www = ctx.wwwDir && ctx.wwwDir();
+      direct = !!www && path.resolve(path.dirname(base)).toLowerCase() === path.resolve(www).toLowerCase();
+    } catch {}
     for (let i = 1; i < 1000; i++) {
-      const cand = base + (i === 1 ? '_restored' : '_restored' + i);
+      const cand = direct ? base + (i === 1 ? '-restored' : '-restored-' + i) : base + (i === 1 ? '_restored' : '_restored' + i);
       if (!fs.existsSync(cand)) return cand;
     }
     return '';
