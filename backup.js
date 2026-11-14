@@ -983,7 +983,7 @@ function createBackup(ctx) {
         ex++;
         if (!fs.existsSync(item.path)) { step('Extra: ' + item.label, 'skip', 'folder not found'); continue; }
         const a = await makeArchive(path.join(packDir, 'extra-' + ex), item.path, [], password);
-        if (a.ok) { step('Pack extra: ' + item.label, true, path.basename(a.file)); manifest.files.push(path.basename(a.file)); manifest['extra' + ex] = item.label; }
+        if (a.ok) { step('Pack extra: ' + item.label, true, path.basename(a.file)); manifest.files.push(path.basename(a.file)); manifest['extra' + ex] = item.label; manifest['extraPath' + ex] = item.path; }
         else { step('Pack extra: ' + item.label, false, a.message); failed = true; }
       }
 
@@ -2069,6 +2069,43 @@ function createBackup(ctx) {
     }
     return '';
   }
+  // আর্কাইভে ঠিক একটাই টপ-লেভেল ফোল্ডার থাকলে (যেমন <label>\\<ফাইল>) এক স্তর উপরে তোলা: <target>\\<ফাইল>।
+  // শুধু rename করে (কিছু মোছে না); কোনো সন্দেহ বা ভুল হলে আগের লেআউট যেমন ছিল তেমনই থাকে। true = flatten হয়েছে।
+  function flattenSingleTop(target) {
+    let tmp = '';
+    try {
+      const ents = fs.readdirSync(target, { withFileTypes: true });
+      if (ents.length !== 1 || !ents[0].isDirectory() || ents[0].isSymbolicLink()) return false;
+      const top = path.join(target, ents[0].name);
+      if (fs.readdirSync(top).length === 0) return false;
+      tmp = path.join(target, '.s360-flat-' + Date.now());
+      fs.renameSync(top, tmp);
+      const kids = fs.readdirSync(tmp);
+      const moved = [];
+      try {
+        for (const k of kids) {
+          const to = path.join(target, k);
+          if (fs.existsSync(to)) throw new Error('name clash: ' + k);
+          fs.renameSync(path.join(tmp, k), to);
+          moved.push(k);
+        }
+        fs.rmdirSync(tmp); // ফাঁকা না হলে এটা fail করবে, কিছু মুছবে না
+        return true;
+      } catch (err) {
+        for (const k of moved) {
+          try {
+            fs.renameSync(path.join(target, k), path.join(tmp, k));
+          } catch {}
+        }
+        try {
+          fs.renameSync(tmp, top);
+        } catch {}
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
   function readManifestRaw(dir) {
     try {
       return JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
@@ -2084,7 +2121,10 @@ function createBackup(ctx) {
     const extras = [];
     for (const x of item.extras) {
       const f = item.files.find((y) => y.exists && new RegExp('^extra-' + x.n + '\\.(7z|zip)$', 'i').test(y.name));
-      extras.push({ n: x.n, label: x.label, archive: f ? path.join(dir, f.name) : '', target: path.join(ctx.rootDir(), 'restored', safeName(x.label) + '-' + item.stamp) });
+      // মূল পথ শুধু নতুন backup-এর manifest-এ আছে (extraPath<N>); পুরনো backup-এ নেই = source খালি
+      const srcRaw = m['extraPath' + x.n];
+      const source = typeof srcRaw === 'string' && /^(?:[A-Za-z]:[\\/]|\\\\)/.test(srcRaw) ? srcRaw : '';
+      extras.push({ n: x.n, label: x.label, archive: f ? path.join(dir, f.name) : '', target: path.join(ctx.rootDir(), 'restored', safeName(x.label) + '-' + item.stamp), source, sourceExists: !!source && fs.existsSync(source) });
     }
     const copies = [];
     const list = Array.isArray(m.copyFolders) ? m.copyFolders : [];
@@ -2115,7 +2155,7 @@ function createBackup(ctx) {
       if (!p) continue;
       if (p.kind === 'extra') {
         const e = info.extras.find((x) => x.n === p.n);
-        if (e) todo.push({ kind: 'extra', e });
+        if (e) todo.push({ kind: 'extra', e, mode: e.source && (p.mode === 'rename' || p.mode === 'overwrite') ? p.mode : 'restored' });
       } else if (p.kind === 'copy') {
         const c = info.copies.find((x) => x.label === p.label);
         if (c) todo.push({ kind: 'copy', c, mode: p.mode === 'overwrite' ? 'overwrite' : 'rename' });
@@ -2130,7 +2170,7 @@ function createBackup(ctx) {
     const warnings = [];
     restoring = true;
     try {
-      log(`Restore own folders: ${todo.map((x) => (x.kind === 'extra' ? 'extra-' + x.e.n : 'copy ' + x.c.label + '(' + x.mode + ')')).join(', ')}`);
+      log(`Restore own folders: ${todo.map((x) => (x.kind === 'extra' ? 'extra-' + x.e.n + '(' + x.mode + ')' : 'copy ' + x.c.label + '(' + x.mode + ')')).join(', ')}`);
       for (const x of todo) {
         if (x.kind === 'extra') {
           const e = x.e;
@@ -2145,24 +2185,50 @@ function createBackup(ctx) {
             res.message = tr('7-Zip নেই; Backup পেজ থেকে ইনস্টল করুন', '7-Zip is missing; install it from the Backup page');
             continue;
           }
-          const target = freeDirName(e.target);
-          if (!target) {
+          // restored = <ROOT>\\restored\\<নাম>-<stamp> (আগের মতো, ডিফল্ট); rename/overwrite = মূল পথে (শুধু নতুন backup-এ মূল পথ থাকে)
+          const inPlace = x.mode !== 'restored';
+          const target = inPlace ? '' : freeDirName(e.target);
+          const stage = inPlace ? path.join(tmpRoot(), 'restore-extra-' + stampOf() + '-' + e.n) : target;
+          if (!stage) {
             res.message = tr('নতুন ফোল্ডারের নাম পাওয়া গেল না', 'no free folder name found');
             continue;
           }
+          let dst = '';
+          let action = 'restored';
+          if (inPlace) {
+            dst = e.source;
+            action = 'new';
+            if (e.sourceExists) {
+              if (x.mode === 'overwrite') action = 'merged';
+              else {
+                dst = freeDirName(e.source);
+                action = 'renamed';
+              }
+            }
+            if (!dst) {
+              res.message = tr('নতুন ফোল্ডারের নাম পাওয়া গেল না', 'no free folder name found');
+              continue;
+            }
+            const rdst = path.resolve(dst).toLowerCase();
+            const rst = path.resolve(stage).toLowerCase();
+            if (rdst === path.parse(rdst).root || rdst === rst || rdst.startsWith(rst + path.sep) || rst.startsWith(rdst + path.sep)) {
+              res.message = tr('গন্তব্য ড্রাইভের root বা অস্থায়ী ফোল্ডারের সাথে মিলে যায়, থামানো হয়েছে: ', 'The target is a drive root or overlaps the temp folder, stopped: ') + dst;
+              continue;
+            }
+          }
           try {
             if (ctx.onProgress) ctx.onProgress(`Restore: ${e.label}`);
-            fs.mkdirSync(target, { recursive: true });
+            fs.mkdirSync(stage, { recursive: true });
             let r;
             if (sevenZ) {
-              r = await run(sevenZ, ['x', e.archive, '-o' + target, '-y', ...(password ? ['-p' + password] : [])], { timeout: 6 * 3600 * 1000 });
+              r = await run(sevenZ, ['x', e.archive, '-o' + stage, '-y', ...(password ? ['-p' + password] : [])], { timeout: 6 * 3600 * 1000 });
             } else {
-              r = await run(ctx.tarExe || (win ? 'tar.exe' : 'tar'), ['-xf', e.archive, '-C', target], {});
+              r = await run(ctx.tarExe || (win ? 'tar.exe' : 'tar'), ['-xf', e.archive, '-C', stage], {});
             }
             const out = r.stdout + r.stderr;
             if (!r.ok && r.code !== 1) {
               try {
-                fs.rmSync(target, { recursive: true, force: true });
+                fs.rmSync(stage, { recursive: true, force: true });
               } catch {}
               if (wrongPw(out)) {
                 res.wrongPassword = true;
@@ -2172,10 +2238,27 @@ function createBackup(ctx) {
               continue;
             }
             if (r.code === 1) res.notes.push(tr('7-Zip সতর্কতা দিয়েছে, বিস্তারিত log-এ', '7-Zip reported warnings, see the log'));
+            const flat = flattenSingleTop(stage);
+            if (flat) log(`  flattened one folder level in ${stage}`);
+            if (inPlace) {
+              // অস্থায়ী জায়গা থেকে মূল পথে: নতুন হলে সরানো, নইলে merge (একই নামের ফাইল বদলায়, বাকি থাকে)
+              if (!fs.existsSync(dst)) await moveDir(stage, dst);
+              else await fs.promises.cp(stage, dst, { recursive: true, force: true });
+              try {
+                fs.rmSync(stage, { recursive: true, force: true });
+              } catch {}
+              res.action = action;
+              if (action === 'merged') res.notes.push(tr('মূল ফোল্ডারে একই নামের ফাইল backup-এরটা দিয়ে বদলেছে; backup-এ নেই এমন ফাইল থেকে গেছে', 'Files with the same name in the original folder were replaced; files that are not in the backup were kept'));
+            }
             res.ok = true;
-            res.target = target;
-            log(`  restored extra-${e.n} (${e.label}) -> ${target}`);
+            res.target = inPlace ? dst : target;
+            log(`  restored extra-${e.n} (${e.label}) -> ${res.target}${inPlace ? ' (' + action + ')' : ''}`);
           } catch (err) {
+            if (inPlace) {
+              try {
+                fs.rmSync(stage, { recursive: true, force: true });
+              } catch {}
+            }
             res.message = err.message;
             log(`  [FAIL] ${e.label}: ${err.message}`);
           }

@@ -79,6 +79,7 @@ contextBridge.exposeInMainWorld('api', {
   listExt: (version) => ipcRenderer.invoke('ext:list', version),
   setExt: (version, name, on) => ipcRenderer.invoke('ext:set', version, name, on),
   openUrl: (url) => ipcRenderer.invoke('open:url', url),
+  openPath: (p) => ipcRenderer.invoke('path:open', p),
 
   // সাইট ধরে PHP ভার্সন
   listPhp: () => ipcRenderer.invoke('php:list'),

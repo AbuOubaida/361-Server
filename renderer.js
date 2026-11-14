@@ -1811,7 +1811,35 @@ function rsDate(it) {
   const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(it.stamp);
   return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}` : it.stamp;
 }
-const rsLine = (text, cls) => el('div', { className: cls || 'hint', textContent: text, style: 'margin:2px 0' });
+// পথ ক্লিক করলে Explorer-এ খোলে। লেখার ভেতরের C:\\... বা \\\\server\\share\\... পথকে লিংক বানায় (স্পেসে পথ থামে; main.js কাছের আছে-এমন ফোল্ডার খোলে)।
+const PATH_RE = /(?:[A-Za-z]:\\|\\\\[^\s\\]+\\)[^\s"'<>|*?]*/g;
+function pathNodes(text) {
+  const out = [];
+  const str = String(text == null ? '' : text);
+  let last = 0;
+  str.replace(PATH_RE, (m, idx) => {
+    const p = m.replace(/[.,;:)\]]+$/, '');
+    if (p.length < 4) return m;
+    if (idx > last) out.push(document.createTextNode(str.slice(last, idx)));
+    const a = el('a', { className: 'link', textContent: p, title: p, style: 'font-weight:400;text-decoration:underline;cursor:pointer;overflow-wrap:anywhere' });
+    a.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        const r = await window.api.openPath(p);
+        if (!r || !r.ok) setStatus(t('rs.openFail'));
+      } catch {
+        setStatus(t('rs.openFail'));
+      }
+    });
+    out.push(a);
+    last = idx + p.length;
+    return m;
+  });
+  if (last < str.length) out.push(document.createTextNode(str.slice(last)));
+  return out;
+}
+const rsLine = (text, cls) => el('div', { className: cls || 'hint', style: 'margin:2px 0' }, ...pathNodes(text));
 // 5d: \"-restored\" সাইটের .env / wp-config.php-এর ডাটাবেস নাম নতুন কপিতে বদলানোর বাটন (শুধু বাটন চাপলে; আগে কপি রাখা হয়)
 function rsFixButtons(x, out) {
   for (const fx of x.fixes || []) {
@@ -2043,7 +2071,7 @@ async function rsDbOpen(it, panel) {
           )
         : null;
     const note = d.exists === true ? t('rs.db.exists') : d.exists === false ? t('rs.db.new') : '';
-    const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cb, el('b', { textContent: d.name }), el('span', { className: 'hint', style: 'margin:0', textContent: note }));
+    const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cb, el('b', { textContent: d.name }), el('span', { className: 'hint', style: 'margin:0' }, ...pathNodes(note)));
     panel.appendChild(el('div', { style: 'margin:3px 0' }, label, sel));
     rows.push({ name: d.name, cb, sel });
   }
@@ -2148,7 +2176,7 @@ async function rsPgList(it, pw, box) {
           )
         : null;
     const note = d.exists === true ? t('rs.pg.exists') : d.exists === false ? t('rs.pg.new') : '';
-    const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cb, el('b', { textContent: d.name }), el('span', { className: 'hint', style: 'margin:0', textContent: note }));
+    const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cb, el('b', { textContent: d.name }), el('span', { className: 'hint', style: 'margin:0' }, ...pathNodes(note)));
     box.appendChild(el('div', { style: 'margin:3px 0' }, label, sel));
     rows.push({ name: d.name, cb, sel });
   }
@@ -2222,10 +2250,16 @@ async function rsOtherOpen(it, panel) {
     panel.appendChild(rsLine(t('rs.ot.pickExtra'), 'info'));
     for (const x of info.extras) {
       const cb = el('input', { type: 'checkbox', checked: !!x.archive, disabled: !x.archive });
-      const note = x.archive ? t('rs.ot.extraTo', x.target) : t('rs.ot.noArchive');
-      const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap' }, cb, el('b', { textContent: x.label }), el('span', { className: 'hint', style: 'margin:0', textContent: note }));
-      panel.appendChild(el('div', { style: 'margin:3px 0' }, label));
-      rows.push({ kind: 'extra', n: x.n, cb, sel: null });
+      let note = x.archive ? t('rs.ot.extraTo', x.target) : t('rs.ot.noArchive');
+      // নতুন backup-এ মূল পথ থাকে: মূল পথে ফেরানোর বিকল্প (ডিফল্ট আগের মতো restored ফোল্ডার)
+      const sel =
+        x.archive && x.source
+          ? el('select', { style: 'margin-left:8px;max-width:360px' }, el('option', { value: 'restored', textContent: t('rs.ot.xmode.restored') }), el('option', { value: 'rename', textContent: t('rs.ot.xmode.rename') }), el('option', { value: 'overwrite', textContent: t('rs.ot.xmode.over') }))
+          : null;
+      if (x.archive && x.source) note += ' · ' + t(x.sourceExists ? 'rs.ot.srcExists' : 'rs.ot.srcNew', x.source);
+      const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap' }, cb, el('b', { textContent: x.label }), el('span', { className: 'hint', style: 'margin:0' }, ...pathNodes(note)));
+      panel.appendChild(el('div', { style: 'margin:3px 0' }, label, sel));
+      rows.push({ kind: 'extra', n: x.n, cb, sel });
     }
   }
   if (info.copies.length) {
@@ -2238,7 +2272,7 @@ async function rsOtherOpen(it, panel) {
           ? el('select', { style: 'margin-left:8px;max-width:360px' }, el('option', { value: 'rename', textContent: t('rs.ot.mode.rename') }), el('option', { value: 'overwrite', textContent: t('rs.ot.mode.over') }))
           : null;
       const note = !c.exists ? t('rs.ot.noCopy') : !c.source ? t('rs.ot.noSource') : c.sourceExists ? t('rs.ot.srcExists', c.source) : t('rs.ot.srcNew', c.source);
-      const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap' }, cb, el('b', { textContent: c.label }), el('span', { className: 'hint', style: 'margin:0', textContent: note }));
+      const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap' }, cb, el('b', { textContent: c.label }), el('span', { className: 'hint', style: 'margin:0' }, ...pathNodes(note)));
       panel.appendChild(el('div', { style: 'margin:3px 0' }, label, sel));
       rows.push({ kind: 'copy', label: c.label, cb, sel });
     }
@@ -2247,7 +2281,7 @@ async function rsOtherOpen(it, panel) {
   const go = el('button', { className: 'btn sm primary', textContent: t('rs.ot.go'), style: 'margin-top:8px' });
   go.addEventListener('click', (e) =>
     work(e.currentTarget, async () => {
-      const picks = rows.filter((x) => x.cb.checked).map((x) => (x.kind === 'extra' ? { kind: 'extra', n: x.n } : { kind: 'copy', label: x.label, mode: x.sel ? x.sel.value : 'rename' }));
+      const picks = rows.filter((x) => x.cb.checked).map((x) => (x.kind === 'extra' ? { kind: 'extra', n: x.n, mode: x.sel ? x.sel.value : 'restored' } : { kind: 'copy', label: x.label, mode: x.sel ? x.sel.value : 'rename' }));
       out.textContent = '';
       if (!picks.length) {
         out.appendChild(rsLine(t('rs.ot.none'), 'info'));
@@ -2266,7 +2300,7 @@ async function rsOtherOpen(it, panel) {
       for (const x of res.results || []) {
         if (!x.ok) out.appendChild(rsLine('✗ ' + t('rs.ot.res.fail', x.name, x.message || ''), 'info'));
         else {
-          const key = x.kind === 'extra' ? 'rs.ot.res.extra' : x.action === 'merged' ? 'rs.ot.res.merged' : x.action === 'renamed' ? 'rs.ot.res.renamed' : 'rs.ot.res.new';
+          const key = x.kind === 'extra' && !x.action ? 'rs.ot.res.extra' : x.action === 'merged' ? 'rs.ot.res.merged' : x.action === 'renamed' ? 'rs.ot.res.renamed' : 'rs.ot.res.new';
           out.appendChild(rsLine('✓ ' + t(key, x.name, x.target), 'info'));
         }
         for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));

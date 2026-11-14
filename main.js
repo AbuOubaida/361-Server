@@ -4062,6 +4062,36 @@ ipcMain.handle('pma:open', async () => {
 });
 
 // শুধু localhost ও *.test লিংক খোলা যাবে
+// Restore/Backup পেজের পথ ক্লিক করলে Explorer-এ খোলা। ফোল্ডার = খোলে; ফাইল = Explorer-এ দেখায় (চালায় না);
+// পথ না থাকলে সবচেয়ে কাছের আছে-এমন উপরের ফোল্ডার (ড্রাইভের root বাদ)।
+ipcMain.handle('path:open', async (_event, p) => {
+  try {
+    if (typeof p !== 'string' || p.length > 500 || /[\x00-\x1f<>|"*?]/.test(p)) return { ok: false };
+    if (!/^[A-Za-z]:\\/.test(p) && !/^\\\\[^\\]+\\/.test(p)) return { ok: false };
+    let cur = path.resolve(p);
+    for (let i = 0; i < 12; i++) {
+      let st = null;
+      try {
+        st = fs.statSync(cur);
+      } catch {}
+      if (st) {
+        if (st.isDirectory()) {
+          const err = await shell.openPath(cur);
+          return { ok: !err, path: cur, message: err || '' };
+        }
+        shell.showItemInFolder(cur);
+        return { ok: true, path: cur };
+      }
+      const up = path.dirname(cur);
+      if (up === cur || path.parse(up).root === up) return { ok: false };
+      cur = up;
+    }
+    return { ok: false };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+});
+
 ipcMain.handle('open:url', (_event, url) => {
   if (/^http:\/\/(localhost|[a-z0-9-]+\.test)(:\d{1,5})?\/?$/.test(url)) return shell.openExternal(url);
 });
@@ -5041,7 +5071,7 @@ ipcMain.handle('restore:other', async (_e, opts) => {
       picks: Array.isArray(o.picks)
         ? o.picks.map((p) =>
             p && p.kind === 'extra'
-              ? { kind: 'extra', n: Number(p.n) }
+              ? { kind: 'extra', n: Number(p.n), mode: p.mode === 'rename' || p.mode === 'overwrite' ? p.mode : 'restored' }
               : { kind: 'copy', label: String(p && p.label), mode: p && p.mode === 'overwrite' ? 'overwrite' : 'rename' }
           )
         : [],
