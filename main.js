@@ -4727,6 +4727,7 @@ ipcMain.handle('restore:wwwInfo', (_e, dir) => {
 });
 // 5b: ডাটাবেস "_restored" নামে ফিরলে, কোন সাইট এখনো মূল ডাটাবেস ব্যবহার করছে (.env DB_DATABASE / wp-config.php DB_NAME) শুধু পড়ে বলে দেয়; কিছু বদলায় না।
 // ফেরত দেয় true শুধু যদি প্রতিটা নতুন-নামের ডাটাবেসের জন্য নির্দিষ্ট লাইন যোগ হয় (তখন সাধারণ ⚠ লাইনটা আর লাগে না)।
+const RESTORED_SITE_RE = /-restored(-\d+)?$/;
 function dbHintsForRenamed(results) {
   try {
     const renamed = (results || []).filter((x) => x && x.ok && x.action === 'renamed' && x.name && x.final);
@@ -4737,24 +4738,33 @@ function dbHintsForRenamed(results) {
       if (!e.isDirectory()) continue;
       const dir = path.join(WWW_DIR, e.name);
       let db = '';
+      let file = '';
       try {
         const envFile = path.join(dir, '.env');
         if (fs.existsSync(envFile)) {
           const m = fs.readFileSync(envFile, 'utf8').match(/^\s*DB_DATABASE\s*=\s*(.*)$/m);
-          if (m) db = unq(m[1]);
+          if (m) {
+            db = unq(m[1]);
+            file = '.env';
+          }
         }
         if (!db && fs.existsSync(path.join(dir, 'wp-config.php'))) {
           const m = fs.readFileSync(path.join(dir, 'wp-config.php'), 'utf8').match(/define\(\s*['"]DB_NAME['"]\s*,\s*['"]([^'"]*)['"]/);
-          if (m) db = m[1];
+          if (m) {
+            db = m[1];
+            file = 'wp-config.php';
+          }
         }
       } catch (_) {}
-      if (db) used.push({ folder: e.name, db });
+      if (db) used.push({ folder: e.name, db, file });
     }
     let covered = 0;
     for (const x of renamed) {
       const sites = used.filter((u) => u.db === x.name).map((u) => u.folder);
       if (!sites.length) continue;
       covered++;
+      // 5d: শুধু \"-restored\" সাইটের জন্য ঠিক-করার বাটন (মূল সাইট নয়: চালু সাইট ভুল করে কপির ডাটাবেসে চলে যেত)
+      x.fixes = used.filter((u) => u.db === x.name && u.file && RESTORED_SITE_RE.test(u.folder)).map((u) => ({ folder: u.folder, file: u.file, from: x.name, to: x.final }));
       x.notes = (x.notes || []).concat(
         tr(
           `সাইট ${sites.join(', ')} এখনো মূল "${x.name}" ডাটাবেস ব্যবহার করছে; এই কপি ("${x.final}") কোনো সাইটে জোড়া নেই। কপি ব্যবহার করতে ওই সাইটের .env-এ DB_DATABASE=${x.final} (WordPress হলে wp-config.php-এর DB_NAME) বসান।`,
@@ -4951,6 +4961,64 @@ ipcMain.handle('restore:pg', async (_e, opts) => {
     }
   } catch (_) {}
   return res;
+});
+
+// 5d: \"-restored\" সাইটের .env DB_DATABASE / wp-config.php DB_NAME নতুন (restored) ডাটাবেসে বদলায়। শুধু ব্যবহারকারী বাটন চাপলে চলে।
+// নিয়ম: সাইট ফোল্ডার www-র সরাসরি সন্তান ও নাম \"-restored\"-এ শেষ; ফাইলে এখন ঠিক `from` মান থাকতে হবে (নইলে কিছু বদলায় না);
+// আগে ফাইলের কপি `<ROOT>\backup\pre-restore\<stamp>\<সাইট>\`-এ রাখা হয় (কপি না হলে ফাইল বদলায় না); শুধু ওই একটা মান বদলায়।
+ipcMain.handle('restore:fixDb', (_e, o) => {
+  try {
+    if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+    o = o && typeof o === 'object' ? o : {};
+    const folder = String(o.folder || '');
+    const file = o.file === '.env' || o.file === 'wp-config.php' ? o.file : '';
+    const from = String(o.from || '');
+    const to = String(o.to || '');
+    const NAME_RE = /^[A-Za-z0-9_$-]{1,64}$/;
+    if (!file || !NAME_RE.test(from) || !NAME_RE.test(to) || from === to) return { ok: false, message: tr('অনুরোধটা ঠিক নেই, কিছু বদলানো হয়নি।', 'Invalid request, nothing changed.') };
+    if (!/^[A-Za-z0-9._ -]+$/.test(folder) || folder.startsWith('.') || !RESTORED_SITE_RE.test(folder)) return { ok: false, message: tr('শুধু \"-restored\" সাইট বদলানো যায়।', 'Only \"-restored\" sites can be changed.') };
+    const dir = path.join(WWW_DIR, folder);
+    if (path.dirname(dir) !== path.resolve(WWW_DIR) && path.dirname(dir) !== WWW_DIR) return { ok: false, message: tr('ফোল্ডারটা www-র ভেতরে নেই।', 'The folder is not inside www.') };
+    const f = path.join(dir, file);
+    if (!fs.existsSync(f)) return { ok: false, message: tr(`${folder}\\${file} পাওয়া যায়নি।`, `${folder}\\${file} was not found.`) };
+    const txt = fs.readFileSync(f, 'utf8');
+    let out = '';
+    if (file === '.env') {
+      const re = /^([ \t]*DB_DATABASE[ \t]*=[ \t]*)(.*)$/m;
+      const m = txt.match(re);
+      const raw = m ? m[2].trim() : '';
+      const q = /^(['"])(.*)\1$/.exec(raw);
+      const cur = q ? q[2] : raw;
+      if (!m || cur !== from) return { ok: false, message: tr(`${folder}: .env-এ DB_DATABASE এখন "${cur || '?'}" (আশা ছিল "${from}") অথবা লাইনটা অন্য ধরনের (যেমন শেষে # মন্তব্য); কিছু বদলানো হয়নি, হাতে এডিট করুন।`, `${folder}: DB_DATABASE in .env is now "${cur || '?'}" (expected "${from}") or the line has another format (for example a trailing # comment); nothing changed, edit it by hand.`) };
+      out = txt.replace(re, (_a, pre) => pre + (q ? q[1] + to + q[1] : to));
+    } else {
+      const re = /(define\(\s*['"]DB_NAME['"]\s*,\s*)(['"])([^'"]*)\2/;
+      const m = txt.match(re);
+      if (!m || m[3] !== from) return { ok: false, message: tr(`${folder}: wp-config.php-এ DB_NAME এখন "${m ? m[3] : '?'}" (আশা ছিল "${from}"); কিছু বদলানো হয়নি, হাতে এডিট করুন।`, `${folder}: DB_NAME in wp-config.php is now "${m ? m[3] : '?'}" (expected "${from}"); nothing changed, edit it by hand.`) };
+      out = txt.replace(re, (_a, pre, qt) => pre + qt + to + qt);
+    }
+    if (out === txt) return { ok: false, message: tr('কিছু বদলায়নি।', 'Nothing changed.') };
+    const d = new Date();
+    const p2 = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+    const bakDir = path.join(backup.dirs.baseDir(), 'pre-restore', stamp, folder);
+    fs.mkdirSync(bakDir, { recursive: true });
+    const bak = path.join(bakDir, file);
+    fs.copyFileSync(f, bak);
+    if (fs.readFileSync(bak, 'utf8') !== txt) return { ok: false, message: tr('ব্যাকআপ কপি মেলেনি, ফাইল বদলানো হয়নি।', 'The safety copy does not match, the file was not changed.') };
+    fs.writeFileSync(f, out);
+    let extra = '';
+    if (file === '.env' && fs.existsSync(path.join(dir, 'bootstrap', 'cache', 'config.php'))) {
+      extra = tr(' Laravel config cache চালু আছে: `php artisan config:clear` না চালালে পুরোনো মান চলতে পারে।', ' Laravel config cache is present: run `php artisan config:clear`, otherwise the old value may still be used.');
+    }
+    return {
+      ok: true,
+      backup: bak,
+      message: tr(`${folder}: ${file}-এ ডাটাবেস "${from}" থেকে "${to}" করা হয়েছে। পুরোনো ফাইলের কপি: ${bak}.`, `${folder}: database in ${file} changed from "${from}" to "${to}". Safety copy of the old file: ${bak}.`) + extra,
+    };
+  } catch (err) {
+    return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
 });
 
 // Restore ধাপ ৪a: নিজের ফোল্ডার (extra-N আর্কাইভ) ও plain copy (files\\<label>) ফেরত আনা। restore:otherInfo শুধু পড়ে; restore:other ফাইল বসায়।

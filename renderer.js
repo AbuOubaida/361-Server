@@ -1812,6 +1812,31 @@ function rsDate(it) {
   return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}` : it.stamp;
 }
 const rsLine = (text, cls) => el('div', { className: cls || 'hint', textContent: text, style: 'margin:2px 0' });
+// 5d: \"-restored\" সাইটের .env / wp-config.php-এর ডাটাবেস নাম নতুন কপিতে বদলানোর বাটন (শুধু বাটন চাপলে; আগে কপি রাখা হয়)
+function rsFixButtons(x, out) {
+  for (const fx of x.fixes || []) {
+    const line = el('div', { style: 'margin:3px 0 3px 18px' });
+    const b = el('button', { className: 'btn sm', textContent: t('rs.fix.btn', fx.folder, fx.file, fx.to) });
+    const msg = el('span', { className: 'hint', style: 'margin-left:8px' });
+    b.addEventListener('click', async () => {
+      if (b.disabled) return;
+      if (!confirm(t('rs.fix.confirm', fx.folder, fx.file, fx.from, fx.to))) return;
+      b.disabled = true;
+      msg.textContent = t('rs.fix.running');
+      let r;
+      try {
+        r = await window.api.restoreFixDb(fx);
+      } catch (err) {
+        r = { ok: false, message: String(err && err.message ? err.message : err) };
+      }
+      msg.textContent = (r.ok ? '✓ ' : '⚠ ') + (r.message || '');
+      if (!r.ok) b.disabled = false;
+    });
+    line.appendChild(b);
+    line.appendChild(msg);
+    out.appendChild(line);
+  }
+}
 function rsItem(it) {
   const names = it.files.map((f) => f.name);
   const has = (re) => names.some((n) => re.test(n));
@@ -2050,6 +2075,7 @@ async function rsDbOpen(it, panel) {
           out.appendChild(rsLine('✓ ' + base + (x.tables != null ? ' · ' + t('rs.db.res.tables', x.tables) : ''), 'info'));
         }
         for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));
+        rsFixButtons(x, out);
       }
       for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
       if (typeof refreshAll === 'function') {
@@ -2153,6 +2179,7 @@ async function rsPgList(it, pw, box) {
           out.appendChild(rsLine('✓ ' + base + (x.tables != null ? ' · ' + t('rs.db.res.tables', x.tables) : ''), 'info'));
         }
         for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));
+        rsFixButtons(x, out);
       }
       for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
     })
