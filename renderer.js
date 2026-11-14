@@ -63,6 +63,12 @@ function makeSearch(getItems) {
   inp.addEventListener('input', apply);
   return { box, apply, input: inp };
 }
+// R5 ধাপ ২: একটা ঘরের (holder) সরাসরি children খোঁজা; বাক্স holder-এর ঠিক ওপরে একবারই বসে
+function holderSearch(holder, filter) {
+  const s = makeSearch(() => Array.from(holder.children).filter(filter || (() => true)));
+  holder.parentNode.insertBefore(s.box, holder);
+  return s;
+}
 
 // ---------- R6: চেহারা (থিম: অটো/হালকা/গাঢ় + মূল রং) ----------
 // বাছাই localStorage-এ থাকে (ভাষার মতো)। data-theme সবসময় "light"/"dark" বসে ("অটো" হলে PC-র মান থেকে হিসাব)।
@@ -172,12 +178,22 @@ $('langSel').addEventListener('change', (e) => setLang(e.target.value));
 
 // ---------- স্ট্যাটাস বার ও লগ ----------
 const logs = [];
+let logSearch = null;
+let logList = null;
 function renderLogs() {
   const panel = $('logPanel');
-  panel.textContent = '';
-  for (const l of logs.slice().reverse()) {
-    panel.appendChild(el('div', { className: 'l' + (l.err ? ' err' : '') }, el('time', { textContent: l.time }), l.msg));
+  if (!logSearch) {
+    // খোঁজার বাক্স আলাদা থাকে, শুধু লাইনের তালিকা নতুন করে আঁকা হয় (নইলে বাক্স মুছে যেত)
+    logList = el('div', {});
+    logSearch = makeSearch(() => Array.from(logList.children));
+    panel.textContent = '';
+    panel.append(logSearch.box, logList);
   }
+  logList.textContent = '';
+  for (const l of logs.slice().reverse()) {
+    logList.appendChild(el('div', { className: 'l' + (l.err ? ' err' : '') }, el('time', { textContent: l.time }), l.msg));
+  }
+  logSearch.apply();
 }
 
 function setStatus(msg) {
@@ -416,12 +432,15 @@ function updateDb(db) {
   if (document.activeElement !== ui.portIn) ui.portIn.value = db.port;
 }
 
+let dbSearch = null;
 async function loadDbs() {
   const dbs = await window.api.listDbs();
   for (const db of dbs) {
     if (!dbUi[db.id]) buildDb(db);
     updateDb(db);
   }
+  if (!dbSearch) dbSearch = holderSearch($('dbs'));
+  dbSearch.apply();
 }
 
 // ---------- সাইট ----------
@@ -1188,6 +1207,7 @@ $('extVer').addEventListener('change', () => {
 });
 
 // ---------- কনফিগ ফাইল কার্ড ----------
+let cfgSearch = null;
 async function loadCfg() {
   const box = $('cfgList');
   if (!box) return;
@@ -1198,6 +1218,7 @@ async function loadCfg() {
     return;
   }
   box.textContent = '';
+  if (!cfgSearch) cfgSearch = holderSearch(box);
   for (const c of list) {
     const open = el('button', { className: 'btn sm accent', textContent: t('cfg.open') });
     open.disabled = !c.canOpen;
@@ -1220,14 +1241,17 @@ async function loadCfg() {
       )
     );
   }
+  cfgSearch.apply();
 }
 
+let toolsSearch = null;
 function renderTools(tools) {
   loadExt();
   loadCfg();
   loadAcme();
   const box = $('toolsList');
   box.textContent = '';
+  if (!toolsSearch) toolsSearch = holderSearch(box);
   for (const tl of tools) {
     const verIn = el('input', { type: 'text', placeholder: t('tools.verPh') });
     const urlIn = el('input', { type: 'text', placeholder: t('tools.urlPh') });
@@ -1303,6 +1327,7 @@ function renderTools(tools) {
       )
     );
   }
+  toolsSearch.apply();
 }
 async function loadTools() {
   renderTools(await window.api.listTools());
@@ -1813,9 +1838,13 @@ function rsItem(it) {
   if (it.manifest && has(/^settings\./i)) rsSettingsButton(it, card);
   return card;
 }
+let rsSearch = null;
 function rsRender(r) {
   const box = $('rsBox');
   box.textContent = '';
+  if (!rsSearch) rsSearch = holderSearch(box, (c) => c.classList.contains('card'));
+  rsSearch.input.value = '';
+  rsSearch.box.style.display = 'none';
   const info = $('rsInfo');
   if (!r || !r.ok) {
     info.textContent = (r && r.message) || '';
@@ -1828,6 +1857,8 @@ function rsRender(r) {
   info.textContent = r.items.length ? t('rs.count', r.items.length) : t('rs.none');
   for (const e of r.errors) box.appendChild(rsLine('⚠ ' + t('rs.errors', e.label + ': ' + e.message), 'info'));
   for (const it of r.items) box.appendChild(rsItem(it));
+  rsSearch.box.style.display = r.items.length ? '' : 'none';
+  rsSearch.apply();
   if (r.copies.length) {
     box.appendChild(el('div', { className: 'section-title', textContent: t('rs.copies'), style: 'margin-top:14px' }));
     for (const c of r.copies) box.appendChild(rsLine(c.label + ' · ' + rsSrcName(c.source) + (c.versions ? ' · ' + t('rs.versions', c.versions) : '') + ' · ' + c.dir));
