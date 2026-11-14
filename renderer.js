@@ -857,6 +857,9 @@ function confCell(s, custom) {
   return el('td', { className: 'conf-cell' }, b, ' ', add, ' ', dir, ' ', keepBtn, ...(badge ? [' ', badge] : []));
 }
 
+// সাইটের সংখ্যা/তালিকার চাবি: হাতে ফোল্ডার মুছলে/বানালে নিজে থেকে ধরার জন্য (pollSites)
+let lastSiteKey = null;
+const siteKeyOf = (sites) => sites.filter((s) => !s.system).map((s) => s.domain).sort().join(',');
 async function renderSites(sites, php) {
   let custom = new Set();
   try {
@@ -870,6 +873,7 @@ async function renderSites(sites, php) {
   const body = $('sitesBody');
   body.textContent = '';
   $('siteCount').textContent = sites.filter((s) => !s.system).length;
+  lastSiteKey = siteKeyOf(sites);
   for (const s of sites) {
     const a = el('a', { className: 'link', textContent: s.url });
     a.addEventListener('click', () => window.api.openUrl(s.url));
@@ -2222,7 +2226,7 @@ async function rsOtherOpen(it, panel) {
         out.appendChild(rsLine(t('rs.ot.none'), 'info'));
         return;
       }
-      if (!confirm(t('rs.ot.confirm', picks.length))) return;
+      if (!confirm(t(picks.some((p) => p.mode === 'overwrite') ? 'rs.ot.confirmMerge' : 'rs.ot.confirm', picks.length))) return;
       out.appendChild(rsLine(t('rs.ot.running'), 'info'));
       let res;
       try {
@@ -2389,3 +2393,16 @@ loadMysqlPw();
 loadPgPw();
 refreshAll();
 setInterval(refreshAll, 4000); // চলা/বন্ধ অবস্থা নিজে থেকে হালনাগাদ
+// www-তে কেউ হাতে ফোল্ডার মুছলে/বানালে সাইডবারের সংখ্যা নিজে থেকে বদলায়; Sites পেজ খোলা থাকলে তালিকাও নতুন করে আঁকে (শুধু তালিকা বদলালে)
+async function pollSites() {
+  if (document.hidden) return;
+  try {
+    const sites = await window.api.listSites();
+    const key = siteKeyOf(sites);
+    $('siteCount').textContent = sites.filter((s) => !s.system).length;
+    const changed = lastSiteKey !== null && key !== lastSiteKey;
+    lastSiteKey = key;
+    if (changed && currentPage === 'sites') loadSites();
+  } catch {}
+}
+setInterval(pollSites, 5000);

@@ -1590,10 +1590,12 @@ function createBackup(ctx) {
         }
       }
       if (!info.complete) warnings.push(tr('এই backup আংশিক (complete নয়): ' + (info.failedSteps.join(', ') || '?'), 'This backup is partial (not complete): ' + (info.failedSteps.join(', ') || '?')));
-      if (results.some((r) => r.ok && r.action === 'renamed')) warnings.push(tr('নতুন নামে রাখা ডাটাবেস সাইটের .env / wp-config.php-তে নিজে থেকে বসে না; সাইট ওই নামে চালাতে চাইলে ফাইলে নামটা বদলান', 'A database restored under a new name is not wired into any site (.env / wp-config.php); edit the file if a site should use it'));
+      // renamedGeneric: main.js লুকিয়ে ফেলে যদি প্রতিটা নতুন-নামের ডাটাবেসের জন্য নির্দিষ্ট 5b লাইন থাকে (একই কথা দুবার না আসতে)
+      const renamedGeneric = results.some((r) => r.ok && r.action === 'renamed') ? tr('নতুন নামে রাখা ডাটাবেস সাইটের .env / wp-config.php-তে নিজে থেকে বসে না; সাইট ওই নামে চালাতে চাইলে ফাইলে নামটা বদলান', 'A database restored under a new name is not wired into any site (.env / wp-config.php); edit the file if a site should use it') : null;
+      if (renamedGeneric) warnings.push(renamedGeneric);
       if (info.postgres) warnings.push(tr('PostgreSQL ডাম্প (postgres.sql) আলাদা বোতামে ফেরত আনা হয়: "PostgreSQL ডাটাবেস ফেরত আনুন"', 'The PostgreSQL dump (postgres.sql) is restored with its own button: "Restore PostgreSQL databases"'));
       if (startedHere) warnings.push(tr('MySQL এই restore-এর জন্য চালু করা হয়েছিল, চালু অবস্থায় রাখা আছে', 'MySQL was started for this restore and is left running'));
-      return { ok: results.some((r) => r.ok), results, warnings };
+      return { ok: results.some((r) => r.ok), results, warnings, renamedGeneric };
     } catch (e) {
       return { ok: false, message: e.message };
     } finally {
@@ -1991,9 +1993,10 @@ function createBackup(ctx) {
       }
       if (!item.complete) warnings.push(tr('এই backup আংশিক (complete নয়): ' + (item.failedSteps.join(', ') || '?'), 'This backup is partial (not complete): ' + (item.failedSteps.join(', ') || '?')));
       warnings.push(tr('role/ইউজার (এবং postgres, template1) ফেরত আনা হয় না; মালিক role এই PostgreSQL-এ না থাকলে ownership-এর ত্রুটি আসতে পারে', 'Roles/users (and the postgres and template1 databases) are not restored; a missing owner role can print ownership errors'));
-      if (results.some((r) => r.ok && r.action === 'renamed')) warnings.push(tr('নতুন নামে রাখা ডাটাবেস সাইটের কনফিগে নিজে থেকে বসে না; সাইট ওই নামে চালাতে চাইলে নামটা বদলান', 'A database restored under a new name is not wired into any site; change the name in the site config if a site should use it'));
+      const renamedGeneric = results.some((r) => r.ok && r.action === 'renamed') ? tr('নতুন নামে রাখা ডাটাবেস সাইটের কনফিগে নিজে থেকে বসে না; সাইট ওই নামে চালাতে চাইলে নামটা বদলান', 'A database restored under a new name is not wired into any site; change the name in the site config if a site should use it') : null;
+      if (renamedGeneric) warnings.push(renamedGeneric);
       if (startedHere) warnings.push(tr('PostgreSQL এই restore-এর জন্য চালু করা হয়েছিল, চালু অবস্থায় রাখা আছে', 'PostgreSQL was started for this restore and is left running'));
-      return { ok: results.some((r) => r.ok), results, warnings };
+      return { ok: results.some((r) => r.ok), results, warnings, renamedGeneric };
     } catch (e) {
       return { ok: false, message: e.message };
     } finally {

@@ -4726,10 +4726,11 @@ ipcMain.handle('restore:wwwInfo', (_e, dir) => {
   }
 });
 // 5b: ডাটাবেস "_restored" নামে ফিরলে, কোন সাইট এখনো মূল ডাটাবেস ব্যবহার করছে (.env DB_DATABASE / wp-config.php DB_NAME) শুধু পড়ে বলে দেয়; কিছু বদলায় না।
+// ফেরত দেয় true শুধু যদি প্রতিটা নতুন-নামের ডাটাবেসের জন্য নির্দিষ্ট লাইন যোগ হয় (তখন সাধারণ ⚠ লাইনটা আর লাগে না)।
 function dbHintsForRenamed(results) {
   try {
     const renamed = (results || []).filter((x) => x && x.ok && x.action === 'renamed' && x.name && x.final);
-    if (!renamed.length || !fs.existsSync(WWW_DIR)) return;
+    if (!renamed.length || !fs.existsSync(WWW_DIR)) return false;
     const unq = (v) => String(v).trim().replace(/^(['"])(.*)\1$/, '$2');
     const used = []; // { folder, db }
     for (const e of fs.readdirSync(WWW_DIR, { withFileTypes: true })) {
@@ -4749,9 +4750,11 @@ function dbHintsForRenamed(results) {
       } catch (_) {}
       if (db) used.push({ folder: e.name, db });
     }
+    let covered = 0;
     for (const x of renamed) {
       const sites = used.filter((u) => u.db === x.name).map((u) => u.folder);
       if (!sites.length) continue;
+      covered++;
       x.notes = (x.notes || []).concat(
         tr(
           `সাইট ${sites.join(', ')} এখনো মূল "${x.name}" ডাটাবেস ব্যবহার করছে; এই কপি ("${x.final}") কোনো সাইটে জোড়া নেই। কপি ব্যবহার করতে ওই সাইটের .env-এ DB_DATABASE=${x.final} (WordPress হলে wp-config.php-এর DB_NAME) বসান।`,
@@ -4759,7 +4762,10 @@ function dbHintsForRenamed(results) {
         )
       );
     }
-  } catch (_) {}
+    return covered === renamed.length;
+  } catch (_) {
+    return false;
+  }
 }
 
 // Restore-এর পর "-restored" কপির কনফিগ পুরোনো নামে রয়ে গেছে কিনা শুধু পড়ে বলে দেয় (কোনো ফাইল বদলায় না)।
@@ -4899,7 +4905,7 @@ ipcMain.handle('restore:db', async (_e, opts) => {
   } catch (err) {
     res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
   }
-  if (res && res.ok) dbHintsForRenamed(res.results);
+  if (res && res.ok && dbHintsForRenamed(res.results) && res.renamedGeneric) res.warnings = (res.warnings || []).filter((w) => w !== res.renamedGeneric);
   try {
     if (res && res.ok) {
       const n = Array.isArray(res.results) ? res.results.filter((x) => x.ok).length : 0;
@@ -4935,7 +4941,7 @@ ipcMain.handle('restore:pg', async (_e, opts) => {
   } catch (err) {
     res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
   }
-  if (res && res.ok) dbHintsForRenamed(res.results);
+  if (res && res.ok && dbHintsForRenamed(res.results) && res.renamedGeneric) res.warnings = (res.warnings || []).filter((w) => w !== res.renamedGeneric);
   try {
     if (res && res.ok) {
       const n = Array.isArray(res.results) ? res.results.filter((x) => x.ok).length : 0;
