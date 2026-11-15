@@ -13,6 +13,48 @@ const VERSION = '1.0.0';
 const INSTALL_TIMEOUT = 15 * 60 * 1000;
 const START_TIMEOUT = 60 * 1000;
 
+const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+const tail = (s) => stripAnsi(s).trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' | ').slice(-300);
+// npm debug লগের আওয়াজ-লাইন (argv-এ "--loglevel=error" থাকে বলে সেটা "error" লাইন ভেবে ভুল দেখাত)
+const NOISE = /\bverbose argv\b|A complete log of this run|\btiming\b|\bsilly\b|\bverbose (title|logfile|cli|node|npm|version)\b|^\s*$/i;
+// npm-এর আসল কারণ: stderr-এর "npm error ..." লাইন; না থাকলে debug লগ ফাইলের শেষ কয়েক লাইন (আওয়াজ বাদে); লগ ফাইলের পথ আলাদা
+function npmReason(s) {
+  const lines = stripAnsi(s).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const keep = [];
+  let logPath = '';
+  for (const l of lines) {
+    const m = l.match(/^npm (?:error|ERR!)\s?(.*)$/i);
+    if (!m) continue;
+    const body = m[1].trim();
+    if (!body) continue;
+    const lp = body.match(/A complete log of this run can be found in:\s*(.+)$/i);
+    if (lp) {
+      logPath = lp[1].trim();
+      continue;
+    }
+    if (NOISE.test(body)) continue;
+    keep.push(body);
+  }
+  let reason = keep.slice(0, 5).join(' | ').slice(0, 450);
+  if (!reason && logPath) {
+    // stderr-এ কারণ আসেনি: debug লগের error লাইন (argv বাদে) + একদম শেষ কয়েক লাইন
+    try {
+      const txt = fs
+        .readFileSync(logPath, 'utf8')
+        .split(/\r?\n/)
+        .map((l) => l.replace(/^\d+\s+/, '').trim())
+        .filter((l) => l && !NOISE.test(l));
+      const errs = txt.filter((l) => /\b(error|ERR!|verbose stack)\b/i.test(l)).slice(0, 4);
+      const last = txt.slice(-6);
+      const all = [];
+      for (const l of errs.concat(last)) if (!all.includes(l)) all.push(l);
+      reason = all.join(' | ').slice(-600);
+    } catch {}
+  }
+  if (!reason) reason = tail(s);
+  return reason + (logPath ? ' | log: ' + logPath : '');
+}
+
 const tcpUp = (port) =>
   new Promise((resolve) => {
     const s = net.connect(port, '127.0.0.1');
@@ -41,40 +83,6 @@ function init(deps) {
     env[pk] = rt.dir + path.delimiter + (env[pk] || '');
     return env;
   };
-  const tail = (s) => String(s).replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' | ').slice(-300);
-  // npm-এর আসল কারণ: "npm error ..." লাইনগুলো (code, syscall, network ...), শেষের "A complete log ..." লাইন বাদ; লগ ফাইলের পথ আলাদা
-  function npmReason(s) {
-    const lines = String(s).replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const keep = [];
-    let logPath = '';
-    for (const l of lines) {
-      const m = l.match(/^npm (?:error|ERR!)\s?(.*)$/i);
-      if (!m) continue;
-      const body = m[1].trim();
-      if (!body) continue;
-      const lp = body.match(/A complete log of this run can be found in:\s*(.+)$/i);
-      if (lp) {
-        logPath = lp[1].trim();
-        continue;
-      }
-      keep.push(body);
-    }
-    let reason = keep.slice(0, 5).join(' | ').slice(0, 450);
-    if (!reason && logPath) {
-      // stderr-এ কারণ আসেনি: npm-এর debug লগ ফাইল থেকে "error" লাইনগুলো পড়ি
-      try {
-        const txt = fs.readFileSync(logPath, 'utf8').split(/\r?\n/);
-        const errs = txt
-          .filter((l) => /\b(error|verbose stack)\b/i.test(l))
-          .map((l) => l.replace(/^\d+\s+/, '').trim())
-          .filter(Boolean);
-        reason = errs.slice(0, 6).join(' | ').slice(0, 600);
-      } catch {}
-    }
-    if (!reason) reason = tail(s);
-    return reason + (logPath ? ' | log: ' + logPath : '');
-  }
-
   // ফেরত: { ok, err }
   function install(rt) {
     return new Promise((resolve) => {
@@ -113,10 +121,13 @@ function init(deps) {
       proc.once('error', (e) => finish({ ok: false, err: e.message }));
       proc.once('exit', (code) => {
         if (code === 0 && installed()) return finish({ ok: true });
+        const errFile = path.join(dir, 'npm-install-error.log');
+        let saved = '';
         try {
-          fs.writeFileSync(path.join(dir, 'npm-install-error.log'), out); // পুরো আউটপুট, দরকারে দেখার জন্য
+          fs.writeFileSync(errFile, out); // পুরো আউটপুট, দরকারে দেখার জন্য
+          saved = ' | ' + deps.tr('পুরো আউটপুট: ', 'full output: ') + errFile;
         } catch {}
-        finish({ ok: false, err: `npm (${code}) ${npmReason(out)}` });
+        finish({ ok: false, err: `npm (${code}) ${npmReason(out)}${saved}` });
       });
     });
   }
@@ -213,4 +224,4 @@ function init(deps) {
   return { open, stop, running: () => !!run, installed };
 }
 
-module.exports = { init, VERSION };
+module.exports = { init, VERSION, npmReason };

@@ -4188,14 +4188,15 @@ ipcMain.handle('all:stop', async () => {
 // ---------- Adminer খোলা ----------
 // kind = ডাটাবেসের id (mysql / postgres)। লগইন ফর্মে সার্ভার-পোর্ট ও ইউজার আগে থেকে বসানো থাকে।
 ipcMain.handle('adminer:open', async (_event, kind) => {
+  if (kind === 'mongodb') {
+    // Adminer MongoDB-র সাথে চলে না, তাই ওয়েব সার্ভার/Adminer-এর পরীক্ষার আগেই এই উত্তর (Mongo Express-এর বাটন আলাদা)
+    return tr('Adminer MongoDB-র সাথে চলে না। MongoDB দেখতে MongoDB কার্ডের "Open in Mongo Express" বাটন চাপুন। সংযোগ লিংক: mongodb://127.0.0.1:' + getDbPort('mongodb'), 'Adminer does not work with MongoDB. To browse MongoDB press "Open in Mongo Express" on the MongoDB card. Connection link: mongodb://127.0.0.1:' + getDbPort('mongodb'));
+  }
   if (!running) {
     return tr('Adminer চালাতে আগে ওয়েব সার্ভার (Nginx বা Apache) চালু করুন (Start All বা Start)।', 'Start a web server (Nginx or Apache) first to use Adminer (Start All or Start).');
   }
   if (!adminerInstalled()) {
     return tr('Adminer এখনো নামানো হয়নি। ওয়েব সার্ভার একবার বন্ধ করে আবার চালু করুন।', 'Adminer has not been downloaded yet. Stop the web server and start it again.');
-  }
-  if (kind === 'mongodb') {
-    return tr('Adminer MongoDB-র সাথে চলে না। MongoDB দেখার টুল পরের ধাপে আসছে; এখন সংযোগ লিংক: mongodb://127.0.0.1:' + getDbPort('mongodb'), 'Adminer does not work with MongoDB. A MongoDB viewer comes in the next step; for now connect with mongodb://127.0.0.1:' + getDbPort('mongodb'));
   }
   const db = DATABASES[kind];
   let query = '';
