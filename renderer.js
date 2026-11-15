@@ -376,6 +376,7 @@ function buildDb(db) {
   const stopBtn = el('button', { className: 'btn sm danger', textContent: '■ Stop' });
   const auto = el('input', { type: 'checkbox', checked: db.auto });
   const adminerBtn = el('button', { className: 'btn sm', textContent: t('db.adminer') });
+  const hasViewer = db.id !== 'mongodb'; // MongoDB-র দেখার টুল পরের ধাপে
   const pmaBtn = db.id === 'mysql' ? el('button', { className: 'btn sm', textContent: t('db.pma') }) : null;
 
   saveBtn.addEventListener('click', () =>
@@ -409,7 +410,7 @@ function buildDb(db) {
     el(
       'div',
       { className: 'card-head' },
-      el('div', { className: 'card-icon', textContent: db.id === 'mysql' ? 'SQL' : 'PG' }),
+      el('div', { className: 'card-icon', textContent: db.id === 'mysql' ? 'SQL' : db.id === 'mongodb' ? 'MG' : 'PG' }),
       el('div', {}, el('div', { className: 'card-title', textContent: db.label }), subEl),
       badge
     ),
@@ -423,7 +424,7 @@ function buildDb(db) {
       restartBtn,
       stopBtn
     ),
-    el('div', { className: 'row' }, el('span', { className: 'badge tool', textContent: t('db.view') }), adminerBtn, ...(pmaBtn ? [pmaBtn] : [])),
+    ...(hasViewer ? [el('div', { className: 'row' }, el('span', { className: 'badge tool', textContent: t('db.view') }), adminerBtn, ...(pmaBtn ? [pmaBtn] : []))] : []),
     infoEl
   );
   dbsEl.appendChild(card);

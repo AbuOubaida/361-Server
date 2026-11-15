@@ -14,6 +14,7 @@ const monitor = require('./monitor'); // R1: সাইট মনিটরিং 
 const resources = require('./resources'); // R1 ধাপ ২: প্রসেস গ্রুপ ধরে CPU/RAM
 const traffic = require('./traffic'); // R1 ধাপ ৩b: সাইট ধরে হিট (access log থেকে)
 const mailer = require('./mailer'); // R1 ধাপ ৪: ইমেইল সতর্কবার্তা (নিজের SMTP ক্লায়েন্ট)
+const mongo = require('./mongo'); // R2 ধাপ ১: MongoDB নিরাপদে বন্ধ করার ছোট কোড
 
 // ====== এখানে আপনার লিংক বসান ======
 const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
@@ -25,6 +26,9 @@ const PHP_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/p
 const MYSQL_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/mysql-8.4.13-winx64.zip';
 // PostgreSQL zip-এর আসল নাম দিন (EDB-র "binaries" zip, Release-এ আপলোড করা ফাইলের নাম)
 const POSTGRES_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/postgresql-18.6-5-windows-x64-binaries.zip';
+// MongoDB Community (R2): mongodb.com-এর সরাসরি ZIP লিংক। নিজের Release-এ আপলোড করলে শুধু এই লিংকটা বদলান।
+// (ZIP-এর ভেতরে একটা ফোল্ডার, তার ভেতরে bin\mongod.exe থাকে; ফাইল বড়, ডাউনলোডে সময় লাগে)
+const MONGODB_URL = 'https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-7.0.16.zip';
 
 // Adminer (একটা মাত্র PHP ফাইল): adminer.org থেকে adminer-5.5.1.php নামিয়ে Release-এ আপলোড করুন
 const ADMINER_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/adminer-5.5.1.php';
@@ -148,6 +152,7 @@ function dataDirFor(id, legacyName) {
 }
 const mysqlDataDir = () => dataDirFor('mysql', 'mysql');
 const pgDataDir = () => dataDirFor('postgres', 'postgres');
+const mongoDataDir = () => dataDirFor('mongodb', 'mongodb');
 const mysqlIni = () => {
   const v = activeVersion('mysql');
   return path.join(ROOT_DIR, 'data', v.isDefault ? 'my.ini' : `my-${v.version}.ini`);
@@ -1074,6 +1079,10 @@ const SERVICES = {
     version: '18.6',
     needsVC: true,
   }),
+  mongodb: makeService('mongodb', 'MongoDB', MONGODB_URL, 'mongodb', path.join('bin', 'mongod.exe'), {
+    version: '7.0.16',
+    needsVC: true,
+  }),
   phpmyadmin: makeService('phpmyadmin', 'phpMyAdmin', PMA_URL, 'phpmyadmin', 'index.php', {
     version: '5.2.3',
     afterExtract: (dir) => fs.mkdirSync(path.join(dir, 'tmp'), { recursive: true }),
@@ -1518,6 +1527,7 @@ function resGroups() {
   if (Object.values(nodeRun).some((r) => r && r.task === 'run')) g.push({ id: 'node', name: 'Node.js', images: ['node.exe'] });
   if (dbRun.mysql) g.push({ id: 'mysql', name: 'MySQL', images: ['mysqld.exe'] });
   if (dbRun.postgres) g.push({ id: 'postgres', name: 'PostgreSQL', images: ['postgres.exe'] });
+  if (dbRun.mongodb) g.push({ id: 'mongodb', name: 'MongoDB', images: ['mongod.exe'] });
   return g;
 }
 // ধাপ ৩b: কোন সাইটের কোন log ফাইল পড়া হবে। ফেরত: [{domain, kind, file, own}]
@@ -1991,6 +2001,34 @@ const DATABASES = {
     shutdownCmd: (svc) => ({
       exe: path.join(svc.dir, 'bin', 'pg_ctl.exe'),
       args: ['stop', '-D', pgDataDir(), '-m', 'fast', '-w', '-t', '20'],
+    }),
+  },
+  // MongoDB (R2 ধাপ ১): শুধু এই পিসি থেকে (127.0.0.1), পাসওয়ার্ড ছাড়া। ডাটা data\mongodb-এ (tools-এর বাইরে)
+  mongodb: {
+    id: 'mongodb',
+    label: 'MongoDB',
+    svcId: 'mongodb',
+    portKey: 'mongodbPort',
+    defaultPort: 27017,
+    autoDefault: false,
+    stale: 'mongod',
+    get dataDir() {
+      return mongoDataDir();
+    },
+    get info() {
+      return tr(`সংযোগ: mongodb://127.0.0.1:${getDbPort('mongodb')} · পাসওয়ার্ড ছাড়া, শুধু এই পিসি থেকে`, `Connect: mongodb://127.0.0.1:${getDbPort('mongodb')} · no password, this PC only`);
+    },
+    prepare: () => fs.mkdirSync(mongoDataDir(), { recursive: true }),
+    isInitialized: () => true, // mongod প্রথমবার নিজেই ডাটা ফোল্ডার ভরে নেয়
+    init: async () => {},
+    // wiredTigerCacheSizeGB 1: ডিফল্টে MongoDB অর্ধেক RAM চায়, ডেভ পিসির জন্য বেশি
+    spawnArgs: (svc, port) => ['--dbpath', mongoDataDir(), '--port', String(port), '--bind_ip', '127.0.0.1', '--wiredTigerCacheSizeGB', '1'],
+    check: (svc, port) => tcpCheck(port),
+    // mongosh লাগে না: Electron/Node নিজেই OP_MSG shutdown কমান্ড পাঠায় (mongo.js)
+    shutdownCmd: (svc, port) => ({
+      exe: process.execPath,
+      args: ['-e', `require(${JSON.stringify(path.join(__dirname, 'mongo.js'))}).shutdown(${Number(port)}).then(() => process.exit(0))`],
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     }),
   },
 };
@@ -4153,6 +4191,9 @@ ipcMain.handle('adminer:open', async (_event, kind) => {
   if (!adminerInstalled()) {
     return tr('Adminer এখনো নামানো হয়নি। ওয়েব সার্ভার একবার বন্ধ করে আবার চালু করুন।', 'Adminer has not been downloaded yet. Stop the web server and start it again.');
   }
+  if (kind === 'mongodb') {
+    return tr('Adminer MongoDB-র সাথে চলে না। MongoDB দেখার টুল পরের ধাপে আসছে; এখন সংযোগ লিংক: mongodb://127.0.0.1:' + getDbPort('mongodb'), 'Adminer does not work with MongoDB. A MongoDB viewer comes in the next step; for now connect with mongodb://127.0.0.1:' + getDbPort('mongodb'));
+  }
   const db = DATABASES[kind];
   let query = '';
   if (db) {
@@ -4531,13 +4572,14 @@ async function startupNodeApps() {
 }
 
 // ---------- টুলস ও ভার্সন ----------
-const TOOL_ORDER = ['php', 'nginx', 'apache', 'mysql', 'postgres', 'phpmyadmin', 'node'];
+const TOOL_ORDER = ['php', 'nginx', 'apache', 'mysql', 'postgres', 'mongodb', 'phpmyadmin', 'node'];
 const TOOL_HELP = {
   php: 'https://windows.php.net/download/',
   nginx: 'https://nginx.org/en/download.html',
   apache: 'https://www.apachelounge.com/download/',
   mysql: 'https://dev.mysql.com/downloads/mysql/',
   postgres: 'https://www.enterprisedb.com/download-postgresql-binaries',
+  mongodb: 'https://www.mongodb.com/try/download/community',
   phpmyadmin: 'https://www.phpmyadmin.net/downloads/',
   node: 'https://nodejs.org/en/download',
 };
@@ -4547,12 +4589,13 @@ const TOOL_HINT = {
   apache: ['Win64 ZIP নামান (Apache Lounge)', 'Download the Win64 ZIP (Apache Lounge)'],
   mysql: ['"ZIP Archive" (Windows x64) নামান, MSI নয়', 'Download the "ZIP Archive" (Windows x64), not the MSI'],
   postgres: ['EDB-র "Windows x86-64" binaries ZIP নামান', 'Download the EDB "Windows x86-64" binaries ZIP'],
+  mongodb: ['Platform "Windows x64", Package "zip" বেছে নামান (MSI নয়)', 'Choose Platform "Windows x64" and Package "zip" (not the MSI)'],
   phpmyadmin: ['all-languages.zip নামান', 'Download all-languages.zip'],
   node: ['nodejs.org/dist থেকে node-v...-win-x64.zip নামান (Windows Binary ZIP, MSI নয়)', 'Download node-v...-win-x64.zip from nodejs.org/dist (the Windows Binary ZIP, not the MSI)'],
 };
 const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._-]{0,30}$/;
 // কোনো টুল চলার সময় ভার্সন বদলানো যাবে না
-const toolInUse = (id) => (id === 'mysql' || id === 'postgres' ? !!dbRun[id] : id === 'node' ? Object.keys(nodeRun).length > 0 : !!running);
+const toolInUse = (id) => (DATABASES[id] ? !!dbRun[id] : id === 'node' ? Object.keys(nodeRun).length > 0 : !!running);
 
 ipcMain.handle('tools:list', () =>
   TOOL_ORDER.map((id) => {
@@ -4568,7 +4611,7 @@ ipcMain.handle('tools:list', () =>
       id,
       label: svc.label,
       hint: tr(...TOOL_HINT[id]),
-      isDb: id === 'mysql' || id === 'postgres',
+      isDb: !!DATABASES[id],
       active: act.version,
       inUse: toolInUse(id),
       versions: all.map((v) => ({
@@ -4683,7 +4726,7 @@ ipcMain.handle('tools:remove', (_event, id, version) => {
     if (moved.length) phpNote = tr(` (${moved.length}টা Node সাইট চালু ভার্সনে ফিরেছে)`, ` (${moved.length} Node site(s) went back to the active version)`);
   }
   saveSettings(settings);
-  const dbNote = id === 'mysql' || id === 'postgres' ? tr(' (ওই ভার্সনের ডাটাবেস ডাটা data ফোল্ডারে রয়ে গেছে)', ' (that version\'s database data remains in the data folder)') : '';
+  const dbNote = DATABASES[id] ? tr(' (ওই ভার্সনের ডাটাবেস ডাটা data ফোল্ডারে রয়ে গেছে)', ' (that version\'s database data remains in the data folder)') : '';
   return { ok: true, message: tr(`${SERVICES[id].label} ${version} মুছে ফেলা হয়েছে${dbNote}${phpNote}`, `${SERVICES[id].label} ${version} removed${dbNote}${phpNote}`) };
 });
 
