@@ -127,6 +127,8 @@ contextBridge.exposeInMainWorld('api', {
   restoreDb: (opts) => ipcRenderer.invoke('restore:db', opts),
   restorePgInfo: (opts) => ipcRenderer.invoke('restore:pgInfo', opts),
   restorePg: (opts) => ipcRenderer.invoke('restore:pg', opts),
+  restoreMgInfo: (opts) => ipcRenderer.invoke('restore:mgInfo', opts),
+  restoreMg: (opts) => ipcRenderer.invoke('restore:mg', opts),
   restoreFixDb: (opts) => ipcRenderer.invoke('restore:fixDb', opts),
   restoreOtherInfo: (dir) => ipcRenderer.invoke('restore:otherInfo', dir),
   restoreOther: (opts) => ipcRenderer.invoke('restore:other', opts),

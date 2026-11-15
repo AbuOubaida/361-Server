@@ -30,6 +30,9 @@ const POSTGRES_URL = 'https://github.com/AbuOubaida/361-Server/releases/download
 // MongoDB Community (R2): mongodb.com-এর সরাসরি ZIP লিংক। নিজের Release-এ আপলোড করলে শুধু এই লিংকটা বদলান।
 // (ZIP-এর ভেতরে একটা ফোল্ডার, তার ভেতরে bin\mongod.exe থাকে; ফাইল বড়, ডাউনলোডে সময় লাগে)
 const MONGODB_URL = 'https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-7.0.16.zip';
+// MongoDB Database Tools (mongodump/mongorestore): MongoDB-র ZIP-এ থাকে না, আলাদা প্যাকেজ (নিজস্ব ভার্সন, 100.x)। backup প্রথমবার দরকারে নামায়।
+// লিংক ফরম্যাট এই সেশনে যাচাই করা যায়নি; ভুল হলে শুধু এই লাইন বদলান।
+const MONGOTOOLS_URL = 'https://fastdl.mongodb.org/tools/db/mongodb-database-tools-windows-x86_64-100.10.0.zip';
 
 // Adminer (একটা মাত্র PHP ফাইল): adminer.org থেকে adminer-5.5.1.php নামিয়ে Release-এ আপলোড করুন
 const ADMINER_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/adminer-5.5.1.php';
@@ -1854,6 +1857,17 @@ async function installInto(svc, destDir, { url, zipFile } = {}) {
   if (!zipFile) fs.rmSync(zipPath, { force: true });
 
   if (svc.afterExtract) svc.afterExtract(destDir);
+}
+
+// MongoDB Database Tools: <tools>\mongo-tools\bin\mongodump.exe; না থাকলে নামিয়ে খোলে। ফেরত: mongodump.exe-র পথ
+const MONGOTOOLS = { label: 'MongoDB Database Tools', exeRel: path.join('bin', 'mongodump.exe'), afterExtract: null };
+const mongoToolsDir = () => path.join(TOOLS_DIR, 'mongo-tools');
+async function ensureMongoTools() {
+  const exe = path.join(mongoToolsDir(), MONGOTOOLS.exeRel);
+  if (fs.existsSync(exe)) return exe;
+  await installInto(MONGOTOOLS, mongoToolsDir(), { url: MONGOTOOLS_URL });
+  sendStatus(tr('MongoDB Database Tools ইনস্টল সম্পন্ন', 'MongoDB Database Tools installed'));
+  return exe;
 }
 
 async function ensureService(svc) {
@@ -4847,6 +4861,9 @@ const backup = createBackup({
   pgDir: () => SERVICES.postgres.dir,
   mysqlPort: () => getDbPort('mysql'),
   pgPort: () => getDbPort('postgres'),
+  mongoExe: () => SERVICES.mongodb.exe,
+  mongoPort: () => getDbPort('mongodb'),
+  ensureMongoTools: () => ensureMongoTools(),
   mysqlEnv: () => mysqlEnv(),
   pgEnv: () => pgEnv(),
   phpVersions: () => phpVersionList().map((x) => x.version),
@@ -5158,6 +5175,41 @@ ipcMain.handle('restore:pg', async (_e, opts) => {
       sendStatus(tr(`Restore PostgreSQL: শেষ (${n}টা ডাটাবেস)`, `Restore PostgreSQL: finished (${n} database(s))`));
     } else {
       sendStatus(tr('Restore PostgreSQL: ব্যর্থ বা বাতিল', 'Restore PostgreSQL: failed or cancelled'));
+    }
+  } catch (_) {}
+  return res;
+});
+
+// R2 ধাপ ২: MongoDB ডাটাবেস ফেরত আনা। restore:mgInfo manifest থেকে ডাটাবেসের নাম পড়ে আর MongoDB-তে এখন কোনটা আছে দেখে (কিছু বদলায় না); restore:mg mongorestore চালায়।
+// নাম মিললে: নতুন নামে (<নাম>_restored) বা overwrite (আগে mongodump safety copy `<ROOT>\backup\pre-restore\<stamp>`-এ, সফল হলে তবেই dropDatabase)। admin/config/local আর ইউজার ফেরত আসে না।
+ipcMain.handle('restore:mgInfo', async (_e, opts) => {
+  try {
+    if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+    const o = opts && typeof opts === 'object' ? opts : {};
+    return await backup.restoreMongoInfo({ dir: typeof o.dir === 'string' ? o.dir : '' });
+  } catch (err) {
+    return { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+});
+ipcMain.handle('restore:mg', async (_e, opts) => {
+  let res;
+  try {
+    if (busy) return { ok: false, message: tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...') };
+    const o = opts && typeof opts === 'object' ? opts : {};
+    res = await backup.restoreMongo({
+      dir: typeof o.dir === 'string' ? o.dir : '',
+      password: typeof o.password === 'string' ? o.password : '',
+      picks: Array.isArray(o.picks) ? o.picks.map((p) => ({ name: String(p && p.name), mode: p && p.mode === 'overwrite' ? 'overwrite' : 'rename' })) : [],
+    });
+  } catch (err) {
+    res = { ok: false, message: tr('ত্রুটি: ', 'Error: ') + err.message };
+  }
+  try {
+    if (res && res.ok) {
+      const n = Array.isArray(res.results) ? res.results.filter((x) => x.ok).length : 0;
+      sendStatus(tr(`Restore MongoDB: শেষ (${n}টা ডাটাবেস)`, `Restore MongoDB: finished (${n} database(s))`));
+    } else {
+      sendStatus(tr('Restore MongoDB: ব্যর্থ বা বাতিল', 'Restore MongoDB: failed or cancelled'));
     }
   } catch (_) {}
   return res;

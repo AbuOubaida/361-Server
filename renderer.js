@@ -2161,6 +2161,7 @@ function bkFill() {
   $('bkAppTimer').checked = bk.appEnabled;
   $('bkMysql').checked = bk.what.mysql;
   $('bkPg').checked = bk.what.postgres;
+  $('bkMongo').checked = bk.what.mongodb !== false;
   $('bkWww').checked = bk.what.www;
   $('bkCerts').checked = bk.what.certs;
   $('bkAutoDb').checked = bk.autoStartDb;
@@ -2335,6 +2336,7 @@ function bkCollect() {
   bk.appEnabled = $('bkAppTimer').checked;
   bk.what.mysql = $('bkMysql').checked;
   bk.what.postgres = $('bkPg').checked;
+  bk.what.mongodb = $('bkMongo').checked;
   bk.what.www = $('bkWww').checked;
   bk.what.certs = $('bkCerts').checked;
   bk.autoStartDb = $('bkAutoDb').checked;
@@ -2560,6 +2562,7 @@ function rsItem(it) {
   const db = [];
   if (it.mysqlDbs.length) db.push('MySQL (' + it.mysqlDbs.join(', ') + ')');
   if (it.postgres) db.push('PostgreSQL');
+  if (it.mongodb) db.push('MongoDB' + (it.mongoDbs && it.mongoDbs.length ? ' (' + it.mongoDbs.join(', ') + ')' : ''));
   if (db.length) card.appendChild(rsLine(t('rs.has.db', db.join(', '))));
   if (has(/^www\./i)) card.appendChild(rsLine(t('rs.has.www', it.sites.length)));
   if (has(/^settings\./i)) card.appendChild(rsLine(t('rs.has.settings')));
@@ -2569,6 +2572,7 @@ function rsItem(it) {
   if (it.manifest && has(/^www\./i)) rsWwwButton(it, card);
   if (it.manifest && has(/^database\./i) && it.mysqlDbs.length) rsDbButton(it, card);
   if (it.manifest && has(/^database\./i) && it.postgres) rsPgButton(it, card);
+  if (it.manifest && has(/^database\./i) && it.mongodb) rsMgButton(it, card);
   if (it.manifest && (it.extras.length || (it.copyFolders && it.copyFolders.length))) rsOtherButton(it, card);
   if (it.manifest && has(/^settings\./i)) rsSettingsButton(it, card);
   return card;
@@ -2886,6 +2890,104 @@ async function rsPgList(it, pw, box) {
         }
         for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));
         rsFixButtons(x, out);
+      }
+      for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
+    })
+  );
+  box.appendChild(go);
+  box.appendChild(out);
+}
+
+// ---------- R2 ধাপ ২: MongoDB ডাটাবেস ফেরত আনা ----------
+function rsMgButton(it, card) {
+  const panel = el('div', { style: 'margin-top:8px' });
+  const btn = el('button', { className: 'btn sm', textContent: t('rs.mg.btn'), style: 'margin-top:6px' });
+  btn.addEventListener('click', (e) => work(e.currentTarget, async () => rsMgOpen(it, panel)));
+  card.appendChild(btn);
+  card.appendChild(panel);
+}
+function rsMgOpen(it, panel) {
+  panel.textContent = '';
+  if (it.complete === false) panel.appendChild(rsLine('⚠ ' + t('rs.db.partial'), 'info'));
+  panel.appendChild(rsLine(t('rs.mg.warn')));
+  let pw = null;
+  if (it.encrypted) {
+    pw = el('input', { type: 'password', placeholder: t('rs.db.pw'), style: 'margin:6px 0;width:300px;max-width:100%' });
+    panel.appendChild(el('div', {}, pw));
+  }
+  const box = el('div', {});
+  const lb = el('button', { className: 'btn sm', textContent: t('rs.mg.list'), style: 'margin-top:6px' });
+  lb.addEventListener('click', (e) => work(e.currentTarget, () => rsMgList(it, pw, box)));
+  panel.appendChild(lb);
+  panel.appendChild(box);
+}
+async function rsMgList(it, pw, box) {
+  box.textContent = '';
+  box.appendChild(rsLine(t('rs.mg.listing'), 'info'));
+  let info;
+  try {
+    info = await window.api.restoreMgInfo({ dir: it.dir });
+  } catch (err) {
+    info = { ok: false, message: String(err && err.message ? err.message : err) };
+  }
+  box.textContent = '';
+  if (!info || !info.ok) {
+    box.appendChild(rsLine('⚠ ' + ((info && info.message) || ''), 'info'));
+    return;
+  }
+  if (!info.sevenZip && it.encrypted) box.appendChild(rsLine('⚠ ' + t('rs.db.nosevenzip'), 'info'));
+  if (info.skippedNames && info.skippedNames.length) box.appendChild(rsLine(t('rs.pg.skipped', info.skippedNames.join(', '))));
+  if (!info.dbs.length) {
+    box.appendChild(rsLine(t('rs.mg.empty'), 'info'));
+    return;
+  }
+  if (!info.mongoRunning && info.mongoInstalled) box.appendChild(rsLine(t('rs.mg.unknown')));
+  box.appendChild(rsLine(t('rs.db.pick'), 'info'));
+  const rows = [];
+  box.appendChild(rsSelectBar(rows));
+  for (const d of info.dbs) {
+    const cb = el('input', { type: 'checkbox', checked: true });
+    const sel =
+      d.exists !== false
+        ? el(
+            'select',
+            { style: 'margin-left:8px;max-width:340px' },
+            el('option', { value: 'rename', textContent: t('rs.db.mode.rename') }),
+            el('option', { value: 'overwrite', textContent: t('rs.db.mode.over') })
+          )
+        : null;
+    const note = d.exists === true ? t('rs.mg.exists') : d.exists === false ? t('rs.mg.new') : '';
+    const label = el('label', { style: 'display:inline-flex;align-items:center;gap:6px' }, cb, el('b', { textContent: d.name }), el('span', { className: 'hint', style: 'margin:0' }, ...pathNodes(note)));
+    box.appendChild(el('div', { style: 'margin:3px 0' }, label, sel));
+    rows.push({ name: d.name, cb, sel });
+  }
+  const out = el('div', {});
+  const go = el('button', { className: 'btn sm primary', textContent: t('rs.mg.go'), style: 'margin-top:8px' });
+  go.addEventListener('click', (e) =>
+    work(e.currentTarget, async () => {
+      const picks = rows.filter((x) => x.cb.checked).map((x) => ({ name: x.name, mode: x.sel ? x.sel.value : 'rename' }));
+      out.textContent = '';
+      if (!picks.length) {
+        out.appendChild(rsLine(t('rs.db.none'), 'info'));
+        return;
+      }
+      if (!confirm(t('rs.mg.confirm', picks.length))) return;
+      out.appendChild(rsLine(t('rs.db.running'), 'info'));
+      let res;
+      try {
+        res = await window.api.restoreMg({ dir: it.dir, password: pw ? pw.value : '', picks });
+      } catch (err) {
+        res = { ok: false, message: String(err && err.message ? err.message : err) };
+      }
+      out.textContent = '';
+      if (res.message) out.appendChild(rsLine((res.ok ? '' : '⚠ ') + res.message, 'info'));
+      for (const x of res.results || []) {
+        if (!x.ok) out.appendChild(rsLine('✗ ' + t('rs.db.res.fail', x.name, x.message || ''), 'info'));
+        else {
+          const base = x.action === 'renamed' ? t('rs.db.res.renamed', x.name, x.final) : x.action === 'overwritten' ? t('rs.db.res.over', x.name) : t('rs.db.res.new', x.name);
+          out.appendChild(rsLine('✓ ' + base + (x.docs != null ? ' · ' + t('rs.mg.res.docs', x.docs) : ''), 'info'));
+        }
+        for (const n of x.notes || []) out.appendChild(rsLine('   · ' + n));
       }
       for (const w of res.warnings || []) out.appendChild(rsLine('⚠ ' + w));
     })

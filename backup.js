@@ -156,6 +156,22 @@ async function renameDirRetry(from, to, tries = 6, delayMs = 5000) {
   return { ok: false, attempts: tries, error: last };
 }
 
+// খুব ছোট TCP পরীক্ষা: এই পোর্টে কেউ শুনছে কি (MongoDB চালু আছে কিনা জানতে; mongodump-এর ধীর সংযোগ-ব্যর্থতার ওপর নির্ভর না করে)
+function tcpUp(port, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ host: '127.0.0.1', port: Number(port) });
+    const done = (v) => {
+      try {
+        sock.destroy();
+      } catch {}
+      resolve(v);
+    };
+    sock.setTimeout(timeoutMs, () => done(false));
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+  });
+}
+
 function run(exe, args, opts = {}) {
   return new Promise((resolve) => {
     const ch = execFile(
@@ -243,13 +259,13 @@ function createBackup(ctx) {
   const sevenDir = () => path.join(ctx.toolsDir(), '7zip');
 
   // ---------- কনফিগ ----------
-  // settings.backup = { local:{enabled,dir}, share:{enabled,unc,user,subdir}, times:['02:00'], what:{mysql,postgres,www,certs,extra:[]}, retentionDays, minFreeGb, appEnabled }
+  // settings.backup = { local:{enabled,dir}, share:{enabled,unc,user,subdir}, times:['02:00'], what:{mysql,postgres,mongodb,www,certs,extra:[]}, retentionDays, minFreeGb, appEnabled }
   // পাসওয়ার্ড settings.backupSecrets = { zip, share } (ctx.secret.enc দিয়ে মোড়া), কখনো UI-তে ফেরত যায় না।
   const DEFAULTS = {
     local: { enabled: false, dir: '' },
     share: { enabled: false, unc: '', user: '', subdir: '' },
     times: ['02:00'],
-    what: { mysql: true, postgres: true, www: true, certs: true, extra: [], wwwExclude: [] },
+    what: { mysql: true, postgres: true, mongodb: true, www: true, certs: true, extra: [], wwwExclude: [] },
     retentionDays: 14,
     minFreeGb: 0,
     appEnabled: true,
@@ -340,6 +356,7 @@ function createBackup(ctx) {
       what: {
         mysql: !!(cfg.what ? cfg.what.mysql : cur.what.mysql),
         postgres: !!(cfg.what ? cfg.what.postgres : cur.what.postgres),
+        mongodb: !!(cfg.what ? cfg.what.mongodb : cur.what.mongodb),
         www: !!(cfg.what ? cfg.what.www : cur.what.www),
         certs: !!(cfg.what ? cfg.what.certs : cur.what.certs),
         extra: normExtra((cfg.what && cfg.what.extra) || cur.what.extra),
@@ -532,6 +549,37 @@ function createBackup(ctx) {
       return { ok: false, message: 'pg_dumpall failed: ' + m.slice(0, 300) };
     }
     return { ok: true };
+  }
+
+  // R2 ব্যাকআপ ধাপ ১: MongoDB। mongodump (আলাদা "MongoDB Database Tools" ZIP, ctx.ensureMongoTools একবার নামায) দিয়ে সব ডাটাবেস
+  // একটা gzip আর্কাইভ ফাইলে (db\mongodb.archive), যেটা database.7z-এর ভেতরে যায়। সার্ভার শুধু 127.0.0.1, পাসওয়ার্ড ছাড়া।
+  async function dumpMongo(dir) {
+    const mongod = ctx.mongoExe ? ctx.mongoExe() : '';
+    if (!mongod || !fs.existsSync(mongod)) return { skipped: 'MongoDB not installed' };
+    const port = ctx.mongoPort();
+    if (!(await tcpUp(port))) return { skipped: 'MongoDB not running', notRunning: true };
+    let dumpExe;
+    try {
+      dumpExe = await ctx.ensureMongoTools();
+    } catch (e) {
+      return { skipped: 'MongoDB Database Tools could not be downloaded: ' + String(e && e.message ? e.message : e).slice(0, 200) };
+    }
+    const file = path.join(dir, 'mongodb.archive');
+    const r = await run(dumpExe, ['--host', '127.0.0.1', '--port', String(port), '--archive=' + file, '--gzip'], { timeout: 3600000 });
+    let size = 0;
+    try {
+      size = fs.statSync(file).size;
+    } catch {}
+    if (!r.ok || size <= 0) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {}
+      return { ok: false, message: 'mongodump failed' + (r.ok ? ' (empty archive)' : ` (exit code ${r.code})`) + ': ' + String(r.stderr || r.stdout || '').trim().split(/\r?\n/).slice(-3).join(' | ').slice(0, 300) };
+    }
+    // mongodump stderr-এ "writing <db>.<collection> to archive" লাইন লেখে: সেখান থেকে ডাটাবেসের নাম (পাওয়া না গেলে খালি তালিকা, সমস্যা নয়)
+    const dbs = [];
+    for (const m of String(r.stderr || '').matchAll(/writing\s+([^\s.]+)\.(\S+)\s+to\b/gi)) if (!dbs.includes(m[1])) dbs.push(m[1]);
+    return { ok: true, dbs, size };
   }
 
   // ডাটাবেস বন্ধ থাকলে (যেমন অ্যাপ বন্ধ করে Task Scheduler চালালে) নিজে চালু করে dump, তারপর নিজে বন্ধ (শুধু আমরা চালু করলে)
@@ -754,7 +802,7 @@ function createBackup(ctx) {
   // ---------- Restore, step 1: list backups (READ ONLY, nothing is changed) ----------
   // One entry per backup folder (<root>\<YYYYMMDD-HHMMSS>\ with manifest.json). A folder without a readable manifest.json is still listed (manifest:false).
   function readBackupDir(dir, source) {
-    const item = { dir, stamp: path.basename(dir), source, manifest: true, complete: false, encrypted: false, created: '', files: [], missing: [], mysqlDbs: [], postgres: false, sites: [], extras: [], copyFolders: [], failedSteps: [], note: '' };
+    const item = { dir, stamp: path.basename(dir), source, manifest: true, complete: false, encrypted: false, created: '', files: [], missing: [], mysqlDbs: [], postgres: false, mongodb: false, mongoDbs: [], sites: [], extras: [], copyFolders: [], failedSteps: [], note: '' };
     let m = null;
     try {
       m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
@@ -769,6 +817,8 @@ function createBackup(ctx) {
       item.created = typeof m.created === 'string' ? m.created : '';
       item.mysqlDbs = Array.isArray(m.mysqlDbs) ? m.mysqlDbs.map(String) : [];
       item.postgres = !!m.postgres;
+      item.mongodb = !!m.mongodb;
+      item.mongoDbs = Array.isArray(m.mongoDbs) ? m.mongoDbs.map(String) : [];
       item.sites = Array.isArray(m.sites) ? m.sites.map(String) : [];
       item.failedSteps = Array.isArray(m.failedSteps) ? m.failedSteps.map(String) : [];
       item.copyFolders = Array.isArray(m.copyFolders) ? m.copyFolders.filter((c) => c && typeof c.label === 'string').map((c) => String(c.label)) : [];
@@ -904,7 +954,7 @@ function createBackup(ctx) {
     };
     const tmp = path.join(tmpRoot(), stamp);
     // ডাটাবেস ইনস্টল আছে ও চালু করা হয়েছে, কিন্তু dump হয়নি (চলছে না/চালু করা যায়নি/লগইন ব্যর্থ) = WARN, নিঃশব্দ SKIP নয়; ইনস্টলই নেই = SKIP
-    const warnOf = (m) => (/not running|login failed|could not be started/i.test(m) ? 'warn' : 'skip');
+    const warnOf = (m) => (/not running|login failed|could not be started|could not be downloaded/i.test(m) ? 'warn' : 'skip');
     const connected = [];
     let failed = false;
 
@@ -925,7 +975,7 @@ function createBackup(ctx) {
       fs.mkdirSync(tmp, { recursive: true });
       const packDir = path.join(tmp, 'out');
       fs.mkdirSync(packDir, { recursive: true });
-      const manifest = { app: 'Server 360', stamp, created: started.toISOString(), encrypted: !!password, files: [], mysqlDbs: [], postgres: false, sites: [] };
+      const manifest = { app: 'Server 360', stamp, created: started.toISOString(), encrypted: !!password, files: [], mysqlDbs: [], postgres: false, mongodb: false, mongoDbs: [], sites: [] };
 
       // ১) ডাটাবেস
       const dumpDir = path.join(tmp, 'db');
@@ -942,6 +992,12 @@ function createBackup(ctx) {
         if (r.skipped) step('PostgreSQL dump', warnOf(r.skipped), r.skipped);
         else if (!r.ok) { step('PostgreSQL dump', false, r.message); failed = true; }
         else { step('PostgreSQL dump', true); manifest.postgres = true; anyDump = true; }
+      }
+      if (cfg.what.mongodb) {
+        const r = await dumpWithAutoStart('mongodb', 'MongoDB', dumpMongo, dumpDir, cfg);
+        if (r.skipped) step('MongoDB dump', warnOf(r.skipped), r.skipped);
+        else if (!r.ok) { step('MongoDB dump', false, r.message); failed = true; }
+        else { step('MongoDB dump', true, r.dbs.length ? r.dbs.join(', ') : 'no user collections'); manifest.mongodb = true; manifest.mongoDbs = r.dbs; anyDump = true; }
       }
       if (anyDump) {
         const a = await makeArchive(path.join(packDir, 'database'), dumpDir, [], password);
@@ -1815,8 +1871,8 @@ function createBackup(ctx) {
     return '';
   }
 
-  // database.7z/zip থেকে db\postgres.sql বের করা; ফেরত { ok, file } বা { ok:false, ... }
-  async function extractPgSql(archive, password, exDir, warnings) {
+  // database.7z/zip থেকে db\postgres.sql (want দিলে অন্য ফাইল, যেমন mongodb.archive) বের করা; ফেরত { ok, file } বা { ok:false, ... }
+  async function extractPgSql(archive, password, exDir, warnings, want = 'postgres.sql') {
     const sevenZ = find7z();
     const is7z = /\.7z$/i.test(archive);
     if (is7z && !sevenZ) return { ok: false, message: tr('7-Zip নেই; Backup পেজ থেকে ইনস্টল করুন', '7-Zip is missing; install it from the Backup page') };
@@ -1836,7 +1892,7 @@ function createBackup(ctx) {
       if (!r.ok) return { ok: false, message: ('tar failed: ' + r.stderr).slice(0, 400) };
     }
     const find = (d, depth) => {
-      for (const e of fs.readdirSync(d, { withFileTypes: true })) if (e.isFile() && e.name.toLowerCase() === 'postgres.sql') return path.join(d, e.name);
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) if (e.isFile() && e.name.toLowerCase() === want) return path.join(d, e.name);
       if (depth > 0) {
         for (const e of fs.readdirSync(d, { withFileTypes: true })) {
           if (e.isDirectory()) {
@@ -1848,7 +1904,7 @@ function createBackup(ctx) {
       return '';
     };
     const file = find(exDir, 2);
-    if (!file) return { ok: false, message: tr('আর্কাইভে postgres.sql পাওয়া যায়নি', 'postgres.sql was not found in the archive') };
+    if (!file) return { ok: false, message: tr(`আর্কাইভে ${want} পাওয়া যায়নি`, `${want} was not found in the archive`) };
     return { ok: true, file };
   }
 
@@ -2038,6 +2094,202 @@ function createBackup(ctx) {
       if (renamedGeneric) warnings.push(renamedGeneric);
       if (startedHere) warnings.push(tr('PostgreSQL এই restore-এর জন্য চালু করা হয়েছিল, চালু অবস্থায় রাখা আছে', 'PostgreSQL was started for this restore and is left running'));
       return { ok: results.some((r) => r.ok), results, warnings, renamedGeneric };
+    } catch (e) {
+      return { ok: false, message: e.message };
+    } finally {
+      restoring = false;
+      try {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+
+  // ---------- Restore, R2 ধাপ ২: MongoDB ডাটাবেস ফেরত আনা ----------
+  // db\mongodb.archive (mongodump --archive --gzip) -> mongorestore। ডাটাবেসের নাম manifest-এ (mongoDbs) আছে, তাই তালিকা দেখতে আর্কাইভ খুলতে হয় না।
+  // নাম মিললে: নতুন নামে (<নাম>_restored, ডিফল্ট, পুরনো অক্ষত) বা overwrite: আগে mongodump safety copy `<ROOT>\backup\pre-restore\<stamp>`-এ,
+  // সফল হলে তবেই dropDatabase, তারপর restore। safety copy না হলে কিছুই মোছা হয় না। admin/config/local আর ইউজার/role ফেরত আসে না।
+  const MG_SYSTEM = new Set(['admin', 'config', 'local']);
+  const SAFE_MGDB = (n) => typeof n === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$/.test(n) && !MG_SYSTEM.has(n.toLowerCase());
+  const mgList = (port) => (ctx.mongoListDbs ? ctx.mongoListDbs(port) : require('./mongo').listDatabases(port));
+  const mgDrop = (port, name) => (ctx.mongoDropDb ? ctx.mongoDropDb(port, name) : require('./mongo').dropDatabase(port, name));
+  // ফেরত: { ok, dbs } | { ok:false, installed, notRunning, message }
+  async function listMongoDbs() {
+    const exe = ctx.mongoExe ? ctx.mongoExe() : '';
+    if (!exe || !fs.existsSync(exe)) return { ok: false, installed: false, message: 'MongoDB not installed' };
+    const port = ctx.mongoPort();
+    if (!(await tcpUp(port))) return { ok: false, installed: true, notRunning: true, message: 'MongoDB not running' };
+    const r = await mgList(port);
+    if (!r.ok) return { ok: false, installed: true, message: String(r.message || '').slice(0, 200) };
+    return { ok: true, installed: true, dbs: r.dbs };
+  }
+  function freeMgName(base, taken) {
+    for (let i = 1; i < 1000; i++) {
+      const suf = i === 1 ? '_restored' : '_restored' + i;
+      const nm = base.slice(0, 63 - suf.length) + suf;
+      if (!taken.has(nm.toLowerCase())) return nm;
+    }
+    return '';
+  }
+
+  // শুধু পড়ে: backup-এ কোন কোন ডাটাবেস আছে (manifest থেকে, পাসওয়ার্ড লাগে না) আর MongoDB-তে এখন কোনটা আছে
+  async function restoreMongoInfo(opts) {
+    if (restoring) return { ok: false, message: tr('আরেকটা restore চলছে', 'Another restore is running') };
+    const dir = opts && opts.dir;
+    if (typeof dir !== 'string' || !dir) return { ok: false, message: tr('ফোল্ডার দেওয়া হয়নি', 'No folder given') };
+    const item = readBackupDir(dir, 'custom');
+    if (!item.manifest) return { ok: false, message: tr('manifest.json নেই বা পড়া যায় না, তাই ডাটাবেস restore করা যাবে না', 'manifest.json is missing or unreadable, so databases cannot be restored') };
+    if (!dbArchiveOf(item)) return { ok: false, message: tr('এই backup-এ ডাটাবেস আর্কাইভ নেই', 'This backup has no database archive') };
+    if (!item.mongodb) return { ok: false, message: tr('এই backup-এ MongoDB ডাম্প নেই', 'This backup has no MongoDB dump') };
+    const cur = await listMongoDbs();
+    const have = cur.ok ? new Set(cur.dbs.map((x) => x.toLowerCase())) : null;
+    const names = [...new Set(item.mongoDbs || [])];
+    return {
+      ok: true,
+      encrypted: item.encrypted,
+      complete: item.complete,
+      failedSteps: item.failedSteps,
+      dbs: names.filter(SAFE_MGDB).map((name) => ({ name, exists: have ? have.has(name.toLowerCase()) : null })),
+      skippedNames: names.filter((n) => !SAFE_MGDB(n) && !MG_SYSTEM.has(String(n).toLowerCase())),
+      mongoInstalled: cur.installed !== false,
+      mongoRunning: !!cur.ok,
+      sevenZip: !!find7z(),
+    };
+  }
+
+  async function restoreMongo(opts) {
+    if (restoring) return { ok: false, message: tr('আরেকটা restore চলছে', 'Another restore is running') };
+    if (running) return { ok: false, message: tr('একটা backup চলছে, শেষ হলে চেষ্টা করুন', 'A backup is running, try again when it has finished') };
+    const dir = opts && opts.dir;
+    if (typeof dir !== 'string' || !dir) return { ok: false, message: tr('ফোল্ডার দেওয়া হয়নি', 'No folder given') };
+    const item = readBackupDir(dir, 'custom');
+    if (!item.manifest) return { ok: false, message: tr('manifest.json নেই বা পড়া যায় না, তাই ডাটাবেস restore করা যাবে না', 'manifest.json is missing or unreadable, so databases cannot be restored') };
+    const archive = dbArchiveOf(item);
+    if (!archive) return { ok: false, message: tr('এই backup-এ ডাটাবেস আর্কাইভ নেই', 'This backup has no database archive') };
+    if (!item.mongodb) return { ok: false, message: tr('এই backup-এ MongoDB ডাম্প নেই', 'This backup has no MongoDB dump') };
+    const password = typeof opts.password === 'string' ? opts.password : '';
+    if (item.encrypted && !password) return { ok: false, needPassword: true, message: tr('এই backup পাসওয়ার্ড দিয়ে encrypted, পাসওয়ার্ড দিন', 'This backup is encrypted, enter the password') };
+    const mongod = ctx.mongoExe ? ctx.mongoExe() : '';
+    if (!mongod || !fs.existsSync(mongod)) return { ok: false, message: tr('MongoDB ইনস্টল করা নেই; আগে Services পেজ থেকে MongoDB চালু করুন', 'MongoDB is not installed; start MongoDB once from the Services page first') };
+    const picks = (Array.isArray(opts.picks) ? opts.picks : []).filter((p) => p && SAFE_MGDB(p.name));
+    if (!picks.length) return { ok: false, message: tr('কোনো ডাটাবেস বাছা হয়নি', 'No database selected') };
+    const stamp = stampOf();
+    const tmp = path.join(tmpRoot(), 'restore-mg-' + stamp);
+    const results = [];
+    const warnings = [];
+    let startedHere = false;
+    restoring = true;
+    try {
+      fs.mkdirSync(tmp, { recursive: true });
+      log(`Restore MongoDB: ${archive} -> ${picks.length} database(s): ${picks.map((p) => p.name + '(' + (p.mode || 'rename') + ')').join(', ')}`);
+      let dumpExe;
+      try {
+        dumpExe = await ctx.ensureMongoTools();
+      } catch (e) {
+        return { ok: false, message: tr('MongoDB Database Tools নামানো যায়নি: ', 'MongoDB Database Tools could not be downloaded: ') + String(e && e.message ? e.message : e).slice(0, 200) };
+      }
+      const restoreExe = path.join(path.dirname(dumpExe), 'mongorestore' + path.extname(dumpExe));
+      if (!fs.existsSync(restoreExe)) return { ok: false, message: tr('mongorestore পাওয়া যায়নি: ', 'mongorestore was not found: ') + restoreExe };
+      if (ctx.onProgress) ctx.onProgress('Restore: reading database archive');
+      const ex = await extractPgSql(archive, password, path.join(tmp, 'x'), warnings, 'mongodb.archive');
+      if (!ex.ok) return ex;
+
+      let cur = await listMongoDbs();
+      if (!cur.ok && cur.notRunning && ctx.startDb) {
+        log('  MongoDB is not running, starting it for the restore ...');
+        if (ctx.onProgress) ctx.onProgress('Restore: starting MongoDB');
+        const sr = await ctx.startDb('mongodb').catch((e) => ({ ok: false, message: e.message }));
+        if (!sr || !sr.ok) return { ok: false, message: tr('MongoDB চালু করা যায়নি: ', 'Could not start MongoDB: ') + String((sr && sr.message) || '').slice(0, 200) };
+        startedHere = true;
+        cur = await listMongoDbs();
+      }
+      if (!cur.ok) return { ok: false, message: tr('MongoDB-তে ঢোকা যায়নি: ', 'Cannot connect to MongoDB: ') + (cur.message || '') };
+      const taken = new Set(cur.dbs.map((x) => x.toLowerCase()));
+      const port = String(ctx.mongoPort());
+      const preDir = path.join(baseDir(), 'pre-restore', stamp);
+      const tailOf = (r) => String(r.stderr || r.stdout || '').trim().split(/\r?\n/).slice(-3).join(' | ').slice(0, 300);
+
+      for (const p of picks) {
+        const clash = taken.has(p.name.toLowerCase());
+        let finalName = p.name;
+        let action = 'new';
+        let drop = false;
+        if (clash) {
+          if (p.mode === 'overwrite') {
+            action = 'overwritten';
+            drop = true;
+          } else {
+            finalName = freeMgName(p.name, taken);
+            action = 'renamed';
+            if (!finalName) {
+              results.push({ name: p.name, ok: false, message: tr('নতুন নাম পাওয়া গেল না', 'no free name found') });
+              continue;
+            }
+          }
+        }
+        const res = { name: p.name, final: finalName, action, ok: false, notes: [] };
+        try {
+          if (ctx.onProgress) ctx.onProgress(`Restore: ${p.name}`);
+          if (drop) {
+            // পুরনোটার safety copy আগে; না হলে কিছুই মোছা হয় না
+            fs.mkdirSync(preDir, { recursive: true });
+            const pre = path.join(preDir, 'mongodb_' + p.name.replace(/[^A-Za-z0-9_.-]/g, '_') + '.archive');
+            const dr = await run(dumpExe, ['--host', '127.0.0.1', '--port', port, '--db', p.name, '--archive=' + pre, '--gzip'], { timeout: 3600000 });
+            let psz = 0;
+            try {
+              psz = fs.statSync(pre).size;
+            } catch {}
+            if (!dr.ok || psz <= 0) {
+              try {
+                fs.rmSync(pre, { force: true });
+              } catch {}
+              res.message = tr('পুরনো ডাটাবেসের safety dump হয়নি, তাই কিছু মোছা হয়নি: ', 'Safety dump of the old database failed, so nothing was dropped: ') + tailOf(dr);
+              results.push(res);
+              log(`  [FAIL] ${p.name}: ${res.message}`);
+              continue;
+            }
+            res.preDump = pre;
+            res.notes.push(tr('পুরনো ডাটাবেসের কপি রাখা আছে: ' + pre, 'A copy of the old database was saved: ' + pre));
+            const dd = await mgDrop(Number(port), p.name);
+            if (!dd.ok) {
+              res.message = tr('পুরনো ডাটাবেস মোছা যায়নি: ', 'Could not drop the old database: ') + String(dd.message || '').slice(0, 200);
+              results.push(res);
+              log(`  [FAIL] ${p.name}: ${res.message}`);
+              continue;
+            }
+          }
+          const args = ['--host', '127.0.0.1', '--port', port, '--archive=' + ex.file, '--gzip', '--nsInclude', p.name + '.*'];
+          if (finalName !== p.name) args.push('--nsFrom', p.name + '.*', '--nsTo', finalName + '.*');
+          const rr = await run(restoreExe, args, { timeout: 3600000 });
+          const all = String(rr.stderr || '') + '\n' + String(rr.stdout || '');
+          const m = all.match(/(\d+)\s+document\(s\)\s+restored successfully\.\s+(\d+)\s+document\(s\)\s+failed to restore/i);
+          if (m) {
+            res.docs = parseInt(m[1], 10);
+            res.failedDocs = parseInt(m[2], 10);
+          }
+          const after = await listMongoDbs();
+          if (!rr.ok || !after.ok || !after.dbs.some((x) => x.toLowerCase() === finalName.toLowerCase())) {
+            res.message = `mongorestore failed (exit code ${rr.code}): ` + tailOf(rr);
+            if (drop) res.notes.push(tr('ডাটাবেস নেই বা আংশিক; উপরের safety copy থেকে ফেরত নেওয়া যাবে', 'The database is missing or partial; the safety copy above can bring it back'));
+            results.push(res);
+            log(`  [FAIL] ${p.name}: ${res.message}`);
+            continue;
+          }
+          if (res.failedDocs) res.notes.push(tr(`${res.failedDocs}টা document ফেরত আসেনি`, `${res.failedDocs} document(s) failed to restore`));
+          res.ok = true;
+          taken.add(finalName.toLowerCase());
+          results.push(res);
+          log(`  restored ${p.name} -> ${finalName} (${action}${res.docs != null ? ', ' + res.docs + ' documents' : ''}${res.failedDocs ? ', ' + res.failedDocs + ' failed' : ''})`);
+        } catch (e) {
+          res.message = e.message;
+          results.push(res);
+          log(`  [FAIL] ${p.name}: ${e.message}`);
+        }
+      }
+      if (!item.complete) warnings.push(tr('এই backup আংশিক (complete নয়): ' + (item.failedSteps.join(', ') || '?'), 'This backup is partial (not complete): ' + (item.failedSteps.join(', ') || '?')));
+      warnings.push(tr('admin, config, local ডাটাবেস আর ইউজার/role ফেরত আনা হয় না', 'The admin, config and local databases and users/roles are not restored'));
+      if (results.some((r) => r.ok && r.action === 'renamed')) warnings.push(tr('নতুন নামে রাখা ডাটাবেস Mongo Express-এ দেখা যাবে; কোনো সাইটের কনফিগে নিজে থেকে বসে না', 'A database restored under a new name shows up in Mongo Express; it is not wired into any site config'));
+      if (startedHere) warnings.push(tr('MongoDB এই restore-এর জন্য চালু করা হয়েছিল, চালু অবস্থায় রাখা আছে', 'MongoDB was started for this restore and is left running'));
+      return { ok: results.some((r) => r.ok), results, warnings };
     } catch (e) {
       return { ok: false, message: e.message };
     } finally {
@@ -2636,7 +2888,7 @@ function createBackup(ctx) {
     }
   }
 
-  return { getConfig, setConfig, runBackup, isRunning, lastStatus, tailLog, find7z, ensure7z, listBackups, restoreWwwInfo, restoreWww, restoreDbInfo, restoreMysql, restorePgInfo, restorePg, restoreOtherInfo, restoreOther, restoreSettingsInfo, restoreSettings, dirs: { baseDir, logsDir } };
+  return { dumpMongo, getConfig, setConfig, runBackup, isRunning, lastStatus, tailLog, find7z, ensure7z, listBackups, restoreWwwInfo, restoreWww, restoreDbInfo, restoreMysql, restorePgInfo, restorePg, restoreMongoInfo, restoreMongo, restoreOtherInfo, restoreOther, restoreSettingsInfo, restoreSettings, dirs: { baseDir, logsDir } };
 }
 
 module.exports = { createBackup, stampOf, STAMP_RE, snapshotChanged, pruneVersions, moveToVersions, folderSize, renameDirRetry, runWithFile };
