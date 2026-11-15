@@ -376,7 +376,7 @@ function buildDb(db) {
   const stopBtn = el('button', { className: 'btn sm danger', textContent: '■ Stop' });
   const auto = el('input', { type: 'checkbox', checked: db.auto });
   const adminerBtn = el('button', { className: 'btn sm', textContent: t('db.adminer') });
-  const hasViewer = db.id !== 'mongodb'; // MongoDB-র দেখার টুল পরের ধাপে
+  const meBtn = db.id === 'mongodb' ? el('button', { className: 'btn sm', textContent: t('db.mexpress') }) : null;
   const pmaBtn = db.id === 'mysql' ? el('button', { className: 'btn sm', textContent: t('db.pma') }) : null;
 
   saveBtn.addEventListener('click', () =>
@@ -402,6 +402,7 @@ function buildDb(db) {
   auto.addEventListener('change', () => window.api.setDbAuto(db.id, auto.checked));
   adminerBtn.addEventListener('click', () => work(adminerBtn, async () => setStatus(await window.api.openAdminer(db.id))));
   if (pmaBtn) pmaBtn.addEventListener('click', () => work(pmaBtn, async () => setStatus(await window.api.openPma())));
+  if (meBtn) meBtn.addEventListener('click', () => work(meBtn, async () => setStatus(await window.api.openMongoExpress())));
 
   const infoEl = el('div', { className: 'info', textContent: db.info });
   const card = el(
@@ -424,7 +425,7 @@ function buildDb(db) {
       restartBtn,
       stopBtn
     ),
-    ...(hasViewer ? [el('div', { className: 'row' }, el('span', { className: 'badge tool', textContent: t('db.view') }), adminerBtn, ...(pmaBtn ? [pmaBtn] : []))] : []),
+    el('div', { className: 'row' }, el('span', { className: 'badge tool', textContent: t('db.view') }), ...(meBtn ? [meBtn] : [adminerBtn]), ...(pmaBtn ? [pmaBtn] : [])),
     infoEl
   );
   dbsEl.appendChild(card);

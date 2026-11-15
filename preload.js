@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('api', {
   // Adminer (ব্রাউজারে ডাটাবেস)
   openAdminer: (kind) => ipcRenderer.invoke('adminer:open', kind),
   openPma: () => ipcRenderer.invoke('pma:open'),
+  openMongoExpress: () => ipcRenderer.invoke('mexpress:open'),
 
   // টুলস ও ভার্সন
   listTools: () => ipcRenderer.invoke('tools:list'),

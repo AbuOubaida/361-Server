@@ -33,6 +33,7 @@ const I18N = {
     'db.view': 'ব্রাউজারে দেখুন',
     'db.adminer': 'Adminer-এ খুলুন',
     'db.pma': 'phpMyAdmin-এ খুলুন',
+    'db.mexpress': 'Mongo Express-এ খুলুন',
 
     'sites.refresh': '↻ সাইট রিফ্রেশ',
     'sites.openWww': '📁 www ফোল্ডার খুলুন',
@@ -636,6 +637,7 @@ const I18N = {
     'db.view': 'View in browser',
     'db.adminer': 'Open in Adminer',
     'db.pma': 'Open in phpMyAdmin',
+    'db.mexpress': 'Open in Mongo Express',
 
     'sites.refresh': '↻ Refresh sites',
     'sites.openWww': '📁 Open www folder',

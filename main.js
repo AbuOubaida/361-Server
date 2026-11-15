@@ -15,6 +15,7 @@ const resources = require('./resources'); // R1 ধাপ ২: প্রসে�
 const traffic = require('./traffic'); // R1 ধাপ ৩b: সাইট ধরে হিট (access log থেকে)
 const mailer = require('./mailer'); // R1 ধাপ ৪: ইমেইল সতর্কবার্তা (নিজের SMTP ক্লায়েন্ট)
 const mongo = require('./mongo'); // R2 ধাপ ১: MongoDB নিরাপদে বন্ধ করার ছোট কোড
+const mongoExpress = require('./mongoexpress'); // R2 ধাপ ২: MongoDB দেখার টুল (Mongo Express)
 
 // ====== এখানে আপনার লিংক বসান ======
 const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
@@ -1517,6 +1518,7 @@ let monitorApi = null;
 let resApi = null;
 let trafficApi = null;
 let mailApi = null;
+let meApi = null; // Mongo Express (R2 ধাপ ২)
 // ধাপ ২: এখন কোন প্রসেস গ্রুপ চালু আছে (নাম -> .exe)। একই নামের অন্য প্রোগ্রামের প্রসেসও গোনা হয় (tasklist-এ parent নেই)
 function resGroups() {
   const g = [];
@@ -2203,6 +2205,7 @@ async function stopDatabase(id) {
   const db = DATABASES[id];
   const run = dbRun[id];
   if (!db || !run) return tr(`${db ? db.label : 'ডাটাবেস'} চলছে না`, `${db ? db.label : 'Database'} is not running`);
+  if (id === 'mongodb' && meApi) meApi.stop(); // Mongo Express আগে বন্ধ
   const svc = SERVICES[db.svcId];
   sendStatus(tr(`${db.label} নিরাপদে বন্ধ হচ্ছে...`, `Stopping ${db.label} safely...`));
 
@@ -5442,6 +5445,25 @@ app.whenReady().then(() => {
   } catch (err) {
     mailApi = null; // মেইল না চললেও বাকি সব চলবে
   }
+  // R2 ধাপ ২: Mongo Express (আলাদা try/catch)
+  try {
+    meApi = mongoExpress.init({
+      ipcMain,
+      dir: () => path.join(TOOLS_DIR, 'mongo-express'),
+      runtime: () => ensureNodeRuntime(activeVersion('node').version),
+      mongoPort: () => getDbPort('mongodb'),
+      mongoRunning: () => !!dbRun.mongodb,
+      tr,
+      status: sendStatus,
+      freePort: getFreePort,
+      openUrl: (u) => shell.openExternal(u),
+      kill: killTree,
+      track: (p) => trackPid(p, 'mongo-express', 'node.exe'),
+      cleanStale: () => killStaleByPid('mongo-express'),
+    });
+  } catch (err) {
+    meApi = null;
+  }
   try {
     monitorApi = monitor.init({
       ipcMain,
@@ -5522,6 +5544,9 @@ app.on('before-quit', () => {
   } catch {}
   try {
     if (mailApi) mailApi.stop();
+  } catch {}
+  try {
+    if (meApi) meApi.stop();
   } catch {}
   if (running) running.procs.forEach((p) => killTree(p.pid));
   for (const r of Object.values(nodeRun)) killTree(r.proc.pid); // Node অ্যাপগুলোও বন্ধ
