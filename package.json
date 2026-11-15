@@ -4,6 +4,8 @@
   "description": "",
   "main": "main.js",
   "scripts": {
+    "preinstall": "node check-node.js",
+    "prestart": "node check-node.js",
     "start": "electron ."
   },
   "keywords": [],
@@ -14,5 +16,8 @@
   },
   "dependencies": {
     "extract-zip": "^2.0.1"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }
