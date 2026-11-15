@@ -1405,6 +1405,7 @@ function createWindow() {
     minWidth: 520,
     minHeight: 480,
     title: 'Server 360',
+    ...(fs.existsSync(APP_ICON_ICO) ? { icon: APP_ICON_ICO } : {}),
     backgroundColor: '#0f172a',
     // লগইনে --hidden দিয়ে চালু হলে (আর ফোল্ডার আগে ঠিক করা থাকলে) উইন্ডো দেখানো হয় না, শুধু ট্রে
     show: !(START_HIDDEN && keepRunningOn() && settings.wwwDir),
@@ -1463,6 +1464,10 @@ function sendStatus(msg) {
 
 // ---------- ট্রে আইকন ----------
 // ৩২x৩২ আইকন সরাসরি কোডে (আলাদা ফাইল লাগে না)
+// আইকন ফাইল: প্রজেক্টের build\ ফোল্ডারে (installer-এও একই জায়গা)
+const APP_ICON_ICO = path.join(__dirname, 'build', 'icon.ico');
+const APP_TRAY_PNG = path.join(__dirname, 'build', 'tray.png');
+if (app.isPackaged) app.setAppUserModelId('com.abuoubaida.server360'); // নোটিফিকেশন/টাস্কবারে অ্যাপের নামে দেখানোর জন্য (installer-এর appId-র সাথে এক)
 const TRAY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAASklEQVR42mNgGAVoQDX59X9a4sHrAFpbTNAhow4YdQA+xeSC4eeAAY+CUQeM5oIBcwCpeNQBw88Bo7lgtD0w6oBh1T8Y/F2zEQcAB87wUsIIlngAAAAASUVORK5CYII=';
 function showMainWindow() {
   if (!win || win.isDestroyed()) {
@@ -1473,10 +1478,20 @@ function showMainWindow() {
   win.show();
   win.focus();
 }
+function trayImage() {
+  // build\tray.png (নতুন আইকন) থাকলে সেটা; না থাকলে বা পড়া না গেলে আগের placeholder
+  try {
+    if (fs.existsSync(APP_TRAY_PNG)) {
+      const img = nativeImage.createFromPath(APP_TRAY_PNG);
+      if (!img.isEmpty()) return img;
+    }
+  } catch {}
+  return nativeImage.createFromBuffer(Buffer.from(TRAY_PNG, 'base64'));
+}
 function buildTray() {
   try {
     if (!tray || tray.isDestroyed()) {
-      tray = new Tray(nativeImage.createFromBuffer(Buffer.from(TRAY_PNG, 'base64')));
+      tray = new Tray(trayImage());
       tray.on('click', showMainWindow);
       tray.on('double-click', showMainWindow);
     }

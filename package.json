@@ -1,23 +1,74 @@
 {
   "name": "my-laragon",
   "version": "1.0.0",
-  "description": "",
+  "description": "Server 360: local development environment for Windows (Apache/Nginx, PHP, MySQL, PostgreSQL, MongoDB, Node sites, backup/restore, monitoring)",
   "main": "main.js",
   "scripts": {
     "preinstall": "node check-node.js",
     "prestart": "node check-node.js",
-    "start": "electron ."
+    "start": "electron .",
+    "pack": "electron-builder --win --dir",
+    "dist": "electron-builder --win nsis"
   },
   "keywords": [],
-  "author": "",
+  "author": "Server 360",
   "license": "ISC",
   "devDependencies": {
-    "electron": "^45.2.3"
+    "electron": "^45.2.3",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "extract-zip": "^2.0.1"
   },
   "engines": {
     "node": ">=22.12.0"
+  },
+  "build": {
+    "appId": "com.abuoubaida.server360",
+    "productName": "Server 360",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "asar": false,
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "i18n.js",
+      "index.html",
+      "backup.js",
+      "monitor.js",
+      "resources.js",
+      "traffic.js",
+      "mailer.js",
+      "mongo.js",
+      "mongoexpress.js",
+      "build/icon.ico",
+      "build/icon.png",
+      "build/tray.png",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "Server-360-Setup-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Server 360",
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

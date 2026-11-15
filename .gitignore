@@ -3,3 +3,5 @@ backup-secrets.ini
 *.cnf
 *.7z
 backup/
+
+dist/
