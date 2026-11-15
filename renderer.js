@@ -159,6 +159,7 @@ function applyStatic() {
     resRender();
     trfRender();
     trfTop();
+    mailRender(false);
   }
 }
 
@@ -266,7 +267,10 @@ document.querySelectorAll('.nav').forEach((btn) =>
     if (page === 'monitor') monLoad();
     if (page === 'tools') loadTools();
     if (page === 'backup') bkLoad();
-    if (page === 'settings') appBehaviorLoad();
+    if (page === 'settings') {
+      appBehaviorLoad();
+      mailLoad();
+    }
   })
 );
 
@@ -1551,6 +1555,39 @@ async function monLoad() {
   } catch {}
   resLoad();
   trfLoad();
+  monMailNote();
+}
+let monMail = null;
+// মনিটরিং পেজে ইমেইল সতর্কবার্তার অবস্থা (সেটিংস পেজের কার্ড থেকে আলাদা, শুধু পড়ে)
+async function monMailNote(reload = true) {
+  const box = $('monMailNote');
+  if (!box) return;
+  try {
+    if (reload || !monMail) monMail = (await window.api.mailGet()).cfg;
+  } catch {
+    return;
+  }
+  const c = monMail;
+  const alertsOn = $('monAlerts').checked;
+  let key = 'mon.mail.none';
+  let arg = '';
+  if (c.host && c.to) {
+    if (!c.enabled) key = 'mon.mail.off';
+    else if (!alertsOn) key = 'mon.mail.blocked';
+    else {
+      key = 'mon.mail.on';
+      arg = c.to.length > 60 ? c.to.slice(0, 57) + '...' : c.to;
+    }
+  }
+  box.textContent = '';
+  box.append(document.createTextNode(t(key, arg) + ' '));
+  const a = el('a', { href: '#', textContent: t('mon.mail.open') });
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    document.querySelector('.nav[data-page="settings"]').click();
+    setTimeout(() => $('mailCard').scrollIntoView({ block: 'center' }), 150);
+  });
+  box.append(a);
 }
 function monSave() {
   window.api
@@ -1558,6 +1595,7 @@ function monSave() {
     .then((d) => {
       monData = d;
       monRender();
+      monMailNote(false);
     })
     .catch(() => {});
 }
@@ -1615,6 +1653,81 @@ $('themeBtn').addEventListener('click', () =>
 );
 window.api.onMonitorUpdate(() => {
   if (currentPage === 'monitor') monLoad();
+});
+
+// ---------- ইমেইল সতর্কবার্তা (R1 ধাপ ৪) ----------
+let mailData = null;
+function mailShowMsg(text, ok) {
+  const m = $('mailMsg');
+  m.textContent = text || '';
+  m.hidden = !text;
+  m.style.color = ok === true ? 'var(--ok, #16a34a)' : ok === false ? 'var(--danger)' : '';
+}
+function mailRender(force) {
+  const d = mailData;
+  if (!d) return;
+  const c = d.cfg;
+  // ব্যবহারকারী লিখতে থাকলে তার লেখা বদলানো হয় না (force = প্রথম লোড/সেভের পর)
+  if (force || (!mailDirty && !$('mailCard').contains(document.activeElement))) {
+    $('mailOn').checked = c.enabled;
+    $('mailHost').value = c.host;
+    $('mailPort').value = c.port;
+    $('mailSec').value = c.secure;
+    $('mailUser').value = c.user;
+    $('mailFrom').value = c.from;
+    $('mailTo').value = c.to;
+    $('mailInsecure').checked = c.insecureTls;
+    $('mailPw').value = '';
+  }
+  $('mailPw').placeholder = c.hasPass ? t('mail.pw.saved') : t('mail.pw');
+}
+// মেইল কার্ডে লেখা সেভ হয়নি = true; তখন কোনো লোড/হালনাগাদ ঘরের লেখা বদলায় না
+let mailDirty = false;
+async function mailLoad() {
+  try {
+    mailData = await window.api.mailGet();
+    if (mailDirty) {
+      mailRender(false);
+      return;
+    }
+    mailRender(true);
+    if (mailData.last) mailShowMsg(t(mailData.last.ok ? 'mail.last.ok' : 'mail.last.fail', new Date(mailData.last.ts).toLocaleString(), mailData.last.err), mailData.last.ok);
+  } catch {}
+}
+function mailCollect() {
+  return { enabled: $('mailOn').checked, host: $('mailHost').value.trim(), port: Number($('mailPort').value) || 587, secure: $('mailSec').value, user: $('mailUser').value.trim(), from: $('mailFrom').value.trim(), to: $('mailTo').value.trim(), insecureTls: $('mailInsecure').checked };
+}
+async function mailSave() {
+  mailData = await window.api.mailSetConfig(mailCollect(), $('mailPw').value);
+  mailDirty = false;
+  mailRender(true);
+}
+['input', 'change'].forEach((ev) => $('mailCard').addEventListener(ev, () => (mailDirty = true)));
+$('mailSec').addEventListener('change', () => {
+  const p = Number($('mailPort').value);
+  if ([25, 465, 587].includes(p) || !p) $('mailPort').value = { starttls: 587, ssl: 465, none: 25 }[$('mailSec').value];
+});
+$('mailOn').addEventListener('change', () => mailSave().catch(() => {}));
+$('mailInsecure').addEventListener('change', () => mailSave().catch(() => {}));
+$('mailSave').addEventListener('click', async () => {
+  try {
+    await mailSave();
+    mailShowMsg(t('mail.saved'), true);
+  } catch {}
+});
+$('mailTest').addEventListener('click', async () => {
+  const b = $('mailTest');
+  b.disabled = true;
+  mailShowMsg(t('mail.testing'));
+  try {
+    await mailSave();
+    const r = await window.api.mailTest();
+    mailShowMsg(r.ok ? t('mail.ok') : t('mail.fail', r.err), r.ok);
+  } catch (e) {
+    mailShowMsg(t('mail.fail', String((e && e.message) || e)), false);
+  } finally {
+    b.disabled = false;
+  }
 });
 
 // ---------- সাইট ধরে হিট (R1 ধাপ ৩b) ----------

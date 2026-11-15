@@ -502,6 +502,7 @@
               <label class="switch"><input type="checkbox" id="monOn"><i></i><b data-i18n="mon.on">মনিটরিং চালু</b></label>
               <label class="switch"><input type="checkbox" id="monAlerts"><i></i><b data-i18n="mon.alerts">বন্ধ হলে জানান</b></label>
             </div>
+            <div class="hint" id="monMailNote" style="margin-top:6px"></div>
             <div class="row">
               <span class="mon-lbl" data-i18n="mon.every">পরীক্ষা করুন প্রতি</span>
               <select id="monInterval" style="width:auto">
@@ -875,6 +876,40 @@
             <div class="row"><span class="look-label" data-i18n="look.accent">মূল রং</span><div class="swatches" id="lookAccent"></div></div>
           </div>
 
+          <div class="section-title" data-i18n="settings.mail.section">ইমেইল</div>
+          <div class="card" id="mailCard">
+            <div class="card-title" data-i18n="mail.title">ইমেইল সতর্কবার্তা</div>
+            <div class="card-sub" data-i18n="mail.sub">সাইট বন্ধ হলে, আবার চালু হলে, বা CPU/RAM সীমা ছাড়ালে বেলুনের সঙ্গে ইমেইলও যায় (নিজের হোস্টিং/ডোমেইনের SMTP দিয়ে)</div>
+            <div class="row">
+              <label class="switch"><input type="checkbox" id="mailOn"><i></i><b data-i18n="mail.on">ইমেইল পাঠান</b></label>
+            </div>
+            <div class="row">
+              <input id="mailHost" type="text" maxlength="255" style="width:auto; flex:1; min-width:200px;" data-i18n-ph="mail.host" placeholder="SMTP সার্ভার (mail.example.com)" spellcheck="false" autocomplete="off">
+              <input id="mailPort" type="number" min="1" max="65535" style="width:90px" placeholder="587">
+              <select id="mailSec" style="width:auto">
+                <option value="starttls" data-i18n="mail.sec.starttls">STARTTLS (৫৮৭)</option>
+                <option value="ssl" data-i18n="mail.sec.ssl">SSL/TLS (৪৬৫)</option>
+                <option value="none" data-i18n="mail.sec.none">এনক্রিপশন ছাড়া (২৫)</option>
+              </select>
+            </div>
+            <div class="row">
+              <input id="mailUser" type="text" maxlength="255" style="width:220px" data-i18n-ph="mail.user" placeholder="ইউজার (সাধারণত ইমেইল ঠিকানা)" spellcheck="false" autocomplete="off">
+              <input id="mailPw" type="password" maxlength="200" style="width:220px" data-i18n-ph="mail.pw" placeholder="পাসওয়ার্ড" autocomplete="new-password">
+            </div>
+            <div class="row">
+              <input id="mailFrom" type="text" maxlength="320" style="width:240px" data-i18n-ph="mail.from" placeholder="প্রেরক (alerts@example.com)" spellcheck="false" autocomplete="off">
+              <input id="mailTo" type="text" maxlength="600" style="width:auto; flex:1; min-width:200px;" data-i18n-ph="mail.to" placeholder="প্রাপক (একাধিক হলে কমা দিয়ে)" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="row">
+              <label class="switch"><input type="checkbox" id="mailInsecure"><i></i><b data-i18n="mail.insecure">সার্টিফিকেটের ভুল উপেক্ষা করুন (সুপারিশ নয়)</b></label>
+            </div>
+            <div class="row">
+              <button id="mailSave" class="btn sm primary" data-i18n="mail.save">সেভ করুন</button>
+              <button id="mailTest" class="btn sm" data-i18n="mail.test">টেস্ট মেইল পাঠান</button>
+            </div>
+            <div class="hint" id="mailMsg" hidden></div>
+            <div class="hint" data-i18n="mail.hint">পাসওয়ার্ড সেভ হলে আর দেখানো হয় না; ফাঁকা রাখলে আগেরটাই থাকে। পাসওয়ার্ড এই পিসিতে এনক্রিপ্ট করে রাখা হয় (Windows)। কাছাকাছি সময়ের সতর্কবার্তা একটা মেইলে জমিয়ে যায় (প্রায় ২০ সেকেন্ড অপেক্ষা), ঘণ্টায় সর্বোচ্চ ৬টা মেইল। ব্যর্থ হলে ৫ মিনিট পরে আবার, ৩ বার পর্যন্ত। মেইল যায় শুধু "সতর্কবার্তা" সুইচ চালু থাকলে।</div>
+          </div>
           <div class="section-title" data-i18n="settings.lang.section">ভাষা</div>
           <div class="card">
             <div class="card-title" data-i18n="settings.lang.title">অ্যাপের ভাষা</div>
@@ -886,6 +921,7 @@
               </select>
             </div>
           </div>
+
         </section>
       </div>
     </main>

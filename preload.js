@@ -154,6 +154,10 @@ contextBridge.exposeInMainWorld('api', {
   // সাইট ধরে হিট (R1 ধাপ ৩b)
   trafficGet: (hours) => ipcRenderer.invoke('traffic:get', hours),
   trafficHistory: (domain, hours) => ipcRenderer.invoke('traffic:history', domain, hours),
+  mailGet: () => ipcRenderer.invoke('mail:get'),
+  mailSetConfig: (cfg, pass) => ipcRenderer.invoke('mail:setConfig', cfg, pass),
+  mailTest: () => ipcRenderer.invoke('mail:test'),
+  onMailUpdate: (callback) => ipcRenderer.on('monitor:mail', () => callback()),
   trafficTop: (domain, hours) => ipcRenderer.invoke('traffic:top', domain, hours),
   trafficReset: (hours) => ipcRenderer.invoke('traffic:reset', hours),
   trafficSetConfig: (cfg) => ipcRenderer.invoke('traffic:setConfig', cfg),

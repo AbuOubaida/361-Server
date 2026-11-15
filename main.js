@@ -13,6 +13,7 @@ const dns = require('dns');
 const monitor = require('./monitor'); // R1: সাইট মনিটরিং (ধাপ ১)
 const resources = require('./resources'); // R1 ধাপ ২: প্রসেস গ্রুপ ধরে CPU/RAM
 const traffic = require('./traffic'); // R1 ধাপ ৩b: সাইট ধরে হিট (access log থেকে)
+const mailer = require('./mailer'); // R1 ধাপ ৪: ইমেইল সতর্কবার্তা (নিজের SMTP ক্লায়েন্ট)
 
 // ====== এখানে আপনার লিংক বসান ======
 const APACHE_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/httpd-2.4.70-261106-Win64-VS18.zip';
@@ -1485,6 +1486,13 @@ function buildTray() {
   }
 }
 // মনিটরিং সতর্কবার্তা: ট্রে বেলুন (Windows-এ টোস্ট হয়ে আসে); ট্রে না থাকলে সাধারণ নোটিফিকেশন
+// monitor.js ও resources.js-এর সতর্কবার্তা: বেলুন + (চালু থাকলে) ইমেইল
+function notifyAlert(title, body) {
+  notifyUser(title, body);
+  try {
+    if (mailApi) mailApi.alert(body);
+  } catch {}
+}
 function notifyUser(title, body) {
   try {
     if (tray && !tray.isDestroyed()) {
@@ -1499,6 +1507,7 @@ function notifyUser(title, body) {
 let monitorApi = null;
 let resApi = null;
 let trafficApi = null;
+let mailApi = null;
 // ধাপ ২: এখন কোন প্রসেস গ্রুপ চালু আছে (নাম -> .exe)। একই নামের অন্য প্রোগ্রামের প্রসেসও গোনা হয় (tasklist-এ parent নেই)
 function resGroups() {
   const g = [];
@@ -5369,6 +5378,28 @@ app.whenReady().then(() => {
   applyLoginItem();
   // R1 ধাপ ১: সাইট মনিটরিং (প্রথম পরীক্ষা ৫ সেকেন্ড পর; অ্যাপ বন্ধ হলে before-quit-এ থামে)
   try {
+    mailApi = mailer.init({
+      ipcMain,
+      getSettings: () => settings,
+      saveSettings: () => saveSettings(settings),
+      tr,
+      enc: (t) => (safeStorage.isEncryptionAvailable() ? 'ss:' + safeStorage.encryptString(t).toString('base64') : 'b64:' + Buffer.from(t, 'utf8').toString('base64')),
+      dec: (v) => {
+        try {
+          return String(v).startsWith('ss:') ? safeStorage.decryptString(Buffer.from(v.slice(3), 'base64')) : Buffer.from(String(v).slice(4), 'base64').toString('utf8');
+        } catch {
+          return '';
+        }
+      },
+      status: sendStatus,
+      send: (ch, p) => {
+        if (win && !win.isDestroyed()) win.webContents.send(ch, p);
+      },
+    });
+  } catch (err) {
+    mailApi = null; // মেইল না চললেও বাকি সব চলবে
+  }
+  try {
     monitorApi = monitor.init({
       ipcMain,
       getSettings: () => settings,
@@ -5378,7 +5409,7 @@ app.whenReady().then(() => {
       getSites: () => scanSites().filter((s) => !s.disabled).map((s) => ({ name: s.name, domain: s.domain, node: !!s.node })),
       getWeb: () => (running ? { port: running.webPort } : null),
       nodeUp: (d) => !!(nodeRun[d] && nodeRun[d].task === 'run'),
-      notify: notifyUser,
+      notify: notifyAlert,
       send: (ch, p) => {
         if (win && !win.isDestroyed()) win.webContents.send(ch, p);
       },
@@ -5395,7 +5426,7 @@ app.whenReady().then(() => {
       saveSettings: () => saveSettings(settings),
       tr,
       getGroups: resGroups,
-      notify: notifyUser,
+      notify: notifyAlert,
       status: sendStatus,
       send: (ch, p) => {
         if (win && !win.isDestroyed()) win.webContents.send(ch, p);
@@ -5445,6 +5476,9 @@ app.on('before-quit', () => {
   } catch {}
   try {
     if (trafficApi) trafficApi.stop();
+  } catch {}
+  try {
+    if (mailApi) mailApi.stop();
   } catch {}
   if (running) running.procs.forEach((p) => killTree(p.pid));
   for (const r of Object.values(nodeRun)) killTree(r.proc.pid); // Node অ্যাপগুলোও বন্ধ
