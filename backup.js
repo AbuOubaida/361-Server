@@ -433,29 +433,87 @@ function createBackup(ctx) {
 
   // ---------- 7-Zip ----------
   function find7z() {
+    // আমাদের নিজের ফোল্ডারে 7z.exe-র সাথে 7z.dll-ও লাগে (একটা থাকলে অন্যটা ছাড়া চলে না)
+    const own = path.join(sevenDir(), '7z.exe');
+    const ownOk = fs.existsSync(own) && fs.existsSync(path.join(sevenDir(), '7z.dll'));
     const cands = [
-      path.join(sevenDir(), '7z.exe'),
+      ownOk ? own : '',
       path.join(process.env.ProgramFiles || 'C:\\Program Files', '7-Zip', '7z.exe'),
       path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', '7-Zip', '7z.exe'),
     ];
-    return cands.find((p) => fs.existsSync(p)) || '';
+    return cands.find((p) => p && fs.existsSync(p)) || '';
   }
 
   // installer .exe নামিয়ে চুপচাপ (/S) আমাদের tools\7zip-এ বসানো (admin লাগে না)। /D= শেষে থাকতে হবে, কোটেশন ছাড়া।
   async function ensure7z() {
     if (find7z()) return { ok: true, fresh: false, exe: find7z() };
-    if (!ctx.sevenZipUrl) return { ok: false, message: '7-Zip URL not configured' };
+    const files = Array.isArray(ctx.sevenZipFiles) ? ctx.sevenZipFiles : [];
+    if (!files.length && !ctx.sevenZipUrl) return { ok: false, message: '7-Zip URL not configured' };
     fs.mkdirSync(ctx.toolsDir(), { recursive: true });
-    const setup = path.join(ctx.toolsDir(), '7z-setup.exe');
-    await ctx.download(ctx.sevenZipUrl, setup, '7-Zip');
-    fs.mkdirSync(sevenDir(), { recursive: true });
-    const r = await run(setup, ['/S', `/D=${sevenDir()}`], { verbatim: true, timeout: 120000 });
-    try {
-      fs.rmSync(setup, { force: true });
-    } catch {}
-    const exe = find7z();
-    if (!exe) return { ok: false, message: tr('7-Zip ইনস্টল হয়নি (7z.exe পাওয়া যায়নি)', '7-Zip install failed (7z.exe not found)') + (r.stderr ? ': ' + r.stderr.slice(0, 120) : '') };
-    return { ok: true, fresh: true, exe };
+    const errors = []; // কী ব্যর্থ হলো, URL সহ (নতুন পিসিতে কারণ দেখার জন্য)
+    const why = (e) => String((e && e.message) || e).slice(0, 200);
+
+    // পথ ১: 7z.exe আর 7z.dll সরাসরি নামানো (installer নেই, admin লাগে না)
+    if (files.length) {
+      fs.mkdirSync(sevenDir(), { recursive: true });
+      let ok = true;
+      for (const f of files) {
+        try {
+          await ctx.download(f.url, path.join(sevenDir(), f.name), '7-Zip');
+        } catch (e) {
+          ok = false;
+          errors.push(`${f.url} -> ${why(e)}`);
+          break;
+        }
+      }
+      if (ok && find7z()) return { ok: true, fresh: true, exe: find7z() };
+      if (ok) errors.push('7z.exe / 7z.dll downloaded but not found in ' + sevenDir());
+      for (const f of files) {
+        try {
+          fs.rmSync(path.join(sevenDir(), f.name), { force: true }); // আধা-নামানো ফাইল রাখা হয় না
+        } catch {}
+      }
+    }
+
+    // পথ ২: installer .exe নামিয়ে চুপচাপ (/S) ইনস্টল। /D= শেষে থাকতে হবে, কোটেশন ছাড়া।
+    // প্রথমে সাধারণভাবে; 7z.exe না এলে (অ্যাডমিন অনুমতি লাগে) Windows-এর UAC চেয়ে আবার, যেমন hosts/firewall-এর বেলায়।
+    if (ctx.sevenZipUrl) {
+      const setup = path.join(ctx.toolsDir(), '7z-setup.exe');
+      const cmdFile = path.join(ctx.toolsDir(), '7z-install.cmd');
+      try {
+        await ctx.download(ctx.sevenZipUrl, setup, '7-Zip');
+        fs.mkdirSync(sevenDir(), { recursive: true });
+        const r = await run(setup, ['/S', `/D=${sevenDir()}`], { verbatim: true, timeout: 120000 });
+        let exe = find7z();
+        if (exe) return { ok: true, fresh: true, exe };
+        errors.push(`silent install gave no 7z.exe (code ${r.code})` + (r.stderr ? ': ' + String(r.stderr).slice(0, 120) : ''));
+        // UAC দিয়ে আবার (cmd ফাইল, start /wait দিয়ে installer শেষ হওয়া পর্যন্ত অপেক্ষা)
+        try {
+          if (ctx.onProgress) ctx.onProgress(tr('7-Zip: Windows অনুমতি চাইবে, Yes চাপুন', '7-Zip: Windows will ask for permission, click Yes'));
+          fs.writeFileSync(cmdFile, ['@echo off', `start "" /wait "${setup}" /S /D=${sevenDir()}`, 'exit /b 0', ''].join('\r\n'));
+          const q = cmdFile.replace(/'/g, "''");
+          const u = await run('powershell.exe', ['-NoProfile', '-Command', `Start-Process -FilePath cmd.exe -ArgumentList '/c','"${q}"' -Verb RunAs -Wait`], { timeout: 180000 });
+          exe = find7z();
+          if (exe) return { ok: true, fresh: true, exe };
+          errors.push(
+            u.ok
+              ? 'elevated install finished but 7z.exe was not created'
+              : tr('Windows অনুমতি (UAC) পাওয়া যায়নি বা বাতিল হয়েছে', 'Windows permission (UAC) was not given or was cancelled') + ` (code ${u.code})` + (u.stderr ? ': ' + String(u.stderr).slice(0, 120) : '')
+          );
+        } catch (e) {
+          errors.push('elevated install: ' + why(e));
+        }
+      } catch (e) {
+        errors.push(`${ctx.sevenZipUrl} -> ${why(e)}`);
+      } finally {
+        for (const f of [setup, cmdFile]) {
+          try {
+            fs.rmSync(f, { force: true });
+          } catch {}
+        }
+      }
+    }
+    return { ok: false, message: tr('7-Zip নামানো/ইনস্টল হয়নি: ', '7-Zip download/install failed: ') + errors.join(' | ') };
   }
 
   // ---------- আর্কাইভ ----------
