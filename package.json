@@ -47,6 +47,7 @@
       "build/icon.ico",
       "build/icon.png",
       "build/tray.png",
+      "build/logo.png",
       "package.json"
     ],
     "win": {

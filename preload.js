@@ -136,6 +136,7 @@ contextBridge.exposeInMainWorld('api', {
   restoreSettings: (opts) => ipcRenderer.invoke('restore:settings', opts),
 
   // অ্যাপ চালু থাকা / অটো-স্টার্ট (ট্রে)
+  appQuit: () => ipcRenderer.invoke('app:quit'),
   appGetBehavior: () => ipcRenderer.invoke('app:getBehavior'),
   appSetBehavior: (b) => ipcRenderer.invoke('app:setBehavior', b),
   onAutoStartAll: (callback) => ipcRenderer.on('auto:startAll', () => callback()),

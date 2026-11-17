@@ -1592,6 +1592,12 @@ function applyLoginItem() {
     });
   } catch {}
 }
+// অ্যাপের ভেতর থেকে বন্ধ করা (ট্রের "বন্ধ করুন"-এর মতোই: X-এর মতো ট্রেতে লুকানো নয়, সব সার্ভার বন্ধ হয়ে অ্যাপ বের হয়)
+ipcMain.handle('app:quit', () => {
+  quitting = true;
+  app.quit();
+  return true;
+});
 ipcMain.handle('app:getBehavior', () => ({
   keepRunning: keepRunningOn(),
   openAtLogin: !!settings.openAtLogin,

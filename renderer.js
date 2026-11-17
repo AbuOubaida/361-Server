@@ -181,6 +181,23 @@ async function setLang(lang) {
   if (currentPage === 'backup') bkLoad();
 }
 $('langBtn').addEventListener('click', () => setLang(LANG === 'bn' ? 'en' : 'bn'));
+// সাইডবার ছোট/বড়: বাছাই localStorage-এ থাকে (থিমের মতো)
+function sideApply(collapsed) {
+  document.querySelector('.app').classList.toggle('collapsed', collapsed);
+}
+try {
+  sideApply(localStorage.getItem('sideCollapsed') === '1');
+} catch {}
+$('sideToggle').addEventListener('click', () => {
+  const c = !document.querySelector('.app').classList.contains('collapsed');
+  sideApply(c);
+  try {
+    localStorage.setItem('sideCollapsed', c ? '1' : '0');
+  } catch {}
+});
+$('quitBtn').addEventListener('click', () => {
+  if (confirm(t('quit.confirm'))) window.api.appQuit();
+});
 $('langSel').addEventListener('change', (e) => setLang(e.target.value));
 
 // ---------- স্ট্যাটাস বার ও লগ ----------

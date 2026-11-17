@@ -108,16 +108,20 @@
       display: flex;
       flex-direction: column;
       padding: 18px 12px;
+      transition: width .18s ease;
+      position: relative;
+      z-index: 5;
     }
-    .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px; }
+    .brand { display: flex; align-items: center; gap: 11px; padding: 2px 6px 22px; }
     .logo {
-      width: 36px; height: 36px; border-radius: 10px;
+      width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0;
       background: linear-gradient(135deg, #3b82f6, #8b5cf6);
       color: #fff; font-weight: 700; font-size: 18px;
-      display: grid; place-items: center;
+      display: grid; place-items: center; overflow: hidden;
     }
+    .logo img { width: 100%; height: 100%; display: block; }
     .brand b { color: #fff; font-size: 15px; display: block; }
-    .brand small { font-size: 11px; color: var(--sidebar-text); }
+    .brand small { font-size: 10.5px; color: var(--sidebar-text); white-space: nowrap; display: block; margin-top: 2px; }
 
     .nav {
       display: flex; align-items: center; gap: 10px;
@@ -266,6 +270,24 @@
     .lang-btn { margin: auto 8px 0; justify-content: center; background: transparent; color: var(--sidebar-text); border-color: rgba(148, 163, 184, .3); }
     .lang-btn + .side-foot, .theme-btn + .side-foot { margin-top: 8px; }
     .lang-btn + .theme-btn { margin-top: 6px; }
+    /* নিচের বোতামের গুচ্ছ: ভাষা, থিম, অ্যাপ বন্ধ (লাল); সব একসাথে সাইডবারের নিচে */
+    .side-actions { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding: 0 8px; }
+    .side-actions .lang-btn { margin: 0; }
+    .side-actions + .side-foot { margin-top: 8px; }
+    .quit-btn { justify-content: center; }
+    /* সাইডবার ছোট/বড় করার বোতাম (চাপলে আইকন-মাত্র, আবার চাপলে পুরো) */
+    .side-toggle { position: absolute; top: 30px; right: -13px; z-index: 6; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; padding: 0; cursor: pointer; background: var(--sidebar); color: var(--sidebar-text); border: 1px solid rgba(148, 163, 184, .45); border-radius: 50%; box-shadow: 0 1px 4px rgba(0, 0, 0, .35); }
+    .side-toggle:hover { background: var(--sidebar-active); color: #e2e8f0; }
+    .side-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; transition: transform .18s; }
+    .app.collapsed .sidebar { width: 64px; padding: 18px 8px; }
+    .app.collapsed .brand { justify-content: center; padding: 2px 0 22px; }
+    .app.collapsed .logo { width: 38px; height: 38px; }
+    .app.collapsed .side-toggle { top: 21px; }
+    .app.collapsed .side-toggle svg { transform: rotate(180deg); }
+    .app.collapsed .brand > div:nth-child(2), .app.collapsed .side-foot, .app.collapsed .nav span, .app.collapsed .lang-btn span, .app.collapsed .quit-btn span { display: none; }
+    .app.collapsed .nav { justify-content: center; padding: 10px 0; }
+    .app.collapsed .side-actions { padding: 0; }
+    .app.collapsed .side-actions .lang-btn, .app.collapsed .quit-btn { padding: 6px 0; }
     .php-text { color: var(--muted); font-size: 12px; }
 
     /* ---------- টুলস ও ভার্সন ---------- */
@@ -348,9 +370,14 @@
     @media (max-width: 960px) {
       .sidebar { width: 64px; padding: 18px 8px; }
       .brand { justify-content: center; padding: 4px 0 16px; }
-      .brand > div:last-child, .side-foot, .nav span, .lang-btn span { display: none; }
+      .brand > div:nth-child(2), .side-foot, .nav span, .lang-btn span { display: none; }
+      .side-toggle { display: none; }
       .nav { justify-content: center; padding: 10px 0; }
       .lang-btn { margin: auto 0 0; padding: 6px 0; }
+      .side-actions { padding: 0; }
+      .side-actions .lang-btn { padding: 6px 0; }
+      .quit-btn { padding: 6px 0; }
+      .quit-btn span { display: none; }
       .topbar { padding: 14px 18px; }
       .content { padding: 18px 18px 22px; }
     }
@@ -366,8 +393,11 @@
 <body>
   <div class="app">
     <aside class="sidebar">
+      <button class="side-toggle" id="sideToggle" title="Collapse / Expand menu · মেনু ছোট / বড় করুন">
+        <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
       <div class="brand">
-        <div class="logo">S</div>
+        <div class="logo"><img src="build/logo.png" alt="S" onerror="this.remove()"></div>
         <div><b>Server 360</b><small>Local Dev Environment</small></div>
       </div>
 
@@ -389,15 +419,18 @@
       </button>
       <button class="nav" data-page="backup">
         <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        <span data-i18n="nav.backup">ব্যাকআপ</span>
+        <span data-i18n="nav.backup">ব্যাকআপ ও রিস্টোর</span>
       </button>
       <button class="nav" data-page="settings">
         <svg viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
         <span data-i18n="nav.settings">সেটিংস</span>
       </button>
 
-      <button class="btn sm lang-btn" id="langBtn" title="Language / ভাষা">🌐 <span id="langBtnText">English</span></button>
-      <button class="btn sm lang-btn theme-btn" id="themeBtn">🌙 <span id="themeBtnText">Dark</span></button>
+      <div class="side-actions">
+        <button class="btn sm lang-btn" id="langBtn" title="Language / ভাষা">🌐 <span id="langBtnText">English</span></button>
+        <button class="btn sm lang-btn theme-btn" id="themeBtn">🌙 <span id="themeBtnText">Dark</span></button>
+        <button class="btn sm danger quit-btn" id="quitBtn">⏻ <span data-i18n="quit.btn">অ্যাপ বন্ধ করুন</span></button>
+      </div>
       <div class="side-foot">
         Apache · Nginx · PHP<br>MySQL · PostgreSQL<br>Adminer · phpMyAdmin
       </div>
