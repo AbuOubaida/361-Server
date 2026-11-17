@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('api', {
   createSite: (kind, name) => ipcRenderer.invoke('site:create', kind, name),
   gitCloneSite: (url, name, branch) => ipcRenderer.invoke('site:gitClone', url, name, branch),
   installSiteDeps: (name) => ipcRenderer.invoke('site:installDeps', name),
+  setupSiteEnv: (name) => ipcRenderer.invoke('site:setupEnv', name),
   setSiteSession: (domain, minutes) => ipcRenderer.invoke('site:setSession', domain, minutes),
   setSitePhpIni: (domain, cfg) => ipcRenderer.invoke('site:setPhpIni', domain, cfg),
   setSiteShare: (domain, on, port) => ipcRenderer.invoke('site:setShare', domain, on, port),

@@ -3568,7 +3568,7 @@ ipcMain.handle('site:installDeps', async (_event, rawName) => {
   const doNpm = has('package.json') && !has('node_modules');
   const nodeInfo = site.node ? { domain: site.domain } : null;
   if (!doComposer && !doNpm) {
-    return { ok: true, message: tr(`${name}: নতুন করে install-এর কিছু নেই (composer.json/package.json নেই, বা vendor/node_modules আগে থেকেই আছে; কিছু বদলানো হয়নি)`, `${name}: nothing to install (no composer.json/package.json, or vendor/node_modules already exist; nothing was changed)`), name, node: nodeInfo };
+    return { ok: true, message: tr(`${name}: নতুন করে install-এর কিছু নেই (composer.json/package.json নেই, বা vendor/node_modules আগে থেকেই আছে; কিছু বদলানো হয়নি)`, `${name}: nothing to install (no composer.json/package.json, or vendor/node_modules already exist; nothing was changed)`), name, node: nodeInfo, laravel: has('artisan') };
   }
   const done = [];
   const doneNote = () => (done.length ? tr(` (আগে হয়েছে: ${done.join(', ')})`, ` (already done: ${done.join(', ')})`) : '');
@@ -3637,8 +3637,67 @@ ipcMain.handle('site:installDeps', async (_event, rawName) => {
     }
   }
   let message = tr(`${name}: ${done.join(', ')} শেষ হয়েছে`, `${name}: ${done.join(', ')} finished`);
-  if (has('artisan') && !has('.env')) message += tr('। .env এখনো নেই (পরের ধাপে বানানো হবে)', '. There is no .env yet (it will be created in the next step)');
-  return { ok: true, message, name, node: nodeInfo };
+  return { ok: true, message, name, node: nodeInfo, laravel: has('artisan') };
+});
+
+// ---------- Git import ধাপ ৩: Laravel .env ----------
+// .env আগে থেকে থাকলে একদম ছোঁয়া হয় না। migrate এই ধাপে চলে না। WordPress-এর wp-config এখানে নয়।
+ipcMain.handle('site:setupEnv', async (_event, rawName) => {
+  const fail = (m) => ({ ok: false, message: m });
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  const name = siteSlug(rawName);
+  if (!name) return fail(tr('সমস্যা: সাইটের নাম দিন (a-z, 0-9, -)', 'Error: enter a site name (a-z, 0-9, -)'));
+  const site = withToolSites(scanSites()).find((x) => x.name === name && !x.system);
+  if (!site) return fail(tr(`সমস্যা: ${name} নামে সাইট পাওয়া যায়নি`, `Error: no site named ${name}`));
+  const dir = path.basename(site.root).toLowerCase() === 'public' ? path.dirname(site.root) : site.root;
+  const has = (f) => fs.existsSync(path.join(dir, f));
+  if (!has('artisan')) return { ok: true, message: tr(`${name}: Laravel প্রজেক্ট নয় (artisan নেই), .env বানানো হয়নি`, `${name}: not a Laravel project (no artisan), no .env created`) };
+  if (has('.env')) return { ok: true, message: tr(`${name}: .env আগে থেকেই আছে, ছোঁয়া হয়নি`, `${name}: .env already exists, left untouched`) };
+  if (!has('.env.example')) return fail(tr(`সমস্যা: ${name}-এ .env.example নেই, .env বানানো যায়নি`, `Error: ${name} has no .env.example, could not create .env`));
+  if (!has('vendor/autoload.php')) return fail(tr(`সমস্যা: ${name}-এ vendor নেই। আগে composer install চালান (📦 বাটন), তারপর আবার চেষ্টা করুন`, `Error: ${name} has no vendor folder. Run composer install first (the 📦 button), then try again`));
+  busy = true;
+  try {
+    const envFile = path.join(dir, '.env');
+    fs.copyFileSync(path.join(dir, '.env.example'), envFile);
+    let txt = fs.readFileSync(envFile, 'utf8');
+    const domain = `${name}.${TLD}`;
+    const notes = [];
+    const values = { APP_URL: siteUrl(domain) };
+    // ডাটাবেস: উদাহরণ ফাইলে mysql/mariadb/sqlite (বা কিছু না) থাকলে এবং MySQL চালু থাকলে; অন্য ধরনের (যেমন pgsql) হলে ছোঁব না
+    const dbm = /^DB_CONNECTION=(\S*)/m.exec(txt);
+    const dbType = dbm ? dbm[1].replace(/["']/g, '').toLowerCase() : '';
+    const dbName = name.replace(/-/g, '_');
+    const mysqlExe = path.join(SERVICES.mysql.dir, 'bin', 'mysql.exe');
+    if (dbType && !['mysql', 'mariadb', 'sqlite'].includes(dbType)) {
+      notes.push(tr(`ডাটাবেস (${dbType}) ছোঁয়া হয়নি, .env-এ নিজে ঠিক করুন`, `database (${dbType}) left as is, set it in .env yourself`));
+    } else if (!dbRun.mysql || !fs.existsSync(mysqlExe)) {
+      notes.push(tr('MySQL চালু ছিল না, তাই ডাটাবেস সেট হয়নি (MySQL চালু করে আবার চেষ্টা করলে .env ছোঁবে না, নিজে ঠিক করুন)', 'MySQL was not running, so the database was not set (.env is not touched again, set it yourself)'));
+    } else {
+      const port = getDbPort('mysql');
+      await createMysqlDb(mysqlExe, port, dbName);
+      Object.assign(values, { DB_CONNECTION: 'mysql', DB_HOST: '127.0.0.1', DB_PORT: port, DB_DATABASE: dbName, DB_USERNAME: 'root', DB_PASSWORD: envVal(mysqlRootPw()) });
+      notes.push(tr(`ডাটাবেস ${dbName} (root${mysqlRootPw() ? ', সেট করা পাসওয়ার্ড' : ', খালি পাসওয়ার্ড'})`, `database ${dbName} (root${mysqlRootPw() ? ', the password you set' : ', empty password'})`));
+    }
+    fs.writeFileSync(envFile, setEnvValues(txt, values));
+    // APP_KEY
+    if (!/^APP_KEY=base64:/m.test(fs.readFileSync(envFile, 'utf8'))) {
+      try {
+        const ver = phpOfSite(site);
+        const phpDir = phpDirOf(ver);
+        const phpExe = path.join(phpDir, 'php.exe');
+        if (!fs.existsSync(phpExe)) throw new Error('php.exe');
+        await runPhp(phpExe, ['artisan', 'key:generate', '--force', '--no-interaction', '--no-ansi'], { cwd: dir, env: { ...process.env, PHPRC: phpDir }, label: `${name}: key:generate`, timeoutMs: 2 * 60 * 1000 });
+        notes.push('APP_KEY');
+      } catch (e) {
+        notes.push(tr('⚠ APP_KEY বানানো যায়নি, সাইট ফোল্ডারে "php artisan key:generate" চালান', '⚠ APP_KEY could not be generated, run "php artisan key:generate" in the site folder'));
+      }
+    }
+    return { ok: true, message: tr(`${name}: .env বানানো হয়েছে (APP_URL ${values.APP_URL}; ${notes.join('; ')})। migrate এখনো চালানো হয়নি`, `${name}: .env created (APP_URL ${values.APP_URL}; ${notes.join('; ')}). migrate has not been run`) };
+  } catch (err) {
+    return fail(tr('সমস্যা: ', 'Error: ') + err.message);
+  } finally {
+    busy = false;
+  }
 });
 
 // ---------- সাইট চালু/বন্ধ ও কনফিগ ফাইল ----------

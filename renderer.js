@@ -1187,6 +1187,10 @@ $('newGit').addEventListener('click', (e) =>
     if (r.deps) {
       const ir = await window.api.installSiteDeps(r.name);
       setStatus(ir.message);
+      if (ir.ok && ir.laravel) {
+        const er = await window.api.setupSiteEnv(r.name);
+        setStatus(ir.message + ' | ' + er.message);
+      }
     }
     if (r.node) await loadNodeSites();
   })
@@ -1195,8 +1199,13 @@ $('newGit').addEventListener('click', (e) =>
 $('newDeps').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
     setStatus(t('starting'));
-    const r = await window.api.installSiteDeps($('newSiteName').value);
+    const nm = $('newSiteName').value;
+    const r = await window.api.installSiteDeps(nm);
     setStatus(r.message);
+    if (r.ok && r.laravel) {
+      const er = await window.api.setupSiteEnv(nm);
+      setStatus(r.message + ' | ' + er.message);
+    }
     if (r.ok) $('newSiteName').value = '';
     if (r.node) await loadNodeSites();
   })
