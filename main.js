@@ -3487,8 +3487,9 @@ ipcMain.handle('site:gitClone', async (_event, rawUrl, rawName, rawBranch, rawTo
     fs.mkdirSync(WWW_DIR, { recursive: true });
     const label = 'Git clone';
     sendStatus(label + '...');
-    const args = ['-c', 'core.longpaths=true', 'clone', '--progress', ...(branch ? ['--branch', branch] : []), '--', p.url, dest];
-    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+    const args = ['-c', 'core.longpaths=true', '-c', 'core.askPass=', 'clone', '--progress', ...(branch ? ['--branch', branch] : []), '--', p.url, dest];
+    // GIT_ASKPASS ও core.askPass ফাঁকা: Git for Windows-এর git-askpass.exe-র "Username for ..." পপআপ বন্ধ (GIT_TERMINAL_PROMPT=0 এটা আটকায় না)
+    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_ASKPASS: '', SSH_ASKPASS: '' };
     let mask;
     if (token) {
       // কমান্ড-লাইনে নয়, env-এ (প্রসেস লিস্টে দেখা যায় না); শুধু এই repo-র host-এর জন্য; Git 2.31+ লাগে
