@@ -3663,7 +3663,16 @@ ipcMain.handle('site:installDeps', async (_event, rawName) => {
 });
 
 // ---------- Git import ধাপ ৩: Laravel .env ----------
-// .env আগে থেকে থাকলে একদম ছোঁয়া হয় না। migrate এই ধাপে চলে না। WordPress-এর wp-config এখানে নয়।
+// .env ও .env.example-এর DB_* লাইনগুলো (কমেন্ট করা লাইনসহ) এক টেক্সটে; দুটো সমান মানে ডাটাবেস অংশ কেউ বদলায়নি
+function dbLinesOf(txt) {
+  return ['DB_CONNECTION', 'DB_HOST', 'DB_PORT', 'DB_DATABASE', 'DB_USERNAME', 'DB_PASSWORD']
+    .map((k) => {
+      const m = new RegExp(`^[ \\t]*#?[ \\t]*${k}=(.*)$`, 'm').exec(txt);
+      return m ? m[0].trim() : '';
+    })
+    .join('\n');
+}
+// .env আগে থেকে থাকলে একদম ছোঁয়া হয় না (ব্যতিক্রম: আমরা বানিয়েছিলাম কিন্তু MySQL বন্ধ থাকায় DB বসেনি, তখন শুধু DB লাইন বসে)। migrate এই ধাপে চলে না। WordPress-এর wp-config এখানে নয়।
 ipcMain.handle('site:setupEnv', async (_event, rawName) => {
   const fail = (m) => ({ ok: false, message: m });
   if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
@@ -3674,7 +3683,42 @@ ipcMain.handle('site:setupEnv', async (_event, rawName) => {
   const dir = path.basename(site.root).toLowerCase() === 'public' ? path.dirname(site.root) : site.root;
   const has = (f) => fs.existsSync(path.join(dir, f));
   if (!has('artisan')) return { ok: true, message: tr(`${name}: Laravel প্রজেক্ট নয় (artisan নেই), .env বানানো হয়নি`, `${name}: not a Laravel project (no artisan), no .env created`) };
-  if (has('.env')) return { ok: true, message: tr(`${name}: .env আগে থেকেই আছে, ছোঁয়া হয়নি`, `${name}: .env already exists, left untouched`) };
+  if (has('.env')) {
+    const untouched = { ok: true, message: tr(`${name}: .env আগে থেকেই আছে, ছোঁয়া হয়নি`, `${name}: .env already exists, left untouched`) };
+    // শুধু যে .env আমরা বানিয়েছিলাম কিন্তু তখন MySQL বন্ধ ছিল (settings.envPendingDb), তাতেই এবার শুধু DB লাইন বসাই; অন্য .env একদম ছোঁয়া হয় না
+    if (!(settings.envPendingDb && settings.envPendingDb[name])) return untouched;
+    const mysqlExe0 = path.join(SERVICES.mysql.dir, 'bin', 'mysql.exe');
+    if (!dbRun.mysql || !fs.existsSync(mysqlExe0)) return { ok: true, message: tr(`${name}: .env আছে, ডাটাবেস এখনো বসেনি। MySQL চালু করে 📦 আবার চাপুন`, `${name}: .env exists, the database is not set yet. Start MySQL and click 📦 again`) };
+    const clearPending = () => {
+      const m = { ...settings.envPendingDb };
+      delete m[name];
+      settings.envPendingDb = m;
+      saveSettings(settings);
+    };
+    busy = true;
+    try {
+      const envFile0 = path.join(dir, '.env');
+      const cur = fs.readFileSync(envFile0, 'utf8');
+      const ex = has('.env.example') ? fs.readFileSync(path.join(dir, '.env.example'), 'utf8') : '';
+      const typeM = /^DB_CONNECTION=(\S*)/m.exec(cur);
+      const type0 = typeM ? typeM[1].replace(/["']/g, '').toLowerCase() : '';
+      if (dbLinesOf(cur) !== dbLinesOf(ex) || (type0 && !['mysql', 'mariadb', 'sqlite'].includes(type0))) {
+        clearPending();
+        return { ok: true, message: tr(`${name}: .env-এর ডাটাবেস লাইন আপনি বদলেছেন (বা অন্য ধরনের), ছোঁয়া হয়নি`, `${name}: the database lines in .env were changed by you (or are another type), left untouched`) };
+      }
+      const port0 = getDbPort('mysql');
+      const dbName0 = name.replace(/-/g, '_');
+      await createMysqlDb(mysqlExe0, port0, dbName0);
+      fs.copyFileSync(envFile0, path.join(dir, '.env.backup')); // নিরাপত্তার কপি (Laravel-এর .gitignore-এ .env.backup আছে); কপি ব্যর্থ হলে কিছু লেখা হয় না
+      fs.writeFileSync(envFile0, setEnvValues(cur, { DB_CONNECTION: 'mysql', DB_HOST: '127.0.0.1', DB_PORT: port0, DB_DATABASE: dbName0, DB_USERNAME: 'root', DB_PASSWORD: envVal(mysqlRootPw()) }));
+      clearPending();
+      return { ok: true, message: tr(`${name}: .env-এ ডাটাবেস বসানো হয়েছে (${dbName0}; root${mysqlRootPw() ? ', সেট করা পাসওয়ার্ড' : ', খালি পাসওয়ার্ড'})। আগের .env-এর কপি .env.backup-এ। migrate এখনো চালানো হয়নি`, `${name}: database set in .env (${dbName0}; root${mysqlRootPw() ? ', the password you set' : ', empty password'}). The previous .env is copied to .env.backup. migrate has not been run`) };
+    } catch (err) {
+      return fail(tr('সমস্যা: ', 'Error: ') + err.message);
+    } finally {
+      busy = false;
+    }
+  }
   if (!has('.env.example')) return fail(tr(`সমস্যা: ${name}-এ .env.example নেই, .env বানানো যায়নি`, `Error: ${name} has no .env.example, could not create .env`));
   if (!has('vendor/autoload.php')) return fail(tr(`সমস্যা: ${name}-এ vendor নেই। আগে composer install চালান (📦 বাটন), তারপর আবার চেষ্টা করুন`, `Error: ${name} has no vendor folder. Run composer install first (the 📦 button), then try again`));
   busy = true;
@@ -3684,6 +3728,7 @@ ipcMain.handle('site:setupEnv', async (_event, rawName) => {
     let txt = fs.readFileSync(envFile, 'utf8');
     const domain = `${name}.${TLD}`;
     const notes = [];
+    let pendingDb = false; // MySQL বন্ধ ছিল বলে DB বসেনি: পরে MySQL চালু করে 📦 চাপলে বসাব
     const values = { APP_URL: siteUrl(domain) };
     // ডাটাবেস: উদাহরণ ফাইলে mysql/mariadb/sqlite (বা কিছু না) থাকলে এবং MySQL চালু থাকলে; অন্য ধরনের (যেমন pgsql) হলে ছোঁব না
     const dbm = /^DB_CONNECTION=(\S*)/m.exec(txt);
@@ -3693,7 +3738,8 @@ ipcMain.handle('site:setupEnv', async (_event, rawName) => {
     if (dbType && !['mysql', 'mariadb', 'sqlite'].includes(dbType)) {
       notes.push(tr(`ডাটাবেস (${dbType}) ছোঁয়া হয়নি, .env-এ নিজে ঠিক করুন`, `database (${dbType}) left as is, set it in .env yourself`));
     } else if (!dbRun.mysql || !fs.existsSync(mysqlExe)) {
-      notes.push(tr('MySQL চালু ছিল না, তাই ডাটাবেস সেট হয়নি (MySQL চালু করে আবার চেষ্টা করলে .env ছোঁবে না, নিজে ঠিক করুন)', 'MySQL was not running, so the database was not set (.env is not touched again, set it yourself)'));
+      pendingDb = true;
+      notes.push(tr('MySQL চালু ছিল না, তাই ডাটাবেস সেট হয়নি (MySQL চালু করে 📦 আবার চাপলে ডাটাবেস বসবে)', 'MySQL was not running, so the database was not set (start MySQL and click 📦 again to set it)'));
     } else {
       const port = getDbPort('mysql');
       await createMysqlDb(mysqlExe, port, dbName);
@@ -3701,6 +3747,13 @@ ipcMain.handle('site:setupEnv', async (_event, rawName) => {
       notes.push(tr(`ডাটাবেস ${dbName} (root${mysqlRootPw() ? ', সেট করা পাসওয়ার্ড' : ', খালি পাসওয়ার্ড'})`, `database ${dbName} (root${mysqlRootPw() ? ', the password you set' : ', empty password'})`));
     }
     fs.writeFileSync(envFile, setEnvValues(txt, values));
+    {
+      const pm = { ...(settings.envPendingDb || {}) };
+      if (pendingDb) pm[name] = true;
+      else delete pm[name];
+      settings.envPendingDb = pm;
+      saveSettings(settings);
+    }
     // APP_KEY
     if (!/^APP_KEY=base64:/m.test(fs.readFileSync(envFile, 'utf8'))) {
       try {
