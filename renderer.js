@@ -1212,6 +1212,16 @@ $('newDeps').addEventListener('click', (e) =>
     if (r.node) await loadNodeSites();
   })
 );
+// Laravel: php artisan migrate (নামের ঘরের সাইটে; আগে নিশ্চিত করে নেয়)
+$('newMigrate').addEventListener('click', (e) => {
+  const nm = $('newSiteName').value;
+  if (nm.trim() && !confirm(t('sites.migrate.confirm', nm.trim()))) return;
+  return work(e.currentTarget, async () => {
+    setStatus(t('starting'));
+    const r = await window.api.migrateSite(nm);
+    setStatus(r.message);
+  });
+});
 $('newBlank').addEventListener('click', createSite('blank'));
 $('newWp').addEventListener('click', createSite('wordpress'));
 $('newLaravel').addEventListener('click', createSite('laravel'));

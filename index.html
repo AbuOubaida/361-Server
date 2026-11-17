@@ -522,6 +522,7 @@
               <input id="gitToken" type="password" maxlength="255" autocomplete="off" spellcheck="false" data-i18n-ph="sites.git.token" placeholder="token (private হলে)" style="width:170px;">
               <button id="newGit" class="btn sm primary" data-i18n="sites.git.btn">+ Git থেকে আনুন</button>
               <button id="newDeps" class="btn sm" data-i18n="sites.deps.btn">📦 composer / npm install</button>
+              <button id="newMigrate" class="btn sm" data-i18n="sites.migrate.btn">🗄 migrate</button>
             </div>
             <div class="hint" data-i18n="sites.git.hint">Git রিপোর URL দিন; উপরের নামের ঘর ফাঁকা রাখলে রিপোর নামেই সাইট হবে। clone-এর পর composer install / npm install নিজে চলবে (vendor / node_modules আগে থেকে থাকলে ছোঁবে না)। Laravel হলে .env বানায় (আগের .env থাকলে ছোঁবে না; MySQL চালু থাকলে ডাটাবেসও বানায়), migrate চালায় না। 📦 বাটন নামের ঘরের সাইটে install ও .env আবার চেষ্টা করে (MySQL বন্ধ থাকায় ডাটাবেস বসেনি এমন .env-এ, MySQL চালু করে চাপলে ডাটাবেস বসে)। পাবলিক রিপোতে টোকেন লাগে না; private রিপোর জন্য টোকেন ঘরে GitHub token (শুধু পড়ার অনুমতি) দিন, সেটা সেভ বা লগ হয় না, প্রতিবার দিতে হবে। শুধু https। কম্পিউটারে Git (2.31+) ইনস্টল থাকতে হবে।</div>
             <div class="hint" data-i18n="sites.new.hint">নাম দিন (যেমন blog), তারপর বাটন চাপুন। WordPress-এর জন্য MySQL চালু থাকতে হবে। ডাটাবেস নিজে বানাবে।</div>

@@ -3663,6 +3663,68 @@ ipcMain.handle('site:installDeps', async (_event, rawName) => {
   return { ok: true, message, name, node: nodeInfo, laravel: has('artisan') };
 });
 
+// ---------- Laravel: migrate বোতাম ----------
+// শুধু ব্যবহারকারী বোতাম চাপলে চলে (clone/📦 নিজে migrate চালায় না)। আগে শর্ত দেখে: Laravel, vendor, .env, ডাটাবেস বসানো, MySQL চালু।
+const envValueOf = (txt, key) => {
+  const m = new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*(.*)$`, 'm').exec(txt);
+  return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
+};
+ipcMain.handle('site:migrate', async (_event, rawName) => {
+  const fail = (m) => ({ ok: false, message: m });
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  const name = siteSlug(rawName);
+  if (!name) return fail(tr('সমস্যা: সাইটের নাম দিন (a-z, 0-9, -)', 'Error: enter a site name (a-z, 0-9, -)'));
+  const site = withToolSites(scanSites()).find((x) => x.name === name && !x.system);
+  if (!site) return fail(tr(`সমস্যা: ${name} নামে সাইট পাওয়া যায়নি`, `Error: no site named ${name}`));
+  const dir = path.basename(site.root).toLowerCase() === 'public' ? path.dirname(site.root) : site.root;
+  const has = (f) => fs.existsSync(path.join(dir, f));
+  if (!has('artisan')) return fail(tr(`সমস্যা: ${name} Laravel প্রজেক্ট নয় (artisan নেই), migrate চালানো হয়নি`, `Error: ${name} is not a Laravel project (no artisan), migrate was not run`));
+  if (!has('vendor')) return fail(tr(`সমস্যা: ${name}-এ vendor নেই। আগে 📦 চাপুন (composer install), তারপর migrate`, `Error: ${name} has no vendor folder. Click 📦 first (composer install), then migrate`));
+  if (!has('.env')) return fail(tr(`সমস্যা: ${name}-এ .env নেই। আগে 📦 চাপুন, তারপর migrate`, `Error: ${name} has no .env. Click 📦 first, then migrate`));
+  if (settings.envPendingDb && settings.envPendingDb[name]) {
+    return fail(tr(`সমস্যা: ${name}-এর .env-এ ডাটাবেস এখনো বসেনি। MySQL চালু করে আগে 📦 চাপুন, তারপর migrate`, `Error: the database is not set in the .env of ${name} yet. Start MySQL, click 📦 first, then migrate`));
+  }
+  let envTxt = '';
+  try {
+    envTxt = fs.readFileSync(path.join(dir, '.env'), 'utf8');
+  } catch (e) {
+    return fail(tr('সমস্যা: .env পড়া যায়নি: ', 'Error: could not read .env: ') + e.message);
+  }
+  const conn = envValueOf(envTxt, 'DB_CONNECTION').toLowerCase();
+  const dbName = envValueOf(envTxt, 'DB_DATABASE');
+  if ((conn === 'mysql' || conn === 'mariadb') && !dbRun.mysql) {
+    return fail(tr('সমস্যা: আগে MySQL চালু করুন (সার্ভিস পেজ), তারপর migrate', 'Error: start MySQL first (Services page), then migrate'));
+  }
+  busy = true;
+  try {
+    await ensureVCRedist();
+    await ensureService(SERVICES.php);
+    const ver = phpOfSite(site);
+    const phpDir = phpDirOf(ver);
+    const phpExe = path.join(phpDir, 'php.exe');
+    if (!fs.existsSync(phpExe)) throw new Error(tr(`PHP ${ver}-এর php.exe পাওয়া যায়নি`, `php.exe of PHP ${ver} was not found`));
+    const turnedOn = ensureLaravelExts(ver);
+    const label = `${name}: migrate`;
+    sendStatus(label + '...');
+    const out = await runPhp(phpExe, ['artisan', 'migrate', '--force', '--no-interaction', '--no-ansi'], { cwd: dir, env: { ...process.env, PHPRC: phpDir }, label, timeoutMs: 10 * 60 * 1000 });
+    // প্রথমবার Laravel "Creating migration table ... DONE" লাইনও ছাপে; সেটা migration নয়, তাই বাদ
+    const count = Math.max(0, (out.match(/\bDONE\b/g) || []).length - (/Creating migration table/i.test(out) ? 1 : 0));
+    const extra = turnedOn.length ? tr(` [PHP extension চালু হয়েছে: ${turnedOn.join(', ')}]`, ` [PHP extensions turned on: ${turnedOn.join(', ')}]`) : '';
+    const dbNote = dbName ? ` (${dbName})` : '';
+    if (/Nothing to migrate/i.test(out)) return { ok: true, message: tr(`${name}: migrate-এর নতুন কিছু নেই, সব migration আগেই চলেছে${dbNote}${extra}`, `${name}: nothing to migrate, all migrations were already run${dbNote}${extra}`) };
+    return { ok: true, message: tr(`${name}: migrate শেষ হয়েছে${count ? ` (${count}টি migration)` : ''}${dbNote}${extra}`, `${name}: migrate finished${count ? ` (${count} migration${count === 1 ? '' : 's'})` : ''}${dbNote}${extra}`) };
+  } catch (err) {
+    const raw = String(err && err.message ? err.message : err);
+    let hint = '';
+    if (/Unknown database|\[1049\]/i.test(raw)) hint = tr('ডাটাবেস পাওয়া যায়নি; 📦 চেপে দেখুন বা phpMyAdmin-এ বানান। ', 'The database was not found; try 📦 or create it in phpMyAdmin. ');
+    else if (/Access denied|\[1045\]/i.test(raw)) hint = tr('MySQL-এর পাসওয়ার্ড .env-এর সাথে মিলছে না। ', 'The MySQL password does not match the one in .env. ');
+    else if (/Connection refused|\[2002\]/i.test(raw)) hint = tr('MySQL-এ সংযোগ হয়নি; MySQL চালু আছে কিনা আর পোর্ট দেখুন। ', 'Could not connect to MySQL; check that it is running and the port. ');
+    return fail(tr('সমস্যা: migrate ব্যর্থ। ', 'Error: migrate failed. ') + hint + raw);
+  } finally {
+    busy = false;
+  }
+});
+
 // ---------- Git import ধাপ ৩: Laravel .env ----------
 // .env ও .env.example-এর DB_* লাইনগুলো (কমেন্ট করা লাইনসহ) এক টেক্সটে; দুটো সমান মানে ডাটাবেস অংশ কেউ বদলায়নি
 function dbLinesOf(txt) {
