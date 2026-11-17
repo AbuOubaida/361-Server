@@ -1,6 +1,6 @@
 {
   "name": "my-laragon",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Server 360: local development environment for Windows (Apache/Nginx, PHP, MySQL, PostgreSQL, MongoDB, Node sites, backup/restore, monitoring)",
   "main": "main.js",
   "scripts": {
