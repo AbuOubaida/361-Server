@@ -3149,7 +3149,7 @@ function runPhp(phpExe, args, { cwd, env, label, timeoutMs = 20 * 60 * 1000 }) {
     let tail = '';
     let last = 0;
     const onData = (d) => {
-      const s = d.toString();
+      const s = d.toString().replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ''); // রঙের escape কোড বাদ
       tail = (tail + s).slice(-4000);
       const line = s.split(/[\r\n]+/).map((x) => x.trim()).filter(Boolean).pop();
       if (line && Date.now() - last > 400) {
@@ -3528,7 +3528,7 @@ function runShell(command, { cwd, env, label, timeoutMs = 15 * 60 * 1000 }) {
     let tail = '';
     let last = 0;
     const onData = (d) => {
-      const s = d.toString();
+      const s = d.toString().replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ''); // রঙের escape কোড বাদ
       tail = (tail + s).slice(-4000);
       const line = s.split(/[\r\n]+/).map((x) => x.trim()).filter(Boolean).pop();
       if (line && Date.now() - last > 400) {
