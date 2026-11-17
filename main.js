@@ -3428,6 +3428,89 @@ ipcMain.handle('site:create', async (_event, kind, rawName) => {
   }
 });
 
+// ---------- Git থেকে প্রজেক্ট আনা (ধাপ ১: শুধু clone) ----------
+// এই ধাপে composer install / npm install / .env / ডাটাবেস করা হয় না; শুধু www\<নাম>-এ clone করে সাইট চিনে hosts ও কনফিগ হালনাগাদ।
+// শুধু http(s) URL (প্রাইভেট রিপো/লগইন এখনো নেই)। কম্পিউটারে Git আগে থেকে ইনস্টল থাকতে হবে।
+function findGitExe() {
+  const exe = 'git.exe';
+  const dirs = String(process.env.PATH || process.env.Path || '').split(path.delimiter).filter(Boolean);
+  for (const d of dirs) {
+    const f = path.join(d.replace(/^"|"$/g, ''), exe);
+    if (fs.existsSync(f)) return f;
+  }
+  const pf = [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.ProgramW6432].filter(Boolean).map((p) => path.join(p, 'Git', 'cmd', exe));
+  const la = process.env.LOCALAPPDATA ? [path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'cmd', exe)] : [];
+  return [...pf, ...la].find((f) => fs.existsSync(f)) || '';
+}
+
+// URL যাচাই + রিপোর নাম বের করা। ফেরত: { url, repo } বা { err }
+function parseGitUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return { err: tr('সমস্যা: Git রিপোর URL দিন (https://...)', 'Error: enter the Git repository URL (https://...)') };
+  if (s.length > 300 || /[\s\0"'`<>|^]/.test(s)) return { err: tr('সমস্যা: URL-এ ফাঁকা বা অচল চিহ্ন আছে', 'Error: the URL has spaces or invalid characters') };
+  let u;
+  try {
+    u = new URL(s);
+  } catch {
+    return { err: tr('সমস্যা: URL ঠিক নেই (https://github.com/নাম/রিপো এভাবে দিন)', 'Error: invalid URL (use the form https://github.com/name/repo)') };
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return { err: tr('সমস্যা: শুধু https:// বা http:// URL চলবে', 'Error: only https:// or http:// URLs are supported') };
+  if (u.username || u.password) return { err: tr('সমস্যা: URL-এ ইউজার/পাসওয়ার্ড/টোকেন দেবেন না (প্রাইভেট রিপো এখনো সাপোর্ট নেই)', 'Error: do not put a user/password/token in the URL (private repositories are not supported yet)') };
+  const last = u.pathname.split('/').filter(Boolean).pop() || '';
+  return { url: s, repo: siteSlug(last.replace(/\.git$/i, '')) };
+}
+
+ipcMain.handle('site:gitClone', async (_event, rawUrl, rawName, rawBranch) => {
+  const fail = (m) => ({ ok: false, message: m });
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  const p = parseGitUrl(rawUrl);
+  if (p.err) return fail(p.err);
+  const branch = String(rawBranch || '').trim();
+  if (branch && (!/^[A-Za-z0-9._\/-]{1,100}$/.test(branch) || branch.startsWith('-') || branch.includes('..'))) {
+    return fail(tr('সমস্যা: branch-এর নামে অচল অক্ষর আছে', 'Error: the branch name has invalid characters'));
+  }
+  const name = siteSlug(rawName) || p.repo;
+  if (!name) return fail(tr('সমস্যা: সাইটের নাম দিন (a-z, 0-9, -)', 'Error: enter a site name (a-z, 0-9, -)'));
+  const dest = path.join(WWW_DIR, name);
+  if (fs.existsSync(dest)) return fail(tr(`সমস্যা: ${name} নামে ফোল্ডার আগে থেকেই আছে (কিছু বদলানো হয়নি)`, `Error: a folder named ${name} already exists (nothing was changed)`));
+  const git = findGitExe();
+  if (!git) return fail(tr('সমস্যা: এই কম্পিউটারে Git পাওয়া যায়নি। আগে Git for Windows ইনস্টল করুন (git-scm.com), তারপর আবার চেষ্টা করুন', 'Error: Git was not found on this computer. Install Git for Windows first (git-scm.com), then try again'));
+  busy = true;
+  try {
+    fs.mkdirSync(WWW_DIR, { recursive: true });
+    const label = 'Git clone';
+    sendStatus(label + '...');
+    const args = ['-c', 'core.longpaths=true', 'clone', '--progress', ...(branch ? ['--branch', branch] : []), '--', p.url, dest];
+    try {
+      await runPhp(git, args, { cwd: WWW_DIR, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }, label, timeoutMs: 15 * 60 * 1000 });
+    } catch (e) {
+      fs.rmSync(dest, { recursive: true, force: true }); // dest আগে ছিল না, তাই আধা-clone মুছলে কিছু হারায় না
+      throw e;
+    }
+    const sites = withToolSites(scanSites());
+    const site = sites.find((x) => x.name === name);
+    const has = (f) => fs.existsSync(path.join(dest, f));
+    const kind = site && site.node ? 'node' : has('artisan') ? 'laravel' : has('wp-config.php') || has('wp-content') ? 'wordpress' : has('index.php') || has('public/index.php') ? 'php' : 'other';
+    const h = await syncHosts(sites);
+    const live = await reloadRunning(sites);
+    const kindBn = { node: 'Node.js', laravel: 'Laravel', wordpress: 'WordPress', php: 'PHP', other: 'অজানা ধরনের' }[kind];
+    const kindEn = { node: 'Node.js', laravel: 'Laravel', wordpress: 'WordPress', php: 'PHP', other: 'unrecognized' }[kind];
+    let message = tr(`${name}.test-এ clone হয়েছে (${kindBn} প্রজেক্ট)`, `${name}.test cloned (${kindEn} project)`);
+    const todo = [];
+    if (has('composer.json') && !has('vendor')) todo.push('composer install');
+    if (has('package.json') && !has('node_modules')) todo.push('npm install');
+    if (kind === 'laravel' && !has('.env')) todo.push('.env');
+    if (todo.length) message += tr(`। এখনো বাকি (এই ধাপে করা হয় না): ${todo.join(', ')}`, `. Still to do (not done in this step): ${todo.join(', ')}`);
+    if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে .test ঠিকানা কাজ করবে)', ' (the .test address works once a web server is started)');
+    if (!h.ok) message += hostsFailNote(h);
+    return { ok: true, message, kind, node: site && site.node ? { domain: site.domain } : null, sites: publicSites(sites) };
+  } catch (err) {
+    return fail(tr('সমস্যা: ', 'Error: ') + err.message);
+  } finally {
+    busy = false;
+  }
+});
+
 // ---------- সাইট চালু/বন্ধ ও কনফিগ ফাইল ----------
 // ফাইলগুলো ওয়েব সার্ভার না চালিয়েও বানানো যায় (শুধু সার্ভারটা নামানো থাকলেই হয়)
 function prepareSiteFiles(webId) {

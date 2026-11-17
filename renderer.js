@@ -1173,6 +1173,20 @@ $('newNode').addEventListener('click', (e) =>
     }
   })
 );
+// Git থেকে clone (ধাপ ১: শুধু clone, install/.env নয়)
+$('newGit').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    setStatus(t('starting'));
+    const r = await window.api.gitCloneSite($('gitUrl').value, $('newSiteName').value, $('gitBranch').value);
+    setStatus(r.message);
+    if (!r.ok) return;
+    $('gitUrl').value = '';
+    $('gitBranch').value = '';
+    $('newSiteName').value = '';
+    renderSites(r.sites, await window.api.listPhp());
+    if (r.node) await loadNodeSites();
+  })
+);
 $('newBlank').addEventListener('click', createSite('blank'));
 $('newWp').addEventListener('click', createSite('wordpress'));
 $('newLaravel').addEventListener('click', createSite('laravel'));

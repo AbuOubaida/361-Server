@@ -516,6 +516,12 @@
               </select>
               <button id="newNode" class="btn sm primary" data-i18n="sites.new.node">+ Node.js অ্যাপ</button>
             </div>
+            <div class="row">
+              <input id="gitUrl" type="text" maxlength="300" data-i18n-ph="sites.git.url" placeholder="https://github.com/name/repo.git" style="width:auto; flex:1; min-width:220px;">
+              <input id="gitBranch" type="text" maxlength="100" data-i18n-ph="sites.git.branch" placeholder="branch" style="width:130px;">
+              <button id="newGit" class="btn sm primary" data-i18n="sites.git.btn">+ Git থেকে আনুন</button>
+            </div>
+            <div class="hint" data-i18n="sites.git.hint">Git রিপোর URL দিন; উপরের নামের ঘর ফাঁকা রাখলে রিপোর নামেই সাইট হবে। এই ধাপে শুধু clone হয়; composer install, npm install ও .env এখনো নিজে করতে হবে। শুধু https পাবলিক রিপো। কম্পিউটারে Git ইনস্টল থাকতে হবে।</div>
             <div class="hint" data-i18n="sites.new.hint">নাম দিন (যেমন blog), তারপর বাটন চাপুন। WordPress-এর জন্য MySQL চালু থাকতে হবে। ডাটাবেস নিজে বানাবে।</div>
           </div>
           <div class="card" id="shareBar"></div>
