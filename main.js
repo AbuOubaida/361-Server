@@ -14,6 +14,7 @@ const monitor = require('./monitor'); // R1: সাইট মনিটরিং 
 const resources = require('./resources'); // R1 ধাপ ২: প্রসেস গ্রুপ ধরে CPU/RAM
 const traffic = require('./traffic'); // R1 ধাপ ৩b: সাইট ধরে হিট (access log থেকে)
 const mailer = require('./mailer'); // R1 ধাপ ৪: ইমেইল সতর্কবার্তা (নিজের SMTP ক্লায়েন্ট)
+const updater = require('./updater'); // অটো-আপডেট (GitHub Releases + electron-updater; শুধু ইনস্টল করা অ্যাপে)
 const mongo = require('./mongo'); // R2 ধাপ ১: MongoDB নিরাপদে বন্ধ করার ছোট কোড
 const mongoExpress = require('./mongoexpress'); // R2 ধাপ ২: MongoDB দেখার টুল (Mongo Express)
 
@@ -1536,6 +1537,7 @@ let monitorApi = null;
 let resApi = null;
 let trafficApi = null;
 let mailApi = null;
+let updApi = null; // অটো-আপডেট (Settings > Updates)
 let meApi = null; // Mongo Express (R2 ধাপ ২)
 // ধাপ ২: এখন কোন প্রসেস গ্রুপ চালু আছে (নাম -> .exe)। একই নামের অন্য প্রোগ্রামের প্রসেসও গোনা হয় (tasklist-এ parent নেই)
 function resGroups() {
@@ -5519,6 +5521,27 @@ app.whenReady().then(() => {
   } catch (err) {
     mailApi = null; // মেইল না চললেও বাকি সব চলবে
   }
+  // অটো-আপডেট (আলাদা try/catch: এটা না চললেও বাকি সব চলবে)
+  try {
+    updApi = updater.init({
+      ipcMain,
+      getSettings: () => settings,
+      saveSettings: () => saveSettings(settings),
+      tr,
+      version: app.getVersion(),
+      isPackaged: app.isPackaged,
+      send: (ch, p) => {
+        if (win && !win.isDestroyed()) win.webContents.send(ch, p);
+      },
+      status: sendStatus,
+      prepareQuit: () => {
+        quitting = true; // রিস্টার্ট ও ইনস্টলের সময় উইন্ডো ট্রেতে লুকাবে না
+      },
+      loadUpdater: () => require('electron-updater').autoUpdater,
+    });
+  } catch (err) {
+    updApi = null;
+  }
   // R2 ধাপ ২: Mongo Express (আলাদা try/catch)
   try {
     meApi = mongoExpress.init({
@@ -5618,6 +5641,9 @@ app.on('before-quit', () => {
   } catch {}
   try {
     if (mailApi) mailApi.stop();
+  } catch {}
+  try {
+    if (updApi) updApi.stop();
   } catch {}
   try {
     if (meApi) meApi.stop();

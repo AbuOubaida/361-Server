@@ -255,6 +255,10 @@
     .switch input:checked + i::after { transform: translateX(14px); }
 
     .hint { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.6; }
+    .upd-bar { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin-top: 10px; max-width: 420px; }
+    .upd-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+    .upd-ver { font-size: 13px; color: var(--muted); }
+    .upd-ver b { color: var(--text, inherit); }
     .hint.warn { background: var(--warn-soft); padding: 8px 10px; border-radius: 8px; }
     .hint[hidden] { display: none; }
     .info { font-size: 12px; color: var(--muted); margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
@@ -943,6 +947,25 @@
             </div>
             <div class="hint" id="mailMsg" hidden></div>
             <div class="hint" data-i18n="mail.hint">পাসওয়ার্ড সেভ হলে আর দেখানো হয় না; ফাঁকা রাখলে আগেরটাই থাকে। পাসওয়ার্ড এই পিসিতে এনক্রিপ্ট করে রাখা হয় (Windows)। কাছাকাছি সময়ের সতর্কবার্তা একটা মেইলে জমিয়ে যায় (প্রায় ২০ সেকেন্ড অপেক্ষা), ঘণ্টায় সর্বোচ্চ ৬টা মেইল। ব্যর্থ হলে ৫ মিনিট পরে আবার, ৩ বার পর্যন্ত। মেইল যায় শুধু "সতর্কবার্তা" সুইচ চালু থাকলে।</div>
+          </div>
+          <div class="section-title" data-i18n="settings.upd.section">আপডেট</div>
+          <div class="card" id="updCard">
+            <div class="card-title" data-i18n="upd.title">অ্যাপের আপডেট</div>
+            <div class="card-sub" data-i18n="upd.sub">নতুন ভার্সন GitHub থেকে নামে। আপনি বোতাম না চাপা পর্যন্ত কিছু নামে না, ইনস্টলও হয় না।</div>
+            <div class="row first">
+              <span class="upd-ver" id="updCur"></span>
+            </div>
+            <div class="row">
+              <button id="updCheck" class="btn sm accent" data-i18n="upd.check">আপডেট আছে কিনা দেখুন</button>
+              <button id="updDownload" class="btn sm primary" data-i18n="upd.download" hidden>নামান</button>
+              <button id="updInstall" class="btn sm danger" data-i18n="upd.install" hidden>রিস্টার্ট ও ইনস্টল</button>
+            </div>
+            <div class="upd-bar" id="updBar" hidden><i id="updBarFill"></i></div>
+            <div class="hint" id="updMsg"></div>
+            <div class="row">
+              <label class="switch"><input type="checkbox" id="updAuto"><i></i><b data-i18n="upd.auto">অ্যাপ খুললে নিজে চেক করুন</b></label>
+            </div>
+            <div class="hint" data-i18n="upd.hint">ইনস্টলের সময় সব সার্ভার (ওয়েব সার্ভার, ডাটাবেস, Node অ্যাপ) বন্ধ হবে, আর ইনস্টল শেষে অ্যাপ আবার খুলবে। আপনার ডাটা, সাইট ও সেটিংস থাকে। সোর্স থেকে (npm start) চালালে এই সুবিধা কাজ করে না।</div>
           </div>
           <div class="section-title" data-i18n="settings.lang.section">ভাষা</div>
           <div class="card">

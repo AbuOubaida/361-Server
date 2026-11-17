@@ -161,6 +161,7 @@ function applyStatic() {
     trfTop();
     mailRender(false);
   }
+  if (currentPage === 'settings') updRender();
 }
 
 async function setLang(lang) {
@@ -287,6 +288,7 @@ document.querySelectorAll('.nav').forEach((btn) =>
     if (page === 'settings') {
       appBehaviorLoad();
       mailLoad();
+      updLoad();
     }
   })
 );
@@ -1748,6 +1750,81 @@ $('mailTest').addEventListener('click', async () => {
     b.disabled = false;
   }
 });
+
+// ---------- অ্যাপের আপডেট (অটো-আপডেট, Settings > Updates) ----------
+let updData = null;
+const updFmtTime = (ts) => (ts ? new Date(ts).toLocaleString() : '-');
+function updRender() {
+  const d = updData;
+  if (!d) return;
+  const s = d.status;
+  let msg;
+  let bad = false;
+  if (!d.packaged) msg = t('upd.src');
+  else if (!d.supported) {
+    msg = t('upd.nolib', d.loadErr || '-');
+    bad = true;
+  } else if (s === 'checking') msg = t('upd.checking');
+  else if (s === 'none') msg = t('upd.none', updFmtTime(d.checkedAt));
+  else if (s === 'available') msg = t('upd.available', d.version);
+  else if (s === 'downloading') msg = t('upd.downloading', d.version, d.percent);
+  else if (s === 'downloaded') msg = t('upd.downloaded', d.version);
+  else if (s === 'error') {
+    msg = t('upd.error', d.err);
+    bad = true;
+  } else msg = t('upd.idle');
+  $('updCur').textContent = t('upd.cur', d.current);
+  $('updAuto').checked = d.autoCheck;
+  const m = $('updMsg');
+  m.textContent = msg;
+  m.style.color = bad ? 'var(--danger)' : '';
+  $('updCheck').disabled = !d.supported || s === 'checking' || s === 'downloading' || s === 'downloaded';
+  $('updDownload').hidden = !(d.supported && s === 'available');
+  $('updInstall').hidden = !(d.supported && s === 'downloaded');
+  $('updBar').hidden = s !== 'downloading';
+  $('updBarFill').style.width = (s === 'downloading' ? d.percent : 0) + '%';
+}
+async function updLoad() {
+  try {
+    updData = await window.api.updateGet();
+    updRender();
+  } catch {}
+}
+$('updCheck').addEventListener('click', async () => {
+  try {
+    updData = await window.api.updateCheck();
+    updRender();
+  } catch {}
+});
+$('updDownload').addEventListener('click', async () => {
+  try {
+    updData = await window.api.updateDownload();
+    updRender();
+  } catch {}
+});
+$('updInstall').addEventListener('click', async () => {
+  if (!confirm(t('upd.confirm'))) return;
+  try {
+    const r = await window.api.updateInstall();
+    if (r && r.ok) setStatus(t('upd.installing'));
+    else {
+      if (r && r.message) $('updMsg').textContent = t('upd.error', r.message);
+      updLoad();
+    }
+  } catch {}
+});
+$('updAuto').addEventListener('change', async () => {
+  try {
+    updData = await window.api.updateSetAuto($('updAuto').checked);
+    updRender();
+  } catch {}
+});
+// main.js অবস্থা বদলালে (চেক শেষ, নামার অগ্রগতি...) কার্ড হালনাগাদ
+if (window.api.onUpdateState) {
+  window.api.onUpdateState(() => {
+    if (currentPage === 'settings') updLoad();
+  });
+}
 
 // ---------- সাইট ধরে হিট (R1 ধাপ ৩b) ----------
 let trfData = null;

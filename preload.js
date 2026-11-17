@@ -141,6 +141,14 @@ contextBridge.exposeInMainWorld('api', {
   appSetBehavior: (b) => ipcRenderer.invoke('app:setBehavior', b),
   onAutoStartAll: (callback) => ipcRenderer.on('auto:startAll', () => callback()),
 
+  // অটো-আপডেট (Settings > Updates)
+  updateGet: () => ipcRenderer.invoke('update:get'),
+  updateCheck: () => ipcRenderer.invoke('update:check'),
+  updateDownload: () => ipcRenderer.invoke('update:download'),
+  updateInstall: () => ipcRenderer.invoke('update:install'),
+  updateSetAuto: (on) => ipcRenderer.invoke('update:setAuto', on),
+  onUpdateState: (callback) => ipcRenderer.on('app:update', () => callback()),
+
   // সাইট মনিটরিং (R1)
   monitorGet: () => ipcRenderer.invoke('monitor:get'),
   monitorHistory: (key, hours) => ipcRenderer.invoke('monitor:history', key, hours),
