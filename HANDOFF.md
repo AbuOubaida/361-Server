@@ -26,6 +26,7 @@
 
 **FIRST ACTION of the next session:** reply in Bangla script, say in 3 lines where we stopped (everything done, version 1.0.3), then ask ONCE (tappable list) what he wants next. Do not start a feature before he answers.
 
+**User decision (end of session 37): the remaining TESTS below are for LATER ("baki test gula pore korbo"); do not push them. He wants to start NEW WORK in the next session: ask which feature (one tappable list).**
 **Open items (none started; he has not chosen):**
 - Features: portable build; pgweb (PostgreSQL viewer, small Go exe); MariaDB; Redis; **R3** remote database; **R4** load balancing; Git import of projects (clone, composer/npm install, `.env`); Apache SSL (https works on Nginx only); real Let's Encrypt certificate on the SERVER PC (staging then real, auto-renew); several DB versions running at once on different ports; `npm audit` (1 high vulnerability seen long ago).
 - Small leftovers: symlink/junction under www (needs `dir /AL` output + decision); F3 `laravel-app.test` uptime (optional); Task Scheduler (scheduled, hidden) backup run with MongoDB stopped: the MANUAL run is confirmed (see session 37 late), the scheduled run was not seen separately.
