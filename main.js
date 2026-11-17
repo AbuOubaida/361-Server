@@ -3500,15 +3500,145 @@ ipcMain.handle('site:gitClone', async (_event, rawUrl, rawName, rawBranch) => {
     if (has('composer.json') && !has('vendor')) todo.push('composer install');
     if (has('package.json') && !has('node_modules')) todo.push('npm install');
     if (kind === 'laravel' && !has('.env')) todo.push('.env');
-    if (todo.length) message += tr(`। এখনো বাকি (এই ধাপে করা হয় না): ${todo.join(', ')}`, `. Still to do (not done in this step): ${todo.join(', ')}`);
+    if (todo.length) message += tr(`। পরের কাজ: ${todo.join(', ')}`, `. Next: ${todo.join(', ')}`);
     if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে .test ঠিকানা কাজ করবে)', ' (the .test address works once a web server is started)');
     if (!h.ok) message += hostsFailNote(h);
-    return { ok: true, message, kind, node: site && site.node ? { domain: site.domain } : null, sites: publicSites(sites) };
+    return { ok: true, message, kind, name, deps: todo.some((x) => x !== '.env'), node: site && site.node ? { domain: site.domain } : null, sites: publicSites(sites) };
   } catch (err) {
     return fail(tr('সমস্যা: ', 'Error: ') + err.message);
   } finally {
     busy = false;
   }
+});
+
+// ---------- Git import ধাপ ২: composer install / npm install ----------
+// vendor বা node_modules আগে থেকে থাকলে সেটা ছোঁয়া হয় না। .env ও ডাটাবেস এই ধাপে নয়।
+async function ensureComposerPhar() {
+  const cacheDir = path.join(ROOT_DIR, 'data', 'cache');
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const phar = path.join(cacheDir, 'composer.phar');
+  if (!fs.existsSync(phar) || fs.statSync(phar).size < 500 * 1024) await download(COMPOSER_URL, phar, tr('Composer নামছে', 'Downloading Composer'));
+  return phar;
+}
+
+// shell দিয়ে কমান্ড চালানো (npm.cmd-এর জন্য); runPhp-এর মতোই শেষ লাইন স্ট্যাটাস বারে দেখায়
+function runShell(command, { cwd, env, label, timeoutMs = 15 * 60 * 1000 }) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, { cwd, env, shell: true, windowsHide: true });
+    let tail = '';
+    let last = 0;
+    const onData = (d) => {
+      const s = d.toString();
+      tail = (tail + s).slice(-4000);
+      const line = s.split(/[\r\n]+/).map((x) => x.trim()).filter(Boolean).pop();
+      if (line && Date.now() - last > 400) {
+        last = Date.now();
+        sendStatus(`${label}: ${line.slice(0, 90)}`);
+      }
+    };
+    proc.stdout.on('data', onData);
+    proc.stderr.on('data', onData);
+    const timer = setTimeout(() => {
+      killTree(proc.pid);
+      reject(new Error(tr('অনেক সময় লাগছে, বন্ধ করা হলো (ইন্টারনেট ঠিক আছে কিনা দেখুন)', 'Took too long and was stopped (check your internet connection)')));
+    }, timeoutMs);
+    proc.once('error', (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    proc.once('exit', (code) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve(tail);
+      const lines = tail.trim().split(/\r?\n/).map((x) => x.trim()).filter(Boolean).slice(-6).join(' | ');
+      reject(new Error(tr(`কমান্ড ব্যর্থ (কোড ${code}): `, `Command failed (code ${code}): `) + lines.slice(-400)));
+    });
+  });
+}
+
+ipcMain.handle('site:installDeps', async (_event, rawName) => {
+  const fail = (m) => ({ ok: false, message: m });
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  const name = siteSlug(rawName);
+  if (!name) return fail(tr('সমস্যা: সাইটের নাম দিন (a-z, 0-9, -)', 'Error: enter a site name (a-z, 0-9, -)'));
+  const site = withToolSites(scanSites()).find((x) => x.name === name && !x.system);
+  if (!site) return fail(tr(`সমস্যা: ${name} নামে সাইট পাওয়া যায়নি (www ফোল্ডারে আছে কিনা দেখুন)`, `Error: no site named ${name} (check that it is in the www folder)`));
+  const dir = path.basename(site.root).toLowerCase() === 'public' ? path.dirname(site.root) : site.root;
+  const has = (f) => fs.existsSync(path.join(dir, f));
+  const doComposer = has('composer.json') && !has('vendor');
+  const doNpm = has('package.json') && !has('node_modules');
+  const nodeInfo = site.node ? { domain: site.domain } : null;
+  if (!doComposer && !doNpm) {
+    return { ok: true, message: tr(`${name}: নতুন করে install-এর কিছু নেই (composer.json/package.json নেই, বা vendor/node_modules আগে থেকেই আছে; কিছু বদলানো হয়নি)`, `${name}: nothing to install (no composer.json/package.json, or vendor/node_modules already exist; nothing was changed)`), name, node: nodeInfo };
+  }
+  const done = [];
+  const doneNote = () => (done.length ? tr(` (আগে হয়েছে: ${done.join(', ')})`, ` (already done: ${done.join(', ')})`) : '');
+
+  // ১) composer install
+  if (doComposer) {
+    busy = true;
+    try {
+      await ensureVCRedist();
+      await ensureService(SERVICES.php);
+      const ver = phpOfSite(site);
+      const phpDir = phpDirOf(ver);
+      const phpExe = path.join(phpDir, 'php.exe');
+      if (!fs.existsSync(phpExe)) throw new Error(tr(`PHP ${ver}-এর php.exe পাওয়া যায়নি`, `php.exe of PHP ${ver} was not found`));
+      const turnedOn = ensureLaravelExts(ver);
+      const phar = await ensureComposerPhar();
+      const env = {
+        ...process.env,
+        PHPRC: phpDir,
+        COMPOSER_HOME: path.join(ROOT_DIR, 'data', 'composer-home'),
+        COMPOSER_MEMORY_LIMIT: '-1',
+        COMPOSER_NO_INTERACTION: '1',
+        COMPOSER_DISABLE_XDEBUG_WARN: '1',
+      };
+      fs.mkdirSync(env.COMPOSER_HOME, { recursive: true });
+      const label = `${name}: composer install`;
+      sendStatus(label + '... ' + tr('(প্রথমবার কয়েক মিনিট লাগতে পারে)', '(the first time can take a few minutes)'));
+      await runPhp(phpExe, [phar, 'install', '--no-interaction', '--no-progress', '--no-ansi', '--prefer-dist'], { cwd: dir, env, label });
+      done.push('composer install' + (turnedOn.length ? ` [${tr('PHP extension চালু হয়েছে', 'PHP extensions turned on')}: ${turnedOn.join(', ')}]` : ''));
+    } catch (err) {
+      return fail(tr(`সমস্যা: composer install ব্যর্থ${doNpm ? ' (npm install চালানো হয়নি)' : ''}: `, `Error: composer install failed${doNpm ? ' (npm install was not run)' : ''}: `) + err.message);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // ২) npm install (অ্যাপের নিজের Node দিয়ে)
+  if (doNpm) {
+    if (site.node) {
+      const r = await installNodeDeps(site.domain);
+      if (!r.ok) return fail(r.message + doneNote());
+      done.push('npm install');
+    } else {
+      let nodeEntry;
+      try {
+        nodeEntry = await ensureNodeRuntime(activeVersion('node').version);
+      } catch (err) {
+        return fail(tr('সমস্যা: ', 'Error: ') + err.message + doneNote());
+      }
+      const npm = path.join(nodeEntry.dir, 'npm.cmd');
+      if (!fs.existsSync(npm)) return fail(tr('সমস্যা: এই Node ZIP-এ npm.cmd নেই', 'Error: this Node ZIP does not include npm.cmd') + doneNote());
+      if (busy) return fail(nodeBusyMsg() + doneNote());
+      busy = true;
+      try {
+        const env = nodeEnv(0, nodeEntry.dir);
+        delete env.PORT;
+        const label = `${name}: npm install`;
+        sendStatus(label + '... ' + tr('(কিছুক্ষণ লাগবে)', '(this takes a while)'));
+        await runShell(`"${npm}" install`, { cwd: dir, env, label });
+        done.push('npm install');
+      } catch (err) {
+        return fail(tr('সমস্যা: npm install ব্যর্থ: ', 'Error: npm install failed: ') + err.message + doneNote());
+      } finally {
+        busy = false;
+      }
+    }
+  }
+  let message = tr(`${name}: ${done.join(', ')} শেষ হয়েছে`, `${name}: ${done.join(', ')} finished`);
+  if (has('artisan') && !has('.env')) message += tr('। .env এখনো নেই (পরের ধাপে বানানো হবে)', '. There is no .env yet (it will be created in the next step)');
+  return { ok: true, message, name, node: nodeInfo };
 });
 
 // ---------- সাইট চালু/বন্ধ ও কনফিগ ফাইল ----------

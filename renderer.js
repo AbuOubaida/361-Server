@@ -1184,6 +1184,20 @@ $('newGit').addEventListener('click', (e) =>
     $('gitBranch').value = '';
     $('newSiteName').value = '';
     renderSites(r.sites, await window.api.listPhp());
+    if (r.deps) {
+      const ir = await window.api.installSiteDeps(r.name);
+      setStatus(ir.message);
+    }
+    if (r.node) await loadNodeSites();
+  })
+);
+// শুধু composer install / npm install আবার চালানো (নামের ঘরের সাইটে)
+$('newDeps').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    setStatus(t('starting'));
+    const r = await window.api.installSiteDeps($('newSiteName').value);
+    setStatus(r.message);
+    if (r.ok) $('newSiteName').value = '';
     if (r.node) await loadNodeSites();
   })
 );
