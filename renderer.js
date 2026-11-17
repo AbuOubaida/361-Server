@@ -1177,7 +1177,9 @@ $('newNode').addEventListener('click', (e) =>
 $('newGit').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
     setStatus(t('starting'));
-    const r = await window.api.gitCloneSite($('gitUrl').value, $('newSiteName').value, $('gitBranch').value);
+    const tk = $('gitToken').value;
+    $('gitToken').value = ''; // টোকেন ঘরে থাকে না: সফল বা ব্যর্থ, দুই ক্ষেত্রেই খালি
+    const r = await window.api.gitCloneSite($('gitUrl').value, $('newSiteName').value, $('gitBranch').value, tk);
     setStatus(r.message);
     if (!r.ok) return;
     $('gitUrl').value = '';

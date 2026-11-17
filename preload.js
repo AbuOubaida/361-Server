@@ -52,7 +52,7 @@ contextBridge.exposeInMainWorld('api', {
   listSites: () => ipcRenderer.invoke('sites:list'),
   refreshSites: () => ipcRenderer.invoke('sites:refresh'),
   createSite: (kind, name) => ipcRenderer.invoke('site:create', kind, name),
-  gitCloneSite: (url, name, branch) => ipcRenderer.invoke('site:gitClone', url, name, branch),
+  gitCloneSite: (url, name, branch, token) => ipcRenderer.invoke('site:gitClone', url, name, branch, token),
   installSiteDeps: (name) => ipcRenderer.invoke('site:installDeps', name),
   setupSiteEnv: (name) => ipcRenderer.invoke('site:setupEnv', name),
   setSiteSession: (domain, minutes) => ipcRenderer.invoke('site:setSession', domain, minutes),

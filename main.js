@@ -3143,13 +3143,14 @@ function ensureLaravelExts(ver) {
 }
 
 // php.exe দিয়ে কমান্ড চালানো; শেষ লাইন স্ট্যাটাস বারে দেখায়, ব্যর্থ হলে শেষের কিছু লাইন সহ এরর দেয়
-function runPhp(phpExe, args, { cwd, env, label, timeoutMs = 20 * 60 * 1000 }) {
+function runPhp(phpExe, args, { cwd, env, label, timeoutMs = 20 * 60 * 1000, mask }) {
   return new Promise((resolve, reject) => {
     const proc = spawn(phpExe, args, { cwd, env, windowsHide: true });
     let tail = '';
     let last = 0;
     const onData = (d) => {
-      const s = d.toString().replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ''); // রঙের escape কোড বাদ
+      let s = d.toString().replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ''); // রঙের escape কোড বাদ
+      if (mask) for (const m of mask) if (m) s = s.split(m).join('***'); // টোকেন/গোপন মান কখনো স্ট্যাটাসে বা এররে যায় না
       tail = (tail + s).slice(-4000);
       const line = s.split(/[\r\n]+/).map((x) => x.trim()).filter(Boolean).pop();
       if (line && Date.now() - last > 400) {
@@ -3460,11 +3461,17 @@ function parseGitUrl(raw) {
   return { url: s, repo: siteSlug(last.replace(/\.git$/i, '')) };
 }
 
-ipcMain.handle('site:gitClone', async (_event, rawUrl, rawName, rawBranch) => {
+ipcMain.handle('site:gitClone', async (_event, rawUrl, rawName, rawBranch, rawToken) => {
   const fail = (m) => ({ ok: false, message: m });
   if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
   const p = parseGitUrl(rawUrl);
   if (p.err) return fail(p.err);
+  // private repo: টোকেন URL-এ বসে না, সেভ হয় না, লগে যায় না (নিচে শুধু এই একটা clone-এর env-এ যায়)
+  const token = String(rawToken || '').trim();
+  if (token) {
+    if (!/^[A-Za-z0-9_.-]{8,255}$/.test(token)) return fail(tr('সমস্যা: টোকেনে অচল অক্ষর আছে (শুধু a-z, A-Z, 0-9, _ - . চলবে)', 'Error: the token has invalid characters (only a-z, A-Z, 0-9, _ - . are allowed)'));
+    if (!/^https:\/\//i.test(p.url)) return fail(tr('সমস্যা: টোকেন শুধু https:// URL-এর সাথে চলবে (http-তে টোকেন খোলা অবস্থায় যেত)', 'Error: a token works only with an https:// URL (over http it would travel unprotected)'));
+  }
   const branch = String(rawBranch || '').trim();
   if (branch && (!/^[A-Za-z0-9._\/-]{1,100}$/.test(branch) || branch.startsWith('-') || branch.includes('..'))) {
     return fail(tr('সমস্যা: branch-এর নামে অচল অক্ষর আছে', 'Error: the branch name has invalid characters'));
@@ -3481,10 +3488,25 @@ ipcMain.handle('site:gitClone', async (_event, rawUrl, rawName, rawBranch) => {
     const label = 'Git clone';
     sendStatus(label + '...');
     const args = ['-c', 'core.longpaths=true', 'clone', '--progress', ...(branch ? ['--branch', branch] : []), '--', p.url, dest];
+    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+    let mask;
+    if (token) {
+      // কমান্ড-লাইনে নয়, env-এ (প্রসেস লিস্টে দেখা যায় না); শুধু এই repo-র host-এর জন্য; Git 2.31+ লাগে
+      const basic = Buffer.from('x-access-token:' + token).toString('base64');
+      gitEnv.GIT_CONFIG_COUNT = '1';
+      gitEnv.GIT_CONFIG_KEY_0 = `http.${new URL(p.url).origin}/.extraHeader`;
+      gitEnv.GIT_CONFIG_VALUE_0 = 'Authorization: Basic ' + basic;
+      mask = [token, basic];
+    }
     try {
-      await runPhp(git, args, { cwd: WWW_DIR, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }, label, timeoutMs: 15 * 60 * 1000 });
+      await runPhp(git, args, { cwd: WWW_DIR, env: gitEnv, label, timeoutMs: 15 * 60 * 1000, mask });
     } catch (e) {
       fs.rmSync(dest, { recursive: true, force: true }); // dest আগে ছিল না, তাই আধা-clone মুছলে কিছু হারায় না
+      if (/Authentication failed|could not read Username|Repository not found|error: 40[13]|Access denied/i.test(String(e.message))) {
+        e.message = (token
+          ? tr('টোকেন ভুল, মেয়াদ শেষ, বা এই repo পড়ার অনুমতি নেই (repo-র নামও মিলিয়ে দেখুন; Git 2.31 বা নতুন লাগে)। ', 'The token is wrong, expired, or has no permission to read this repo (also check the repo name; Git 2.31 or newer is needed). ')
+          : tr('repo private হতে পারে বা নাম ভুল। private হলে টোকেন ঘরে টোকেন দিন। ', 'The repo may be private or the name is wrong. If it is private, enter a token in the token box. ')) + e.message;
+      }
       throw e;
     }
     const sites = withToolSites(scanSites());
