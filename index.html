@@ -503,6 +503,10 @@
           <div class="card">
             <div class="row first">
               <input id="newSiteName" type="text" maxlength="40" data-i18n-ph="sites.new.ph" placeholder="blog" style="width:auto; flex:1; min-width:140px;">
+              <select id="newSiteDb" style="width:auto">
+                <option value="mysql" data-i18n="sites.new.dbMysql">ডাটাবেস: MySQL</option>
+                <option value="mariadb" data-i18n="sites.new.dbMariadb">ডাটাবেস: MariaDB</option>
+              </select>
               <button id="newBlank" class="btn sm" data-i18n="sites.new.blank">+ খালি সাইট</button>
               <button id="newWp" class="btn sm primary" data-i18n="sites.new.wp">+ WordPress</button>
               <button id="newLaravel" class="btn sm primary" data-i18n="sites.new.laravel">+ Laravel</button>
@@ -874,6 +878,27 @@
             </div>
             <div class="hint" data-i18n="settings.pw.forgotMy">পাসওয়ার্ড ভুলে গেলে রিসেট করুন।</div>
             <div class="hint" data-i18n="settings.pw.hint">MySQL চালু থাকতে হবে। বসালে নতুন WordPress/Laravel সাইট, phpMyAdmin ও MySQL বন্ধ করা এই পাসওয়ার্ডে চলবে, আর পুরনো WordPress (wp-config.php) ও Laravel (.env) সাইটেরও পাসওয়ার্ড নিজে বদলে দেওয়া হবে। অন্য Node/হাতে বানানো প্রজেক্ট আপনাকে নিজে ঠিক করতে হবে। Adminer-এ লগইনে এই পাসওয়ার্ড দিন। পাসওয়ার্ড সেটিংস ফাইলে (settings.json) সাধারণ লেখায় থাকে। প্রতি MySQL ভার্সনের পাসওয়ার্ড আলাদা।</div>
+          </div>
+          <div class="card">
+            <div class="row first">
+              <div>
+                <b data-i18n="settings.mdb.title">MariaDB root পাসওয়ার্ড</b>
+                <div class="hint" id="mdbPwState"></div>
+              </div>
+            </div>
+            <div class="row">
+              <input id="mdbPw" type="password" maxlength="64" autocomplete="new-password" data-i18n-ph="settings.pw.ph" placeholder="নতুন পাসওয়ার্ড" style="width:auto; flex:1; min-width:160px;">
+              <button id="mdbPwSet" class="btn sm primary" data-i18n="settings.pw.set">পাসওয়ার্ড বসান</button>
+              <button id="mdbPwClear" class="btn sm danger" data-i18n="settings.pw.clear">পাসওয়ার্ড সরান</button>
+            </div>
+            <div class="row">
+              <button id="mdbPwShow" class="btn sm" data-i18n="settings.pw.show">👁 পাসওয়ার্ড দেখান</button>
+              <button id="mdbPwCopy" class="btn sm" data-i18n="settings.pw.copy">কপি</button>
+              <button id="mdbPwReset" class="btn sm" data-i18n="settings.pw.reset">ভুলে গেছেন? রিসেট</button>
+              <code id="mdbPwVal" style="display:none; user-select:all;"></code>
+            </div>
+            <div class="hint" data-i18n="settings.mdb.forgot">পাসওয়ার্ড ভুলে গেলে রিসেট করুন।</div>
+            <div class="hint" data-i18n="settings.mdb.hint">MariaDB চালু থাকতে হবে।</div>
           </div>
           <div class="card">
             <div class="row first">

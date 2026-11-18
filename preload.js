@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // Adminer (ব্রাউজারে ডাটাবেস)
   openAdminer: (kind) => ipcRenderer.invoke('adminer:open', kind),
-  openPma: () => ipcRenderer.invoke('pma:open'),
+  openPma: (kind) => ipcRenderer.invoke('pma:open', kind),
   openMongoExpress: () => ipcRenderer.invoke('mexpress:open'),
 
   // টুলস ও ভার্সন
@@ -51,10 +51,10 @@ contextBridge.exposeInMainWorld('api', {
   onWwwChanged: (callback) => ipcRenderer.on('www:changed', (_event, p) => callback(p)),
   listSites: () => ipcRenderer.invoke('sites:list'),
   refreshSites: () => ipcRenderer.invoke('sites:refresh'),
-  createSite: (kind, name) => ipcRenderer.invoke('site:create', kind, name),
+  createSite: (kind, name, db) => ipcRenderer.invoke('site:create', kind, name, db),
   gitCloneSite: (url, name, branch, token) => ipcRenderer.invoke('site:gitClone', url, name, branch, token),
   installSiteDeps: (name) => ipcRenderer.invoke('site:installDeps', name),
-  setupSiteEnv: (name) => ipcRenderer.invoke('site:setupEnv', name),
+  setupSiteEnv: (name, db) => ipcRenderer.invoke('site:setupEnv', name, db),
   migrateSite: (name) => ipcRenderer.invoke('site:migrate', name),
   setSiteSession: (domain, minutes) => ipcRenderer.invoke('site:setSession', domain, minutes),
   setSitePhpIni: (domain, cfg) => ipcRenderer.invoke('site:setPhpIni', domain, cfg),
@@ -105,6 +105,10 @@ contextBridge.exposeInMainWorld('api', {
   pgPwState: () => ipcRenderer.invoke('pg:pwState'),
   pgSetPassword: (pw, reset) => ipcRenderer.invoke('pg:setPassword', pw, reset),
   mysqlResetPassword: (pw) => ipcRenderer.invoke('mysql:resetPassword', pw),
+  // MariaDB root পাসওয়ার্ড
+  mariadbPwState: () => ipcRenderer.invoke('mariadb:pwState'),
+  mariadbSetPassword: (pw) => ipcRenderer.invoke('mariadb:setPassword', pw),
+  mariadbResetPassword: (pw) => ipcRenderer.invoke('mariadb:resetPassword', pw),
   getDbPw: (kind) => ipcRenderer.invoke('db:getPw', kind),
 
   // কনফিগ ফাইল (php.ini, my.ini, postgresql.conf ...)

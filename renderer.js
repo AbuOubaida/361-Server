@@ -396,7 +396,7 @@ function buildDb(db) {
   const auto = el('input', { type: 'checkbox', checked: db.auto });
   const adminerBtn = el('button', { className: 'btn sm', textContent: t('db.adminer') });
   const meBtn = db.id === 'mongodb' ? el('button', { className: 'btn sm', textContent: t('db.mexpress') }) : null;
-  const pmaBtn = db.id === 'mysql' ? el('button', { className: 'btn sm', textContent: t('db.pma') }) : null;
+  const pmaBtn = db.id === 'mysql' || db.id === 'mariadb' ? el('button', { className: 'btn sm', textContent: t('db.pma') }) : null;
 
   saveBtn.addEventListener('click', () =>
     work(saveBtn, async () => {
@@ -420,7 +420,7 @@ function buildDb(db) {
   stopBtn.addEventListener('click', () => work(stopBtn, async () => setStatus(await window.api.stopDb(db.id))));
   auto.addEventListener('change', () => window.api.setDbAuto(db.id, auto.checked));
   adminerBtn.addEventListener('click', () => work(adminerBtn, async () => setStatus(await window.api.openAdminer(db.id))));
-  if (pmaBtn) pmaBtn.addEventListener('click', () => work(pmaBtn, async () => setStatus(await window.api.openPma())));
+  if (pmaBtn) pmaBtn.addEventListener('click', () => work(pmaBtn, async () => setStatus(await window.api.openPma(db.id))));
   if (meBtn) meBtn.addEventListener('click', () => work(meBtn, async () => setStatus(await window.api.openMongoExpress())));
 
   const infoEl = el('div', { className: 'info', textContent: db.info });
@@ -1139,7 +1139,7 @@ function createSite(kind) {
     work(e.currentTarget, async () => {
       const name = $('newSiteName').value;
       setStatus(t('starting'));
-      const r = await window.api.createSite(kind, name);
+      const r = await window.api.createSite(kind, name, $('newSiteDb').value);
       setStatus(r.message);
       if (r.ok) {
         $('newSiteName').value = '';
@@ -1190,7 +1190,7 @@ $('newGit').addEventListener('click', (e) =>
       const ir = await window.api.installSiteDeps(r.name);
       setStatus(ir.message);
       if (ir.ok && ir.laravel) {
-        const er = await window.api.setupSiteEnv(r.name);
+        const er = await window.api.setupSiteEnv(r.name, $('newSiteDb').value);
         setStatus(ir.message + ' | ' + er.message);
       }
     }
@@ -1205,7 +1205,7 @@ $('newDeps').addEventListener('click', (e) =>
     const r = await window.api.installSiteDeps(nm);
     setStatus(r.message);
     if (r.ok && r.laravel) {
-      const er = await window.api.setupSiteEnv(nm);
+      const er = await window.api.setupSiteEnv(nm, $('newSiteDb').value);
       setStatus(r.message + ' | ' + er.message);
     }
     if (r.ok) $('newSiteName').value = '';
@@ -1221,6 +1221,16 @@ $('newMigrate').addEventListener('click', (e) => {
     const r = await window.api.migrateSite(nm);
     setStatus(r.message);
   });
+});
+// নতুন সাইট/📦-এর ডাটাবেস ইঞ্জিন (MySQL / MariaDB): শেষ বাছাই মনে থাকে
+try {
+  const savedDb = localStorage.getItem('siteDb');
+  if (savedDb === 'mysql' || savedDb === 'mariadb') $('newSiteDb').value = savedDb;
+} catch {}
+$('newSiteDb').addEventListener('change', () => {
+  try {
+    localStorage.setItem('siteDb', $('newSiteDb').value);
+  } catch {}
 });
 $('newBlank').addEventListener('click', createSite('blank'));
 $('newWp').addEventListener('click', createSite('wordpress'));
@@ -2176,6 +2186,7 @@ async function refreshAll() {
     await loadDbs();
     if (currentPage === 'settings') {
       await loadMysqlPw();
+      await loadMariadbPw();
       await loadPgPw();
     }
     if (currentPage === 'sites') await loadNodeSites(); // Node অ্যাপ চলছে/বন্ধ অবস্থা হালনাগাদ
@@ -2189,12 +2200,38 @@ async function loadMysqlPw() {
     $('mysqlPwState').textContent = (r.hasPw ? t('settings.pw.isSet') : t('settings.pw.isEmpty')) + ' · ' + (r.running ? t('settings.pw.running') : t('settings.pw.stopped'));
   } catch {}
 }
+async function loadMariadbPw() {
+  try {
+    const r = await window.api.mariadbPwState();
+    $('mdbPwState').textContent = (r.hasPw ? t('settings.pw.isSet') : t('settings.pw.isEmpty')) + ' · ' + (r.running ? t('settings.mdb.running') : t('settings.mdb.stopped'));
+  } catch {}
+}
 async function loadPgPw() {
   try {
     const r = await window.api.pgPwState();
     $('pgPwState').textContent = (r.hasPw ? t('settings.pw.isSet') : t('settings.pw.isEmpty')) + ' · ' + (r.running ? t('settings.pg.running') : t('settings.pg.stopped'));
   } catch {}
 }
+$('mdbPwSet').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    const pw = $('mdbPw').value;
+    if (!pw) return setStatus(t('settings.pw.enter'));
+    const r = await window.api.mariadbSetPassword(pw);
+    setStatus(r.message);
+    if (r.ok) $('mdbPw').value = '';
+    await loadMariadbPw();
+    loadDbs();
+  })
+);
+$('mdbPwClear').addEventListener('click', (e) =>
+  work(e.currentTarget, async () => {
+    if (!confirm(t('settings.pw.confirmClear'))) return;
+    const r = await window.api.mariadbSetPassword('');
+    setStatus(r.message);
+    await loadMariadbPw();
+    loadDbs();
+  })
+);
 $('pgPwSet').addEventListener('click', (e) =>
   work(e.currentTarget, async () => {
     const pw = $('pgPw').value;
@@ -2236,9 +2273,10 @@ $('mysqlPwClear').addEventListener('click', (e) =>
   })
 );
 
-// ---------- পাসওয়ার্ড দেখান / কপি / ভুলে গেলে রিসেট (MySQL ও PostgreSQL) ----------
+// ---------- পাসওয়ার্ড দেখান / কপি / ভুলে গেলে রিসেট (MySQL, MariaDB ও PostgreSQL) ----------
 for (const c of [
   { p: 'mysql', kind: 'mysql', reset: (pw) => window.api.mysqlResetPassword(pw), confirmKey: 'settings.pw.resetConfirmMy', reload: () => loadMysqlPw() },
+  { p: 'mdb', kind: 'mariadb', reset: (pw) => window.api.mariadbResetPassword(pw), confirmKey: 'settings.mdb.resetConfirm', reload: () => loadMariadbPw() },
   { p: 'pg', kind: 'postgres', reset: (pw) => window.api.pgSetPassword(pw, true), confirmKey: 'settings.pw.resetConfirmPg', reload: () => loadPgPw() },
 ]) {
   const val = $(c.p + 'PwVal');
@@ -3374,6 +3412,7 @@ window.api.getRoot().then((p) => ($('rootPath').textContent = p));
 window.api.getPort().then((p) => (portInput.value = p));
 loadSites();
 loadMysqlPw();
+loadMariadbPw();
 loadPgPw();
 refreshAll();
 setInterval(refreshAll, 4000); // চলা/বন্ধ অবস্থা নিজে থেকে হালনাগাদ

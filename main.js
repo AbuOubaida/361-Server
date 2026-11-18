@@ -1206,7 +1206,7 @@ async function ensureAdminer() {
   fs.writeFileSync(path.join(ADMINER_DIR, 'index.php'), ADMINER_INDEX);
 }
 
-// ---------- phpMyAdmin (শুধু MySQL) ----------
+// ---------- phpMyAdmin (MySQL + MariaDB) ----------
 const PMA_DOMAIN = `phpmyadmin.${TLD}`;
 const pmaInstalled = () => fs.existsSync(SERVICES.phpmyadmin.exe);
 
@@ -1216,6 +1216,11 @@ const pmaInstalled = () => fs.existsSync(SERVICES.phpmyadmin.exe);
 let mysqlReset = null; // { ver, pw, file, result } — শুধু রিসেটের সময় মেমরিতে থাকে
 const mysqlRootPw = () => (settings.mysqlRootPw && settings.mysqlRootPw[activeVersion('mysql').version]) || '';
 const mysqlEnv = (pw = mysqlRootPw()) => ({ ...process.env, ...(pw ? { MYSQL_PWD: pw } : {}) });
+// ---------- MariaDB root পাসওয়ার্ড (step 3) ----------
+// settings.mariadbRootPw = { '<MariaDB ভার্সন>': 'পাসওয়ার্ড' }; MariaDB-র ক্লায়েন্টও MYSQL_PWD পড়ে (Windows-এ যাচাই বাকি)।
+let mariadbReset = null; // { ver, pw, file, result } — শুধু রিসেটের সময় মেমরিতে থাকে
+const mariadbRootPw = () => (settings.mariadbRootPw && settings.mariadbRootPw[activeVersion('mariadb').version]) || '';
+const mariadbEnv = (pw = mariadbRootPw()) => ({ ...process.env, ...(pw ? { MYSQL_PWD: pw } : {}) });
 const phpStr = (v) => `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 // PostgreSQL postgres পাসওয়ার্ড: settings.pgPw = { '<PostgreSQL ভার্সন>': 'পাসওয়ার্ড' }
 const pgPw = () => (settings.pgPw && settings.pgPw[activeVersion('postgres').version]) || '';
@@ -1226,7 +1231,8 @@ const sqlStr = (v) => `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}
 // Laravel .env-এর মান: সাধারণ অক্ষর হলে যেমন আছে, নইলে "..." দিয়ে (\\ " $ এড়িয়ে)
 const envVal = (v) => (v === '' || /^[A-Za-z0-9_.@:+-]+$/.test(v) ? v : `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$')}"`);
 
-// config.inc.php: root হিসেবে নিজে থেকে লগইন (পাসওয়ার্ড ফাঁকা)। পোর্ট বদলালে আবার লেখা হয়।
+// config.inc.php: root হিসেবে নিজে থেকে লগইন। সার্ভার ১ = MySQL; MariaDB নামানো থাকলে সার্ভার ২ = MariaDB (পাসওয়ার্ড অ্যাপে সেভ করা, না থাকলে ফাঁকা)।
+// পোর্ট বদলালে আবার লেখা হয়।
 function writePmaConfig() {
   const dir = SERVICES.phpmyadmin.dir;
   if (!settings.pmaSecret) {
@@ -1240,12 +1246,25 @@ function writePmaConfig() {
     `$cfg['blowfish_secret'] = '${settings.pmaSecret}';`,
     `$cfg['TempDir'] = '${f(path.join(dir, 'tmp'))}';`,
     '$i = 1;',
+    `$cfg['Servers'][$i]['verbose'] = 'MySQL';`,
     `$cfg['Servers'][$i]['auth_type'] = 'config';`,
     `$cfg['Servers'][$i]['host'] = '127.0.0.1';`,
     `$cfg['Servers'][$i]['port'] = '${getDbPort('mysql')}';`,
     `$cfg['Servers'][$i]['user'] = 'root';`,
     `$cfg['Servers'][$i]['password'] = ${phpStr(mysqlRootPw())};`,
     `$cfg['Servers'][$i]['AllowNoPassword'] = ${mysqlRootPw() ? 'false' : 'true'};`,
+    ...(fs.existsSync(SERVICES.mariadb.exe)
+      ? [
+          '$i++;',
+          `$cfg['Servers'][$i]['verbose'] = 'MariaDB';`,
+          `$cfg['Servers'][$i]['auth_type'] = 'config';`,
+          `$cfg['Servers'][$i]['host'] = '127.0.0.1';`,
+          `$cfg['Servers'][$i]['port'] = '${getDbPort('mariadb')}';`,
+          `$cfg['Servers'][$i]['user'] = 'root';`,
+          `$cfg['Servers'][$i]['password'] = ${phpStr(mariadbRootPw())};`,
+          `$cfg['Servers'][$i]['AllowNoPassword'] = ${mariadbRootPw() ? 'false' : 'true'};`,
+        ]
+      : []),
     `$cfg['VersionCheck'] = false;`,
     '',
   ].join('\n');
@@ -2074,7 +2093,7 @@ const DATABASES = {
       args: ['stop', '-D', pgDataDir(), '-m', 'fast', '-w', '-t', '20'],
     }),
   },
-  // MariaDB: MySQL-এর পাশাপাশি আলাদা সার্ভিস (পোর্ট 3307, ডাটা data\mariadb)। root-এর পাসওয়ার্ড ফাঁকা, শুধু এই পিসি থেকে (127.0.0.1)
+  // MariaDB: MySQL-এর পাশাপাশি আলাদা সার্ভিস (পোর্ট 3307, ডাটা data\mariadb)। root-এর পাসওয়ার্ড প্রথমে ফাঁকা (Settings-এ বসানো যায়), শুধু এই পিসি থেকে (127.0.0.1)
   mariadb: {
     id: 'mariadb',
     label: 'MariaDB',
@@ -2087,17 +2106,24 @@ const DATABASES = {
       return mariadbDataDir();
     },
     get info() {
+      if (mariadbRootPw()) return tr(`হোস্ট: 127.0.0.1 · পোর্ট ${getDbPort('mariadb')} · ইউজার: root · পাসওয়ার্ড: সেট করা (Settings-এ বদলান), শুধু এই পিসি থেকে`, `Host: 127.0.0.1 · Port ${getDbPort('mariadb')} · User: root · Password: set (change it in Settings), this PC only`);
       return tr(`হোস্ট: 127.0.0.1 · পোর্ট ${getDbPort('mariadb')} · ইউজার: root · পাসওয়ার্ড ফাঁকা, শুধু এই পিসি থেকে`, `Host: 127.0.0.1 · Port ${getDbPort('mariadb')} · User: root · empty password, this PC only`);
     },
     prepare: (svc, port) => writeMariadbIni(svc, port),
     isInitialized: () => fs.existsSync(path.join(mariadbDataDir(), 'mysql')),
     // root-এর পাসওয়ার্ড ফাঁকা (--password দেওয়া হয়নি); Windows service বানানো হয় না (--service দেওয়া হয়নি)
     init: (svc) => runTool(path.join(svc.dir, 'bin', 'mariadb-install-db.exe'), [`--datadir=${mariadbDataDir()}`, '--silent'], svc.dir),
-    spawnArgs: () => [`--defaults-file=${mariadbIni()}`, '--console'],
+    spawnArgs: () => [
+      `--defaults-file=${mariadbIni()}`,
+      '--console',
+      // পাসওয়ার্ড রিসেটের সময় শুধু একবার: শুরুতে ALTER USER চালায় (বর্তমান পাসওয়ার্ড লাগে না)
+      ...(mariadbReset && fs.existsSync(mariadbReset.file) ? [`--init-file=${mariadbReset.file.replace(/\\/g, '/')}`] : []),
+    ],
     check: (svc, port) => tcpCheck(port),
     shutdownCmd: (svc, port) => ({
       exe: path.join(svc.dir, 'bin', 'mariadb-admin.exe'),
       args: ['--no-defaults', '-u', 'root', '--protocol=tcp', '-h', '127.0.0.1', `--port=${port}`, 'shutdown'],
+      env: mariadbEnv(), // পাসওয়ার্ড সেট থাকলে shutdown-এও লাগে (না মিললে জোর করে বন্ধ করার ব্যবস্থা আছে)
     }),
   },
   // MongoDB (R2 ধাপ ১): শুধু এই পিসি থেকে (127.0.0.1), পাসওয়ার্ড ছাড়া। ডাটা data\mongodb-এ (tools-এর বাইরে)
@@ -2247,6 +2273,11 @@ async function startDatabase(id) {
         delete settings.pgPw[activeVersion('postgres').version];
         saveSettings(settings);
       }
+      if (id === 'mariadb' && settings.mariadbRootPw) {
+        // নতুন ডাটা ফোল্ডার = root পাসওয়ার্ড ফাঁকা; পুরনো সেভ করা পাসওয়ার্ড রাখলে অ্যাপ আর ঢুকতে পারবে না
+        delete settings.mariadbRootPw[activeVersion('mariadb').version];
+        saveSettings(settings);
+      }
       if (id === 'mysql' && settings.mysqlRootPw) {
         // নতুন ডাটা ফোল্ডার = root পাসওয়ার্ড ফাঁকা; পুরনো সেভ করা পাসওয়ার্ড রাখলে অ্যাপ আর ঢুকতে পারবে না
         delete settings.mysqlRootPw[activeVersion('mysql').version];
@@ -2288,6 +2319,7 @@ async function startDatabase(id) {
     });
     let extra = '';
     if (id === 'mysql' && mysqlReset) extra = await finishMysqlReset(port);
+    if (id === 'mariadb' && mariadbReset) extra = await finishMariadbReset(port);
     return tr(`${db.label} চালু হয়েছে (পোর্ট ${port})। ${db.info}${extra}`, `${db.label} started (port ${port}). ${db.info}${extra}`);
   } catch (err) {
     return tr('সমস্যা: ', 'Error: ') + err.message;
@@ -2583,7 +2615,10 @@ const siteUrl = (domain) => `http://${domain}${getWebPort() === 80 ? '' : ':' + 
 
 // ---------- MySQL root পাসওয়ার্ড বদলানো ----------
 // এই পাসওয়ার্ড বসে WordPress/Laravel (নতুন সাইট), phpMyAdmin ও MySQL বন্ধ করার কমান্ডে। পুরনো সাইটের wp-config.php/.env-ও নিজে ঠিক করে।
-function updateSitePasswords(newPw) {
+function updateSitePasswords(newPw, engine = 'mysql') {
+  // শুধু ওই ইঞ্জিনের সাইট ছোঁয়া হয়: পোর্ট MariaDB-র পোর্টের সমান হলে MariaDB, নইলে MySQL (পোর্ট না থাকলে MySQL)
+  const maria = String(getDbPort('mariadb'));
+  const want = engine === 'mariadb';
   let wp = 0;
   let lv = 0;
   for (const s of withToolSites(scanSites()).filter((x) => !x.system)) {
@@ -2591,7 +2626,9 @@ function updateSitePasswords(newPw) {
       const wpf = path.join(s.root, 'wp-config.php');
       if (fs.existsSync(wpf)) {
         const txt = fs.readFileSync(wpf, 'utf8');
-        if (/define\(\s*'DB_USER'\s*,\s*'root'\s*\)/.test(txt)) {
+        const hm = txt.match(/define\(\s*'DB_HOST'\s*,\s*'[^']*:(\d+)'\s*\)/);
+        const isMaria = !!hm && hm[1] === maria;
+        if (/define\(\s*'DB_USER'\s*,\s*'root'\s*\)/.test(txt) && isMaria === want) {
           const next = txt.replace(/(define\(\s*'DB_PASSWORD'\s*,\s*)'(?:[^'\\]|\\.)*'(\s*\))/, (_m, a, b) => a + phpStr(newPw) + b);
           if (next !== txt) {
             fs.writeFileSync(wpf, next);
@@ -2603,7 +2640,8 @@ function updateSitePasswords(newPw) {
       if (proj) {
         const envFile = path.join(proj, '.env');
         const txt = fs.readFileSync(envFile, 'utf8');
-        if (/^DB_CONNECTION=mysql\s*$/m.test(txt) && /^DB_USERNAME=root\s*$/m.test(txt)) {
+        const isMaria = String(envValueOf(txt, 'DB_PORT')) === maria;
+        if (/^DB_CONNECTION=mysql\s*$/m.test(txt) && /^DB_USERNAME=root\s*$/m.test(txt) && isMaria === want) {
           fs.writeFileSync(envFile, setEnvValues(txt, { DB_PASSWORD: envVal(newPw) }));
           lv++;
         }
@@ -2641,7 +2679,7 @@ ipcMain.handle('mysql:setPassword', async (_event, newPw) => {
     else delete settings.mysqlRootPw[ver];
     saveSettings(settings);
     if (pmaInstalled()) writePmaConfig();
-    const { wp, lv } = updateSitePasswords(newPw);
+    const { wp, lv } = updateSitePasswords(newPw, 'mysql');
     let message = newPw ? tr('MySQL root পাসওয়ার্ড বদলানো হয়েছে', 'MySQL root password changed') : tr('MySQL root পাসওয়ার্ড সরানো হয়েছে (ফাঁকা)', 'MySQL root password removed (empty)');
     if (wp || lv) message += tr(` · সাইট ঠিক করা হয়েছে: WordPress ${wp}, Laravel ${lv}`, ` · sites updated: WordPress ${wp}, Laravel ${lv}`);
     if (newPw) message += tr(' · Adminer-এ লগইনে এই পাসওয়ার্ড দিন', ' · enter this password when logging in to Adminer');
@@ -2685,7 +2723,7 @@ async function finishMysqlReset(port) {
     else delete settings.mysqlRootPw[rs.ver];
     saveSettings(settings);
     if (pmaInstalled()) writePmaConfig();
-    const { wp, lv } = updateSitePasswords(rs.pw);
+    const { wp, lv } = updateSitePasswords(rs.pw, 'mysql');
     rs.result = { ok: true };
     return tr(` · root পাসওয়ার্ড রিসেট হয়েছে (সাইট ঠিক করা হয়েছে: WordPress ${wp}, Laravel ${lv})`, ` · root password reset (sites updated: WordPress ${wp}, Laravel ${lv})`);
   } catch (e) {
@@ -2720,8 +2758,119 @@ ipcMain.handle('mysql:resetPassword', async (_event, newPw) => {
   }
 });
 
+// ---------- MariaDB root পাসওয়ার্ড (বসানো / সরানো / ভুলে গেলে রিসেট) ----------
+// root অ্যাকাউন্ট তিনটা হোস্টে থাকতে পারে (localhost, 127.0.0.1, ::1); অ্যাপ 127.0.0.1 দিয়ে ঢোকে, তাই তিনটাতেই বসাই (IF EXISTS)।
+const mariadbAlterSql = (pw) => ['localhost', '127.0.0.1', '::1'].map((h) => `ALTER USER IF EXISTS 'root'@'${h}' IDENTIFIED BY ${sqlStr(pw)};`).join('\n') + '\n';
+
+function mariadbRun(sql, pw, port) {
+  return new Promise((resolve, reject) => {
+    const exe = path.join(SERVICES.mariadb.dir, 'bin', 'mariadb.exe');
+    const ch = execFile(exe, ['--no-defaults', '-u', 'root', '--protocol=tcp', '-h', '127.0.0.1', '-P', String(port)], { env: mariadbEnv(pw), timeout: 30000, windowsHide: true }, (err, _o, stderr) => (err ? reject(new Error(String(stderr || err.message).trim().slice(0, 200))) : resolve()));
+    ch.stdin.end(sql);
+  });
+}
+
+ipcMain.handle('mariadb:pwState', () => ({ hasPw: !!mariadbRootPw(), running: !!dbRun.mariadb }));
+
+ipcMain.handle('mariadb:setPassword', async (_event, newPw) => {
+  const fail = (m) => ({ ok: false, message: m });
+  newPw = String(newPw === undefined || newPw === null ? '' : newPw);
+  if (newPw.length > 64 || /[\r\n\0]/.test(newPw)) return fail(tr('সমস্যা: পাসওয়ার্ড সর্বোচ্চ ৬৪ অক্ষর, নতুন লাইন চলবে না', 'Error: the password may have up to 64 characters and no line breaks'));
+  if (!dbRun.mariadb) return fail(tr('আগে MariaDB চালু করুন (সার্ভিস পেজ)', 'Start MariaDB first (Services page)'));
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  busy = true;
+  try {
+    const exe = path.join(SERVICES.mariadb.dir, 'bin', 'mariadb.exe');
+    if (!fs.existsSync(exe)) throw new Error(tr('mariadb.exe পাওয়া যায়নি', 'mariadb.exe not found'));
+    const port = getDbPort('mariadb');
+    // বর্তমান পাসওয়ার্ডে ঢুকে (env), নতুনটা stdin দিয়ে পাঠাই — কমান্ড-লাইনে পাসওয়ার্ড থাকে না
+    try {
+      await mariadbRun(mariadbAlterSql(newPw), mariadbRootPw(), port);
+    } catch (e) {
+      throw new Error(/Access denied/i.test(e.message) ? tr('MariaDB-র বর্তমান পাসওয়ার্ড অ্যাপে রাখা পাসওয়ার্ডের সাথে মেলেনি (বাইরে থেকে বদলানো হয়েছে? তাহলে MariaDB Stop করে \"ভুলে গেছেন? রিসেট\" চাপুন)', "MariaDB's current password does not match the one the app has stored (changed outside the app? then stop MariaDB and press \"Forgot? Reset\")") : e.message);
+    }
+    const ver = activeVersion('mariadb').version;
+    settings.mariadbRootPw = { ...(settings.mariadbRootPw || {}) };
+    if (newPw) settings.mariadbRootPw[ver] = newPw;
+    else delete settings.mariadbRootPw[ver];
+    saveSettings(settings);
+    if (pmaInstalled()) writePmaConfig();
+    const { wp, lv } = updateSitePasswords(newPw, 'mariadb');
+    let message = newPw ? tr('MariaDB root পাসওয়ার্ড বদলানো হয়েছে', 'MariaDB root password changed') : tr('MariaDB root পাসওয়ার্ড সরানো হয়েছে (ফাঁকা)', 'MariaDB root password removed (empty)');
+    if (wp || lv) message += tr(` · সাইট ঠিক করা হয়েছে: WordPress ${wp}, Laravel ${lv}`, ` · sites updated: WordPress ${wp}, Laravel ${lv}`);
+    // নতুন পাসওয়ার্ডে সত্যি ঢোকা যায় কিনা দেখা (সেভ আগেই হয়েছে, তাই ব্যর্থ হলেও অ্যাপ আটকে যায় না)
+    try {
+      await mariadbRun('SELECT 1;\n', newPw, port);
+    } catch (e) {
+      message += tr(' · সতর্কতা: নতুন পাসওয়ার্ডে ঢুকে যাচাই করা যায়নি: ', ' · warning: could not log in with the new password to verify: ') + e.message;
+    }
+    if (newPw) message += tr(' · Adminer-এ লগইনে এই পাসওয়ার্ড দিন', ' · enter this password when logging in to Adminer');
+    return { ok: true, message };
+  } catch (err) {
+    return fail(tr('সমস্যা: ', 'Error: ') + err.message);
+  } finally {
+    busy = false;
+  }
+});
+
+async function finishMariadbReset(port) {
+  const rs = mariadbReset;
+  mariadbReset = null;
+  try {
+    let ok = false;
+    let lastErr = '';
+    for (let i = 0; i < 8 && !ok; i++) {
+      try {
+        await mariadbRun('SELECT 1;\n', rs.pw, port);
+        ok = true;
+      } catch (e) {
+        lastErr = e.message;
+        await sleep(1000);
+      }
+    }
+    if (!ok) throw new Error(lastErr);
+    settings.mariadbRootPw = { ...(settings.mariadbRootPw || {}) };
+    if (rs.pw) settings.mariadbRootPw[rs.ver] = rs.pw;
+    else delete settings.mariadbRootPw[rs.ver];
+    saveSettings(settings);
+    if (pmaInstalled()) writePmaConfig();
+    const { wp, lv } = updateSitePasswords(rs.pw, 'mariadb');
+    rs.result = { ok: true };
+    return tr(` · root পাসওয়ার্ড রিসেট হয়েছে (সাইট ঠিক করা হয়েছে: WordPress ${wp}, Laravel ${lv})`, ` · root password reset (sites updated: WordPress ${wp}, Laravel ${lv})`);
+  } catch (e) {
+    rs.result = { ok: false };
+    return tr(' · সতর্কতা: পাসওয়ার্ড রিসেট যাচাই করা যায়নি: ', ' · warning: could not verify the password reset: ') + e.message;
+  }
+}
+
+ipcMain.handle('mariadb:resetPassword', async (_event, newPw) => {
+  const fail = (m) => ({ ok: false, message: m });
+  newPw = String(newPw === undefined || newPw === null ? '' : newPw);
+  if (newPw.length > 64 || /[\r\n\0]/.test(newPw)) return fail(tr('সমস্যা: পাসওয়ার্ড সর্বোচ্চ ৬৪ অক্ষর, নতুন লাইন চলবে না', 'Error: the password may have up to 64 characters and no line breaks'));
+  if (dbRun.mariadb) return fail(tr('আগে MariaDB বন্ধ করুন (সার্ভিস পেজ), রিসেটের জন্য MariaDB-কে নতুন করে চালু করতে হয়', 'Stop MariaDB first (Services page), the reset needs a fresh start of MariaDB'));
+  if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
+  if (!fs.existsSync(SERVICES.mariadb.exe) || !DATABASES.mariadb.isInitialized()) return fail(tr('MariaDB-র ডাটা এখনো তৈরি হয়নি, রিসেট করার কিছু নেই (আগে MariaDB একবার চালান)', 'MariaDB data has not been created yet, nothing to reset (start MariaDB once first)'));
+  const ver = activeVersion('mariadb').version;
+  const file = path.join(ROOT_DIR, 'data', `mariadb-reset-${ver}.sql`);
+  const rs = { ver, pw: newPw, file, result: null };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, mariadbAlterSql(newPw));
+    mariadbReset = rs;
+    const msg = await startDatabase('mariadb');
+    return { ok: !!(rs.result && rs.result.ok), message: msg };
+  } catch (err) {
+    return fail(tr('সমস্যা: ', 'Error: ') + err.message);
+  } finally {
+    mariadbReset = null;
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {}
+  }
+});
+
 // অ্যাপে সেভ করা পাসওয়ার্ড দেখা/কপির জন্য (ফাঁকা হলে '')
-ipcMain.handle('db:getPw', (_event, kind) => (kind === 'postgres' ? pgPw() : kind === 'mysql' ? mysqlRootPw() : ''));
+ipcMain.handle('db:getPw', (_event, kind) => (kind === 'postgres' ? pgPw() : kind === 'mysql' ? mysqlRootPw() : kind === 'mariadb' ? mariadbRootPw() : ''));
 
 // ---------- কনফিগ ফাইল (php.ini, my.ini, postgresql.conf ...) ----------
 // renderer শুধু id পাঠায়; পথ এখানে ঠিক করা হয়।
@@ -3115,11 +3264,12 @@ ipcMain.handle('sites:refresh', async () => {
 const WP_URL = 'https://wordpress.org/latest.zip';
 const siteSlug = (n) => String(n || '').trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/^-+|-+$/g, '');
 
-async function installWordPress(dest, dbName) {
-  if (!dbRun.mysql) throw new Error(tr('আগে MySQL চালু করুন (সার্ভিস পেজ)', 'Start MySQL first (Services page)'));
-  const mysqlExe = path.join(SERVICES.mysql.dir, 'bin', 'mysql.exe');
-  if (!fs.existsSync(mysqlExe)) throw new Error(tr('mysql.exe পাওয়া যায়নি', 'mysql.exe not found'));
-  const port = getDbPort('mysql');
+async function installWordPress(dest, dbName, engine) {
+  const db = siteDbOf(engine);
+  if (!db.running) throw new Error(tr(`আগে ${db.label} চালু করুন (সার্ভিস পেজ)`, `Start ${db.label} first (Services page)`));
+  const mysqlExe = db.exe;
+  if (!fs.existsSync(mysqlExe)) throw new Error(tr(`${path.basename(mysqlExe)} পাওয়া যায়নি`, `${path.basename(mysqlExe)} not found`));
+  const port = db.port;
   // WordPress zip একবার নামিয়ে ক্যাশে রাখা (পরের বার আর নামাতে হবে না)
   const cacheDir = path.join(ROOT_DIR, 'data', 'cache');
   fs.mkdirSync(cacheDir, { recursive: true });
@@ -3139,15 +3289,15 @@ async function installWordPress(dest, dbName) {
   // async: হাজার হাজার ছোট ফাইল কপি/মোছার সময় sync কল পুরো উইন্ডো আটকে দিত ("Not Responding")
   await fs.promises.cp(src, dest, { recursive: true });
   await fs.promises.rm(tmp, { recursive: true, force: true });
-  // ডাটাবেস বানানো (root, খালি পাসওয়ার্ড)
+  // ডাটাবেস বানানো (বাছা ইঞ্জিনে, root)
   sendStatus(tr('ডাটাবেস বানানো হচ্ছে...', 'Creating database...'));
-  await createMysqlDb(mysqlExe, port, dbName);
+  await createMysqlDb(mysqlExe, port, dbName, db.pw);
   // wp-config.php
   let cfg = fs.readFileSync(path.join(dest, 'wp-config-sample.php'), 'utf8');
   cfg = cfg
     .replace('database_name_here', dbName)
     .replace('username_here', 'root')
-    .replace("'password_here'", () => phpStr(mysqlRootPw()))
+    .replace("'password_here'", () => phpStr(db.pw))
     .replace("'localhost'", `'127.0.0.1:${port}'`)
     .replace(/define\(\s*'(AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|SECURE_AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT)',\s*'put your unique phrase here'\s*\);/g, (_m, k) => `define( '${k}', '${crypto.randomBytes(32).toString('hex')}' );`);
   fs.writeFileSync(path.join(dest, 'wp-config.php'), cfg);
@@ -3155,12 +3305,25 @@ async function installWordPress(dest, dbName) {
 
 
 // MySQL-এ ডাটাবেস বানানো (root, খালি পাসওয়ার্ড); WordPress ও Laravel দুটোই এটা ব্যবহার করে
-function createMysqlDb(mysqlExe, port, dbName) {
+function createMysqlDb(mysqlExe, port, dbName, pw = mysqlRootPw()) {
   return new Promise((resolve, reject) =>
-    execFile(mysqlExe, ['-u', 'root', '-h', '127.0.0.1', '-P', String(port), '-e', `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`], { timeout: 30000, windowsHide: true, env: mysqlEnv() }, (err, _o, stderr) =>
+    execFile(mysqlExe, ['-u', 'root', '-h', '127.0.0.1', '-P', String(port), '-e', `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`], { timeout: 30000, windowsHide: true, env: mysqlEnv(pw) }, (err, _o, stderr) =>
       err ? reject(new Error(tr('ডাটাবেস বানানো যায়নি: ', 'Could not create the database: ') + String(stderr || err.message).trim().slice(0, 200))) : resolve()
     )
   );
+}
+
+// নতুন সাইটের ডাটাবেস ইঞ্জিন: 'mysql' (ডিফল্ট) বা 'mariadb'। exe = ডাটাবেস বানানোর ক্লায়েন্ট; pw = root পাসওয়ার্ড (ইঞ্জিন অনুযায়ী)
+function siteDbOf(id) {
+  const eng = id === 'mariadb' ? 'mariadb' : 'mysql';
+  return {
+    id: eng,
+    label: eng === 'mariadb' ? 'MariaDB' : 'MySQL',
+    port: getDbPort(eng),
+    running: !!dbRun[eng],
+    exe: path.join(SERVICES[eng].dir, 'bin', eng === 'mariadb' ? 'mariadb.exe' : 'mysql.exe'),
+    pw: eng === 'mysql' ? mysqlRootPw() : mariadbRootPw(),
+  };
 }
 
 // ---------- Laravel (Composer দিয়ে) ----------
@@ -3235,11 +3398,12 @@ function runPhp(phpExe, args, { cwd, env, label, timeoutMs = 20 * 60 * 1000, mas
   });
 }
 
-async function installLaravel(dest, name, dbName) {
-  if (!dbRun.mysql) throw new Error(tr('আগে MySQL চালু করুন (সার্ভিস পেজ)', 'Start MySQL first (Services page)'));
-  const mysqlExe = path.join(SERVICES.mysql.dir, 'bin', 'mysql.exe');
-  if (!fs.existsSync(mysqlExe)) throw new Error(tr('mysql.exe পাওয়া যায়নি', 'mysql.exe not found'));
-  const port = getDbPort('mysql');
+async function installLaravel(dest, name, dbName, engine) {
+  const db = siteDbOf(engine);
+  if (!db.running) throw new Error(tr(`আগে ${db.label} চালু করুন (সার্ভিস পেজ)`, `Start ${db.label} first (Services page)`));
+  const mysqlExe = db.exe;
+  if (!fs.existsSync(mysqlExe)) throw new Error(tr(`${path.basename(mysqlExe)} পাওয়া যায়নি`, `${path.basename(mysqlExe)} not found`));
+  const port = db.port;
 
   // PHP (CLI) ও Visual C++ নিশ্চিত করা; php.exe-ই Composer চালাবে
   await ensureVCRedist();
@@ -3259,7 +3423,7 @@ async function installLaravel(dest, name, dbName) {
   }
 
   sendStatus(tr('ডাটাবেস বানানো হচ্ছে...', 'Creating database...'));
-  await createMysqlDb(mysqlExe, port, dbName);
+  await createMysqlDb(mysqlExe, port, dbName, db.pw);
 
   // Composer প্রসেসের জন্য DB সেটিং env হিসেবে দিই: তাহলে Laravel-এর নিজের post-create migrate সরাসরি MySQL-এ চলে
   const env = {
@@ -3274,7 +3438,7 @@ async function installLaravel(dest, name, dbName) {
     DB_PORT: String(port),
     DB_DATABASE: dbName,
     DB_USERNAME: 'root',
-    DB_PASSWORD: mysqlRootPw(),
+    DB_PASSWORD: db.pw,
   };
   fs.mkdirSync(env.COMPOSER_HOME, { recursive: true });
   const label = tr('Laravel বানানো হচ্ছে', 'Creating Laravel');
@@ -3296,7 +3460,7 @@ async function installLaravel(dest, name, dbName) {
       DB_PORT: port,
       DB_DATABASE: dbName,
       DB_USERNAME: 'root',
-      DB_PASSWORD: envVal(mysqlRootPw()),
+      DB_PASSWORD: envVal(db.pw),
       SESSION_LIFETIME: sessMin,
     })
   );
@@ -3420,7 +3584,7 @@ export default function Home() {
   }
 }
 
-ipcMain.handle('site:create', async (_event, kind, rawName) => {
+ipcMain.handle('site:create', async (_event, kind, rawName, rawDb) => {
   const fail = (m) => ({ ok: false, message: m });
   if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
   const name = siteSlug(rawName);
@@ -3450,14 +3614,14 @@ ipcMain.handle('site:create', async (_event, kind, rawName) => {
       }
     } else if (kind === 'wordpress') {
       try {
-        await installWordPress(dest, name.replace(/-/g, '_'));
+        await installWordPress(dest, name.replace(/-/g, '_'), rawDb);
       } catch (e) {
         fs.rmSync(dest, { recursive: true, force: true }); // আধা-তৈরি ফোল্ডার রেখে যাব না
         throw e;
       }
     } else {
       try {
-        laravelInfo = await installLaravel(dest, name, name.replace(/-/g, '_'));
+        laravelInfo = await installLaravel(dest, name, name.replace(/-/g, '_'), rawDb);
       } catch (e) {
         fs.rmSync(dest, { recursive: true, force: true }); // আধা-তৈরি ফোল্ডার রেখে যাব না
         throw e;
@@ -3472,7 +3636,11 @@ ipcMain.handle('site:create', async (_event, kind, rawName) => {
       if (!live) message += tr(' (.test ঠিকানার জন্য ওয়েব সার্ভারও চালু করুন)', ' (also start a web server for the .test address)');
     } else if (!live) message += tr(' (ওয়েব সার্ভার চালু করলে কাজ করবে)', ' (it will work once a web server is started)');
     if (!h.ok) message += hostsFailNote(h);
-    if (kind === 'wordpress' || kind === 'laravel') message += tr('। ডাটাবেস: ' + name.replace(/-/g, '_') + (mysqlRootPw() ? ' (root, সেট করা পাসওয়ার্ড)' : ' (root, খালি পাসওয়ার্ড)'), '. Database: ' + name.replace(/-/g, '_') + (mysqlRootPw() ? ' (root, the password you set)' : ' (root, empty password)'));
+    if (kind === 'wordpress' || kind === 'laravel') {
+      const dbx = siteDbOf(rawDb);
+      const dbn = name.replace(/-/g, '_');
+      message += tr(`। ডাটাবেস: ${dbn} (${dbx.label}, root, ${dbx.pw ? 'সেট করা পাসওয়ার্ড' : 'খালি পাসওয়ার্ড'})`, `. Database: ${dbn} (${dbx.label}, root, ${dbx.pw ? 'the password you set' : 'empty password'})`);
+    }
     if (laravelInfo) {
       message += tr(`। Laravel .env-এ SESSION_LIFETIME=${laravelInfo.sessMin} মিনিট`, `. Laravel .env has SESSION_LIFETIME=${laravelInfo.sessMin} min`);
       if (laravelInfo.turnedOn.length) message += tr(`। চালু করা হয়েছে: ${laravelInfo.turnedOn.join(', ')} (ওয়েব সার্ভার একবার বন্ধ করে চালু করুন)`, `. Turned on: ${laravelInfo.turnedOn.join(', ')} (stop and start the web server once)`);
@@ -3740,7 +3908,7 @@ ipcMain.handle('site:migrate', async (_event, rawName) => {
   if (!has('vendor')) return fail(tr(`সমস্যা: ${name}-এ vendor নেই। আগে 📦 চাপুন (composer install), তারপর migrate`, `Error: ${name} has no vendor folder. Click 📦 first (composer install), then migrate`));
   if (!has('.env')) return fail(tr(`সমস্যা: ${name}-এ .env নেই। আগে 📦 চাপুন, তারপর migrate`, `Error: ${name} has no .env. Click 📦 first, then migrate`));
   if (settings.envPendingDb && settings.envPendingDb[name]) {
-    return fail(tr(`সমস্যা: ${name}-এর .env-এ ডাটাবেস এখনো বসেনি। MySQL চালু করে আগে 📦 চাপুন, তারপর migrate`, `Error: the database is not set in the .env of ${name} yet. Start MySQL, click 📦 first, then migrate`));
+    return fail(tr(`সমস্যা: ${name}-এর .env-এ ডাটাবেস এখনো বসেনি। ডাটাবেস চালু করে আগে 📦 চাপুন, তারপর migrate`, `Error: the database is not set in the .env of ${name} yet. Start the database, click 📦 first, then migrate`));
   }
   let envTxt = '';
   try {
@@ -3750,8 +3918,10 @@ ipcMain.handle('site:migrate', async (_event, rawName) => {
   }
   const conn = envValueOf(envTxt, 'DB_CONNECTION').toLowerCase();
   const dbName = envValueOf(envTxt, 'DB_DATABASE');
-  if ((conn === 'mysql' || conn === 'mariadb') && !dbRun.mysql) {
-    return fail(tr('সমস্যা: আগে MySQL চালু করুন (সার্ভিস পেজ), তারপর migrate', 'Error: start MySQL first (Services page), then migrate'));
+  // কোন ইঞ্জিন: .env-এর DB_PORT MariaDB-র পোর্টের সমান হলে MariaDB, নইলে MySQL
+  const dbx = siteDbOf(String(envValueOf(envTxt, 'DB_PORT')) === String(getDbPort('mariadb')) ? 'mariadb' : 'mysql');
+  if ((conn === 'mysql' || conn === 'mariadb') && !dbx.running) {
+    return fail(tr(`সমস্যা: আগে ${dbx.label} চালু করুন (সার্ভিস পেজ), তারপর migrate`, `Error: start ${dbx.label} first (Services page), then migrate`));
   }
   busy = true;
   try {
@@ -3775,8 +3945,8 @@ ipcMain.handle('site:migrate', async (_event, rawName) => {
     const raw = String(err && err.message ? err.message : err);
     let hint = '';
     if (/Unknown database|\[1049\]/i.test(raw)) hint = tr('ডাটাবেস পাওয়া যায়নি; 📦 চেপে দেখুন বা phpMyAdmin-এ বানান। ', 'The database was not found; try 📦 or create it in phpMyAdmin. ');
-    else if (/Access denied|\[1045\]/i.test(raw)) hint = tr('MySQL-এর পাসওয়ার্ড .env-এর সাথে মিলছে না। ', 'The MySQL password does not match the one in .env. ');
-    else if (/Connection refused|\[2002\]/i.test(raw)) hint = tr('MySQL-এ সংযোগ হয়নি; MySQL চালু আছে কিনা আর পোর্ট দেখুন। ', 'Could not connect to MySQL; check that it is running and the port. ');
+    else if (/Access denied|\[1045\]/i.test(raw)) hint = tr(`${dbx.label}-এর পাসওয়ার্ড .env-এর সাথে মিলছে না। `, `The ${dbx.label} password does not match the one in .env. `);
+    else if (/Connection refused|\[2002\]/i.test(raw)) hint = tr(`${dbx.label}-এ সংযোগ হয়নি; ${dbx.label} চালু আছে কিনা আর পোর্ট দেখুন। `, `Could not connect to ${dbx.label}; check that it is running and the port. `);
     return fail(tr('সমস্যা: migrate ব্যর্থ। ', 'Error: migrate failed. ') + hint + raw);
   } finally {
     busy = false;
@@ -3794,8 +3964,9 @@ function dbLinesOf(txt) {
     .join('\n');
 }
 // .env আগে থেকে থাকলে একদম ছোঁয়া হয় না (ব্যতিক্রম: আমরা বানিয়েছিলাম কিন্তু MySQL বন্ধ থাকায় DB বসেনি, তখন শুধু DB লাইন বসে)। migrate এই ধাপে চলে না। WordPress-এর wp-config এখানে নয়।
-ipcMain.handle('site:setupEnv', async (_event, rawName) => {
+ipcMain.handle('site:setupEnv', async (_event, rawName, rawDb) => {
   const fail = (m) => ({ ok: false, message: m });
+  const dbx = siteDbOf(rawDb); // বাছা ডাটাবেস ইঞ্জিন (MySQL / MariaDB)
   if (busy) return fail(tr('একটা কাজ চলছে, একটু অপেক্ষা করুন...', 'A task is running, please wait...'));
   const name = siteSlug(rawName);
   if (!name) return fail(tr('সমস্যা: সাইটের নাম দিন (a-z, 0-9, -)', 'Error: enter a site name (a-z, 0-9, -)'));
@@ -3808,8 +3979,8 @@ ipcMain.handle('site:setupEnv', async (_event, rawName) => {
     const untouched = { ok: true, message: tr(`${name}: .env আগে থেকেই আছে, ছোঁয়া হয়নি`, `${name}: .env already exists, left untouched`) };
     // শুধু যে .env আমরা বানিয়েছিলাম কিন্তু তখন MySQL বন্ধ ছিল (settings.envPendingDb), তাতেই এবার শুধু DB লাইন বসাই; অন্য .env একদম ছোঁয়া হয় না
     if (!(settings.envPendingDb && settings.envPendingDb[name])) return untouched;
-    const mysqlExe0 = path.join(SERVICES.mysql.dir, 'bin', 'mysql.exe');
-    if (!dbRun.mysql || !fs.existsSync(mysqlExe0)) return { ok: true, message: tr(`${name}: .env আছে, ডাটাবেস এখনো বসেনি। MySQL চালু করে 📦 আবার চাপুন`, `${name}: .env exists, the database is not set yet. Start MySQL and click 📦 again`) };
+    const mysqlExe0 = dbx.exe;
+    if (!dbx.running || !fs.existsSync(mysqlExe0)) return { ok: true, message: tr(`${name}: .env আছে, ডাটাবেস এখনো বসেনি। ${dbx.label} চালু করে 📦 আবার চাপুন`, `${name}: .env exists, the database is not set yet. Start ${dbx.label} and click 📦 again`) };
     const clearPending = () => {
       const m = { ...settings.envPendingDb };
       delete m[name];
@@ -3827,13 +3998,13 @@ ipcMain.handle('site:setupEnv', async (_event, rawName) => {
         clearPending();
         return { ok: true, message: tr(`${name}: .env-এর ডাটাবেস লাইন আপনি বদলেছেন (বা অন্য ধরনের), ছোঁয়া হয়নি`, `${name}: the database lines in .env were changed by you (or are another type), left untouched`) };
       }
-      const port0 = getDbPort('mysql');
+      const port0 = dbx.port;
       const dbName0 = name.replace(/-/g, '_');
-      await createMysqlDb(mysqlExe0, port0, dbName0);
+      await createMysqlDb(mysqlExe0, port0, dbName0, dbx.pw);
       fs.copyFileSync(envFile0, path.join(dir, '.env.backup')); // নিরাপত্তার কপি (Laravel-এর .gitignore-এ .env.backup আছে); কপি ব্যর্থ হলে কিছু লেখা হয় না
-      fs.writeFileSync(envFile0, setEnvValues(cur, { DB_CONNECTION: 'mysql', DB_HOST: '127.0.0.1', DB_PORT: port0, DB_DATABASE: dbName0, DB_USERNAME: 'root', DB_PASSWORD: envVal(mysqlRootPw()) }));
+      fs.writeFileSync(envFile0, setEnvValues(cur, { DB_CONNECTION: 'mysql', DB_HOST: '127.0.0.1', DB_PORT: port0, DB_DATABASE: dbName0, DB_USERNAME: 'root', DB_PASSWORD: envVal(dbx.pw) }));
       clearPending();
-      return { ok: true, message: tr(`${name}: .env-এ ডাটাবেস বসানো হয়েছে (${dbName0}; root${mysqlRootPw() ? ', সেট করা পাসওয়ার্ড' : ', খালি পাসওয়ার্ড'})। আগের .env-এর কপি .env.backup-এ। migrate এখনো চালানো হয়নি`, `${name}: database set in .env (${dbName0}; root${mysqlRootPw() ? ', the password you set' : ', empty password'}). The previous .env is copied to .env.backup. migrate has not been run`) };
+      return { ok: true, message: tr(`${name}: .env-এ ডাটাবেস বসানো হয়েছে (${dbName0}; root${dbx.pw ? ', সেট করা পাসওয়ার্ড' : ', খালি পাসওয়ার্ড'})। আগের .env-এর কপি .env.backup-এ। migrate এখনো চালানো হয়নি`, `${name}: database set in .env (${dbName0}; root${dbx.pw ? ', the password you set' : ', empty password'}). The previous .env is copied to .env.backup. migrate has not been run`) };
     } catch (err) {
       return fail(tr('সমস্যা: ', 'Error: ') + err.message);
     } finally {
@@ -3849,23 +4020,23 @@ ipcMain.handle('site:setupEnv', async (_event, rawName) => {
     let txt = fs.readFileSync(envFile, 'utf8');
     const domain = `${name}.${TLD}`;
     const notes = [];
-    let pendingDb = false; // MySQL বন্ধ ছিল বলে DB বসেনি: পরে MySQL চালু করে 📦 চাপলে বসাব
+    let pendingDb = false; // ডাটাবেস সার্ভার বন্ধ ছিল বলে DB বসেনি: পরে চালু করে 📦 চাপলে বসাব
     const values = { APP_URL: siteUrl(domain) };
     // ডাটাবেস: উদাহরণ ফাইলে mysql/mariadb/sqlite (বা কিছু না) থাকলে এবং MySQL চালু থাকলে; অন্য ধরনের (যেমন pgsql) হলে ছোঁব না
     const dbm = /^DB_CONNECTION=(\S*)/m.exec(txt);
     const dbType = dbm ? dbm[1].replace(/["']/g, '').toLowerCase() : '';
     const dbName = name.replace(/-/g, '_');
-    const mysqlExe = path.join(SERVICES.mysql.dir, 'bin', 'mysql.exe');
+    const mysqlExe = dbx.exe;
     if (dbType && !['mysql', 'mariadb', 'sqlite'].includes(dbType)) {
       notes.push(tr(`ডাটাবেস (${dbType}) ছোঁয়া হয়নি, .env-এ নিজে ঠিক করুন`, `database (${dbType}) left as is, set it in .env yourself`));
-    } else if (!dbRun.mysql || !fs.existsSync(mysqlExe)) {
+    } else if (!dbx.running || !fs.existsSync(mysqlExe)) {
       pendingDb = true;
-      notes.push(tr('MySQL চালু ছিল না, তাই ডাটাবেস সেট হয়নি (MySQL চালু করে 📦 আবার চাপলে ডাটাবেস বসবে)', 'MySQL was not running, so the database was not set (start MySQL and click 📦 again to set it)'));
+      notes.push(tr(`${dbx.label} চালু ছিল না, তাই ডাটাবেস সেট হয়নি (${dbx.label} চালু করে 📦 আবার চাপলে ডাটাবেস বসবে)`, `${dbx.label} was not running, so the database was not set (start ${dbx.label} and click 📦 again to set it)`));
     } else {
-      const port = getDbPort('mysql');
-      await createMysqlDb(mysqlExe, port, dbName);
-      Object.assign(values, { DB_CONNECTION: 'mysql', DB_HOST: '127.0.0.1', DB_PORT: port, DB_DATABASE: dbName, DB_USERNAME: 'root', DB_PASSWORD: envVal(mysqlRootPw()) });
-      notes.push(tr(`ডাটাবেস ${dbName} (root${mysqlRootPw() ? ', সেট করা পাসওয়ার্ড' : ', খালি পাসওয়ার্ড'})`, `database ${dbName} (root${mysqlRootPw() ? ', the password you set' : ', empty password'})`));
+      const port = dbx.port;
+      await createMysqlDb(mysqlExe, port, dbName, dbx.pw);
+      Object.assign(values, { DB_CONNECTION: 'mysql', DB_HOST: '127.0.0.1', DB_PORT: port, DB_DATABASE: dbName, DB_USERNAME: 'root', DB_PASSWORD: envVal(dbx.pw) });
+      notes.push(tr(`ডাটাবেস ${dbName} (root${dbx.pw ? ', সেট করা পাসওয়ার্ড' : ', খালি পাসওয়ার্ড'})`, `database ${dbName} (root${dbx.pw ? ', the password you set' : ', empty password'})`));
     }
     fs.writeFileSync(envFile, setEnvValues(txt, values));
     {
@@ -4714,23 +4885,26 @@ ipcMain.handle('adminer:open', async (_event, kind) => {
   if (kind === 'postgres' && pgPw()) {
     return tr(`Adminer ব্রাউজারে খোলা হয়েছে${warn}। Username postgres, Password-এ আপনার সেট করা পাসওয়ার্ড দিন।`, `Adminer opened in the browser${warn}. Username postgres, and enter the password you set.`);
   }
-  if (kind === 'mysql' && mysqlRootPw()) {
+  if ((kind === 'mysql' && mysqlRootPw()) || (kind === 'mariadb' && mariadbRootPw())) {
     return tr(`Adminer ব্রাউজারে খোলা হয়েছে${warn}। Username root, Password-এ আপনার সেট করা পাসওয়ার্ড দিন।`, `Adminer opened in the browser${warn}. Username root, and enter the password you set.`);
   }
   return tr(`Adminer ব্রাউজারে খোলা হয়েছে${warn}। লগইন ফর্মে শুধু "Login" চাপুন।`, `Adminer opened in the browser${warn}. Just click "Login" on the form.`);
 });
 
 // ---------- phpMyAdmin খোলা ----------
-ipcMain.handle('pma:open', async () => {
+// kind = 'mariadb' হলে সার্ভার ২ (MariaDB) সরাসরি খোলে; নইলে MySQL (সার্ভার ১)
+ipcMain.handle('pma:open', async (_event, kind) => {
   if (!running) {
     return tr('phpMyAdmin চালাতে আগে ওয়েব সার্ভার (Nginx বা Apache) চালু করুন (Start All বা Start)।', 'Start a web server (Nginx or Apache) first to use phpMyAdmin (Start All or Start).');
   }
   if (!pmaInstalled()) {
     return tr('phpMyAdmin এখনো নামানো হয়নি। ওয়েব সার্ভার একবার বন্ধ করে আবার চালু করুন।', 'phpMyAdmin has not been downloaded yet. Stop the web server and start it again.');
   }
-  writePmaConfig(); // MySQL-এর পোর্ট বদলে থাকলে ঠিক করে নেওয়া
-  await shell.openExternal(siteUrl(PMA_DOMAIN) + '/');
-  const warn = dbRun.mysql ? '' : tr(' (সতর্কতা: MySQL এখন চালু নেই, আগে Start করুন)', ' (warning: MySQL is not running, start it first)');
+  writePmaConfig(); // ডাটাবেসের পোর্ট বদলে থাকলে ঠিক করে নেওয়া
+  const isMaria = kind === 'mariadb';
+  await shell.openExternal(siteUrl(PMA_DOMAIN) + (isMaria ? '/?server=2' : '/'));
+  const label = isMaria ? 'MariaDB' : 'MySQL';
+  const warn = dbRun[isMaria ? 'mariadb' : 'mysql'] ? '' : tr(` (সতর্কতা: ${label} এখন চালু নেই, আগে Start করুন)`, ` (warning: ${label} is not running, start it first)`);
   return tr(`phpMyAdmin ব্রাউজারে খোলা হয়েছে${warn}। নিজে থেকেই root হিসেবে লগইন হবে।`, `phpMyAdmin opened in the browser${warn}. It logs in as root automatically.`);
 });
 
