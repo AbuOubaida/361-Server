@@ -28,6 +28,8 @@ const PHP_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/p
 const MYSQL_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/mysql-8.4.13-winx64.zip';
 // PostgreSQL zip-এর আসল নাম দিন (EDB-র "binaries" zip, Release-এ আপলোড করা ফাইলের নাম)
 const POSTGRES_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/postgresql-18.6-5-windows-x64-binaries.zip';
+// MariaDB (LTS 12.3): archive.mariadb.org/mariadb-12.3.4/winx64-packages থেকে mariadb-12.3.4-winx64.zip নামিয়ে (debugsymbols/msi নয়) Release-এ এই নামেই আপলোড করুন
+const MARIADB_URL = 'https://github.com/AbuOubaida/361-Server/releases/download/v1/mariadb-12.3.4-winx64.zip';
 // MongoDB Community (R2): mongodb.com-এর সরাসরি ZIP লিংক। নিজের Release-এ আপলোড করলে শুধু এই লিংকটা বদলান।
 // (ZIP-এর ভেতরে একটা ফোল্ডার, তার ভেতরে bin\mongod.exe থাকে; ফাইল বড়, ডাউনলোডে সময় লাগে)
 const MONGODB_URL = 'https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-7.0.16.zip';
@@ -158,6 +160,11 @@ function dataDirFor(id, legacyName) {
 const mysqlDataDir = () => dataDirFor('mysql', 'mysql');
 const pgDataDir = () => dataDirFor('postgres', 'postgres');
 const mongoDataDir = () => dataDirFor('mongodb', 'mongodb');
+const mariadbDataDir = () => dataDirFor('mariadb', 'mariadb');
+const mariadbIni = () => {
+  const v = activeVersion('mariadb');
+  return path.join(ROOT_DIR, 'data', v.isDefault ? 'mariadb.ini' : `mariadb-${v.version}.ini`);
+};
 const mysqlIni = () => {
   const v = activeVersion('mysql');
   return path.join(ROOT_DIR, 'data', v.isDefault ? 'my.ini' : `my-${v.version}.ini`);
@@ -1084,6 +1091,10 @@ const SERVICES = {
     version: '18.6',
     needsVC: true,
   }),
+  mariadb: makeService('mariadb', 'MariaDB', MARIADB_URL, 'mariadb', path.join('bin', 'mariadbd.exe'), {
+    version: '12.3.4',
+    needsVC: true,
+  }),
   mongodb: makeService('mongodb', 'MongoDB', MONGODB_URL, 'mongodb', path.join('bin', 'mongod.exe'), {
     version: '7.0.16',
     needsVC: true,
@@ -1549,6 +1560,7 @@ function resGroups() {
   if (Object.values(nodeRun).some((r) => r && r.task === 'run')) g.push({ id: 'node', name: 'Node.js', images: ['node.exe'] });
   if (dbRun.mysql) g.push({ id: 'mysql', name: 'MySQL', images: ['mysqld.exe'] });
   if (dbRun.postgres) g.push({ id: 'postgres', name: 'PostgreSQL', images: ['postgres.exe'] });
+  if (dbRun.mariadb) g.push({ id: 'mariadb', name: 'MariaDB', images: ['mariadbd.exe'] });
   if (dbRun.mongodb) g.push({ id: 'mongodb', name: 'MongoDB', images: ['mongod.exe'] });
   return g;
 }
@@ -1948,6 +1960,26 @@ function writeMysqlIni(svc, port) {
   fs.writeFileSync(mysqlIni(), ini);
 }
 
+// MariaDB-র mariadb.ini: MySQL-এর থেকে আলাদা ফাইল, আলাদা ডাটা ফোল্ডার (data\mariadb), আলাদা পোর্ট (ডিফল্ট 3307)
+function writeMariadbIni(svc, port) {
+  fs.mkdirSync(path.dirname(mariadbIni()), { recursive: true });
+  const f = (p) => p.replace(/\\/g, '/');
+  const ini = [
+    '[mysqld]',
+    `basedir=${f(svc.dir)}`,
+    `datadir=${f(mariadbDataDir())}`,
+    `port=${port}`,
+    'bind-address=127.0.0.1',
+    'character-set-server=utf8mb4',
+    'max_allowed_packet=64M',
+    '',
+    '[client]',
+    `port=${port}`,
+    '',
+  ].join('\n');
+  fs.writeFileSync(mariadbIni(), ini);
+}
+
 // একটা টুল চালিয়ে শেষ হওয়া পর্যন্ত অপেক্ষা (ডাটাবেস প্রথমবার তৈরির জন্য)
 function runTool(exe, args, cwd) {
   return new Promise((resolve, reject) =>
@@ -2040,6 +2072,32 @@ const DATABASES = {
     shutdownCmd: (svc) => ({
       exe: path.join(svc.dir, 'bin', 'pg_ctl.exe'),
       args: ['stop', '-D', pgDataDir(), '-m', 'fast', '-w', '-t', '20'],
+    }),
+  },
+  // MariaDB: MySQL-এর পাশাপাশি আলাদা সার্ভিস (পোর্ট 3307, ডাটা data\mariadb)। root-এর পাসওয়ার্ড ফাঁকা, শুধু এই পিসি থেকে (127.0.0.1)
+  mariadb: {
+    id: 'mariadb',
+    label: 'MariaDB',
+    svcId: 'mariadb',
+    portKey: 'mariadbPort',
+    defaultPort: 3307,
+    autoDefault: false,
+    stale: 'mariadbd',
+    get dataDir() {
+      return mariadbDataDir();
+    },
+    get info() {
+      return tr(`হোস্ট: 127.0.0.1 · পোর্ট ${getDbPort('mariadb')} · ইউজার: root · পাসওয়ার্ড ফাঁকা, শুধু এই পিসি থেকে`, `Host: 127.0.0.1 · Port ${getDbPort('mariadb')} · User: root · empty password, this PC only`);
+    },
+    prepare: (svc, port) => writeMariadbIni(svc, port),
+    isInitialized: () => fs.existsSync(path.join(mariadbDataDir(), 'mysql')),
+    // root-এর পাসওয়ার্ড ফাঁকা (--password দেওয়া হয়নি); Windows service বানানো হয় না (--service দেওয়া হয়নি)
+    init: (svc) => runTool(path.join(svc.dir, 'bin', 'mariadb-install-db.exe'), [`--datadir=${mariadbDataDir()}`, '--silent'], svc.dir),
+    spawnArgs: () => [`--defaults-file=${mariadbIni()}`, '--console'],
+    check: (svc, port) => tcpCheck(port),
+    shutdownCmd: (svc, port) => ({
+      exe: path.join(svc.dir, 'bin', 'mariadb-admin.exe'),
+      args: ['--no-defaults', '-u', 'root', '--protocol=tcp', '-h', '127.0.0.1', `--port=${port}`, 'shutdown'],
     }),
   },
   // MongoDB (R2 ধাপ ১): শুধু এই পিসি থেকে (127.0.0.1), পাসওয়ার্ড ছাড়া। ডাটা data\mongodb-এ (tools-এর বাইরে)
@@ -5023,12 +5081,13 @@ async function startupNodeApps() {
 }
 
 // ---------- টুলস ও ভার্সন ----------
-const TOOL_ORDER = ['php', 'nginx', 'apache', 'mysql', 'postgres', 'mongodb', 'phpmyadmin', 'node'];
+const TOOL_ORDER = ['php', 'nginx', 'apache', 'mysql', 'mariadb', 'postgres', 'mongodb', 'phpmyadmin', 'node'];
 const TOOL_HELP = {
   php: 'https://windows.php.net/download/',
   nginx: 'https://nginx.org/en/download.html',
   apache: 'https://www.apachelounge.com/download/',
   mysql: 'https://dev.mysql.com/downloads/mysql/',
+  mariadb: 'https://archive.mariadb.org/',
   postgres: 'https://www.enterprisedb.com/download-postgresql-binaries',
   mongodb: 'https://www.mongodb.com/try/download/community',
   phpmyadmin: 'https://www.phpmyadmin.net/downloads/',
@@ -5039,6 +5098,7 @@ const TOOL_HINT = {
   nginx: ['Windows-এর ZIP নামান', 'Download the Windows ZIP'],
   apache: ['Win64 ZIP নামান (Apache Lounge)', 'Download the Win64 ZIP (Apache Lounge)'],
   mysql: ['"ZIP Archive" (Windows x64) নামান, MSI নয়', 'Download the "ZIP Archive" (Windows x64), not the MSI'],
+  mariadb: ['ভার্সনের winx64-packages ফোল্ডার থেকে mariadb-...-winx64.zip নামান (.msi বা debugsymbols নয়)', 'Download mariadb-...-winx64.zip from the version\'s winx64-packages folder (not the .msi or debugsymbols)'],
   postgres: ['EDB-র "Windows x86-64" binaries ZIP নামান', 'Download the EDB "Windows x86-64" binaries ZIP'],
   mongodb: ['Platform "Windows x64", Package "zip" বেছে নামান (MSI নয়)', 'Choose Platform "Windows x64" and Package "zip" (not the MSI)'],
   phpmyadmin: ['all-languages.zip নামান', 'Download all-languages.zip'],

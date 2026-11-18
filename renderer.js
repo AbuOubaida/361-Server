@@ -430,7 +430,7 @@ function buildDb(db) {
     el(
       'div',
       { className: 'card-head' },
-      el('div', { className: 'card-icon', textContent: db.id === 'mysql' ? 'SQL' : db.id === 'mongodb' ? 'MG' : 'PG' }),
+      el('div', { className: 'card-icon', textContent: db.id === 'mysql' ? 'SQL' : db.id === 'mariadb' ? 'MD' : db.id === 'mongodb' ? 'MG' : 'PG' }),
       el('div', {}, el('div', { className: 'card-title', textContent: db.label }), subEl),
       badge
     ),
